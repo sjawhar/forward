@@ -1,0 +1,118 @@
+[package]
+name = "secretsd"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "Apache-2.0 OR MIT"
+description = "Session-scoped secrets broker with hardware-gated grants"
+repository = "https://github.com/sjawhar/secretsd"
+publish = false
+
+[dependencies]
+# Syscalls: SO_PEERCRED, mlockall, prctl, pidfd, openat.
+nix = { version = "0.29", features = [
+    "socket",
+    "mman",
+    "process",
+    "fs",
+    "user",
+    "resource",
+    "poll",
+    "signal",
+] }
+# Wipe plaintext on drop.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+# Structured logging to stderr; journald captures it.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Constant-time comparison for session tokens.
+subtle = "2"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+
+# NOTE: deliberately NO serde / dotenv crate. Secret plaintext must never pass
+# through a general-purpose (de)serializer's internal buffers, which we cannot
+# zeroize. The wire protocol is hand-rolled in `src/proto.rs` and secret bytes
+# are written straight from a zeroizing buffer to the socket.
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+unused_must_use = "deny"
+elided_lifetimes_in_paths = "warn"
+non_ascii_idents = "deny"
+trivial_numeric_casts = "warn"
+unused_lifetimes = "warn"
+single_use_lifetimes = "warn"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+indexing_slicing = "deny"
+mem_forget = "deny"
+arithmetic_side_effects = "warn"
+cast_possible_truncation = "warn"
+cast_possible_wrap = "warn"
+cast_precision_loss = "warn"
+cast_sign_loss = "warn"
+as_underscore = "deny"
+as_ptr_cast_mut = "deny"
+ptr_as_ptr = "warn"
+borrow_as_ptr = "warn"
+fn_to_numeric_cast_any = "deny"
+clone_on_ref_ptr = "warn"
+mutex_atomic = "warn"
+rc_buffer = "warn"
+rc_mutex = "warn"
+exit = "warn"
+allow_attributes_without_reason = "warn"
+dbg_macro = "warn"
+print_stderr = "deny"
+print_stdout = "deny"
+use_debug = "warn"
+
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+
+mod_module_files = "warn"
+empty_drop = "warn"
+empty_structs_with_brackets = "warn"
+empty_enum = "warn"
+exhaustive_enums = "warn"
+exhaustive_structs = "warn"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"
+debug = "line-tables-only"
+
+[profile.dev]
+opt-level = 0
+debug = true
+incremental = true
+codegen-units = 256
+split-debuginfo = "unpacked"
+
+[profile.miri]
+inherits = "test"
+opt-level = 1
+overflow-checks = true

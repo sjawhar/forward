@@ -1,0 +1,7 @@
+/target
+*.tar.gz
+
+# Local scratch
+/ignore/
+.omo/
+.sisyphus/

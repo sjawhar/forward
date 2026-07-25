@@ -1,0 +1,40 @@
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+yanked = "deny"
+ignore = []
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = [
+    { name = "async-std", reason = "use tokio" },
+    { name = "actix-web", reason = "use axum" },
+    { name = "chrono", reason = "use jiff" },
+    # This daemon holds secret plaintext. A general-purpose deserializer would
+    # copy it into buffers we cannot zeroize; the wire protocol is hand-rolled.
+    { name = "serde_json", reason = "no serde on the plaintext path (see Cargo.toml note)" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "warn"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
