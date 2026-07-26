@@ -1,8 +1,8 @@
 # secretsd
 
 A session-scoped secrets broker. Holds hardware-gated secrets in memory and
-hands them only to the agent session a human explicitly approved, for that
-session's lifetime.
+scopes them to the workflow of an agent session a human explicitly approved,
+for that session's lifetime.
 
 ## What problem this solves
 
@@ -27,8 +27,7 @@ client (secrets shim / opencode plugin)
    ▼
 secretsd ── grants: (scope, key) → SecretBytes, memory only
    │        scope = token-verified session | (tty, boot-id)
-   ├──► sops + age + YubiKey       (decrypt; touch = approval)
-   └──► notify-send / envoy        (announce before any hardware interaction)
+   └──► sops + age + YubiKey       (blink = physical prompt; touch = authorization)
 ```
 
 | Module | Owns |
@@ -39,7 +38,6 @@ secretsd ── grants: (scope, key) → SecretBytes, memory only
 | `src/decrypt.rs` | Spawning sops, timeout, killing the process group on cancel. |
 | `src/grants.rs` | Scopes, session registrations, grant table, revocation. |
 | `src/requests.rs` | Request state machine, single-flight YubiKey queue, cooldown, pending limits. |
-| `src/announce.rs` | Announcement composition and delivery; ack-before-decrypt. |
 | `src/server.rs` | Socket activation, poll loop, op dispatch. |
 
 ## Non-negotiables
@@ -50,9 +48,11 @@ of them is a bug even if tests pass:
 1. **No plaintext at rest.** Secret values live only in `SecretBytes` in this
    process. Never write them to disk, logs, or error messages.
 2. **No serde on the plaintext path.** See the note in `Cargo.toml`.
-3. **Announce before the blink.** No YubiKey interaction may begin until an
-   announcement channel has acknowledged the request. Unannounced hardware
-   interaction is the failure mode this design exists to avoid.
+3. **The physical touch authorizes.** A human-tier decrypt proceeds directly
+   to the YubiKey: its blink is the unspoofable physical prompt and a touch is
+   the authorization. Never add a software notification or acknowledgement
+   gate. The human initiates requests; journald is the sole after-the-fact
+   attribution record for a question such as "why did my key blink?".
 4. **Single-flight YubiKey.** At most one decrypt in flight, plus a cooldown
    longer than the PIV touch cache, so one touch can never approve two
    requests.
@@ -66,17 +66,36 @@ of them is a bug even if tests pass:
 cargo fmt --all -- --check
 cargo clippy --all-targets --all-features -- -D warnings
 cargo nextest run
-cargo +nightly miri nextest run   # required if the change touches unsafe
+cargo +nightly miri nextest run --all-features -E 'test(/^(secret|grants|requests|proto|client)::tests::/)'
 ```
 
+Miri covers the pure `secret`, `grants`, `requests`, `proto`, and `client`
+modules. It cannot cover the `unsafe` fd-3 adoption in `server.rs`: that code
+requires a real socket. Guard it through review, the `LISTEN_PID`/`LISTEN_FDS`
+validation, and the integration tests in `tests/broker.rs`.
+
 Tests must not require a real YubiKey. Inject a fake decryptor with
-`SECRETSD_SOPS_BIN` and a scratch socket with `SECRETSD_SOCKET`. Both are read
-from the **daemon's own environment** at startup (set by the systemd unit or a
-test harness) — never from a client request, since clients are untrusted.
+`SECRETSD_SOPS_BIN`, set the required `SECRETSD_HUMAN_DIR`, and use a scratch
+socket with `SECRETSD_SOCKET`. All are read from the **daemon's own
+from a client request, since clients are untrusted.
 
 ## Consumers
 
-The `secrets` shim and the OpenCode plugin that talk to this daemon live in
-`~/.dotfiles` (`shims/secrets`, `opencode/plugins/secretsd.ts`). The wire
-protocol is the contract between the repos: it carries a version in the
-handshake, and a mismatch must fail loudly rather than degrade.
+The Rust client and OpenCode plugin that speak this protocol are owned and
+tested in this repository. Package installation places the exact tested plugin
+at `~/.local/share/secretsd/opencode/plugins/secretsd.ts`; consuming dotfiles
+must load
+`file://{env:HOME}/.local/share/secretsd/opencode/plugins/secretsd.ts`.
+An absolute release-owned path keeps the plugin version coupled to its daemon
+release and cannot point at unrelated working-tree code after a partial
+dotfiles checkout.
+
+The plugin issues a random token per OpenCode session at
+`${XDG_RUNTIME_DIR}/secretsd/<sessionID>.token`, ensures the directory is
+`0700` and the file is `0600`, and exports only
+`SECRETSD_SESSION_TOKEN_FILE=<path>` to that session. The token value must
+never enter the environment. Per-session tokens provide workflow scoping and
+audit, not hard isolation between processes that share a Unix UID.
+
+The wire protocol is the contract between client and daemon: it carries a
+version in the handshake, and a mismatch must fail loudly rather than degrade.

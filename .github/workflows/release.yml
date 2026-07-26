@@ -1,0 +1,52 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+  # Attestation lets a consumer verify the archive's provenance against GitHub's
+  # trust root before it becomes the secrets broker; a checksum published in the
+  # same release would only catch transport corruption.
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release --locked
+      - name: Package
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          staging="secretsd-${tag}-linux-x86_64"
+          mkdir -p "$staging/bin" "$staging/share/secretsd/opencode/plugins" "$staging/systemd"
+          install -m 0755 target/release/secrets "$staging/bin/secrets"
+          install -m 0644 opencode/plugins/secretsd.ts "$staging/share/secretsd/opencode/plugins/secretsd.ts"
+          install -m 0644 systemd/secretsd.service "$staging/systemd/secretsd.service"
+          install -m 0644 systemd/secretsd.socket "$staging/systemd/secretsd.socket"
+          tar czf "${staging}.tar.gz" "$staging"
+      - name: Verify release archive
+        run: |
+          set -euo pipefail
+          staging="secretsd-${GITHUB_REF_NAME}-linux-x86_64"
+          archive="${staging}.tar.gz"
+          for artifact in \
+            "$staging/bin/secrets" \
+            "$staging/share/secretsd/opencode/plugins/secretsd.ts" \
+            "$staging/systemd/secretsd.service" \
+            "$staging/systemd/secretsd.socket"; do
+            if ! tar --list --gzip --file="$archive" | grep --fixed-strings --line-regexp -- "$artifact" >/dev/null; then
+              printf 'release archive is missing required artifact: %s\n' "$artifact" >&2
+              exit 1
+            fi
+          done
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: secretsd-*-linux-x86_64.tar.gz
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: secretsd-*-linux-x86_64.tar.gz
