@@ -1,5 +1,7 @@
 use clap::{Parser, Subcommand};
 
+mod target;
+
 #[derive(Parser)]
 #[command(
     name = "forward",
