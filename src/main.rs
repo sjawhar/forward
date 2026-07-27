@@ -2,6 +2,11 @@ use clap::{Parser, Subcommand};
 
 mod target;
 
+#[cfg_attr(not(test), expect(dead_code, reason = "wired in Task 7"))]
+mod config;
+#[cfg_attr(not(test), expect(dead_code, reason = "wired in Task 7"))]
+mod policy;
+
 #[derive(Parser)]
 #[command(
     name = "forward",
