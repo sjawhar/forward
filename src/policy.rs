@@ -20,14 +20,19 @@ pub fn decide(cfg: &Config, url: &Url) -> Decision {
     }
 }
 
-/// Matches `hostpart[/path-prefix]`: host matching is case-insensitive, `*.d` matches
+/// Matches `hostpart[:port][/path-prefix]`: host matching is case-insensitive, `*.d` matches
 /// subdomains only, inner `*` matches exactly one label, loopback aliases are equivalent,
-/// and path prefixes match on segment boundaries.
+/// and path prefixes match on segment boundaries. A specified port must match the URL's
+/// effective port, so `localhost:80` also matches `http://localhost/`.
 pub fn allow_matches(pattern: &str, url: &Url) -> bool {
     let (host_pattern, path_prefix) = match pattern.split_once('/') {
         Some((host_pattern, path_prefix)) => (host_pattern, path_prefix),
         None => (pattern, ""),
     };
+    let (host_pattern, pattern_port) = split_host_and_port(host_pattern);
+    if pattern_port.is_some_and(|port| url.port_or_known_default() != Some(port)) {
+        return false;
+    }
     let host_pattern = host_pattern.to_ascii_lowercase();
     let host = match url.host_str() {
         Some(host) => host.to_ascii_lowercase(),
@@ -51,6 +56,25 @@ pub fn allow_matches(pattern: &str, url: &Url) -> bool {
     let path = url.path();
     let prefix = format!("/{path_prefix}");
     path_prefix.is_empty() || path == prefix || path.starts_with(&format!("{prefix}/"))
+}
+
+fn split_host_and_port(host_pattern: &str) -> (&str, Option<u16>) {
+    if host_pattern.starts_with('[') {
+        return host_pattern.find(']').map_or((host_pattern, None), |end| {
+            let suffix = &host_pattern[end + 1..];
+            suffix
+                .strip_prefix(':')
+                .and_then(|port| port.parse().ok())
+                .map_or((host_pattern, None), |port| {
+                    (&host_pattern[..=end], Some(port))
+                })
+        });
+    }
+
+    host_pattern
+        .rsplit_once(':')
+        .and_then(|(host, port)| port.parse().ok().map(|port| (host, Some(port))))
+        .unwrap_or((host_pattern, None))
 }
 
 fn normalize_loopback_alias(host: &str) -> &str {
@@ -166,6 +190,37 @@ mod tests {
             "localhost",
             &u("http://localhost:12802/home/u/x.md")
         ));
+    }
+
+    #[test]
+    fn port_qualified_localhost_matches_exact_loopback_port() {
+        assert!(allow_matches(
+            "localhost:12802",
+            &u("http://localhost:12802/x")
+        ));
+        assert!(allow_matches(
+            "localhost:12802",
+            &u("http://127.0.0.1:12802/x")
+        ));
+    }
+
+    #[test]
+    fn port_qualified_localhost_rejects_other_port() {
+        assert!(!allow_matches(
+            "localhost:12802",
+            &u("http://localhost:3000/")
+        ));
+    }
+
+    #[test]
+    fn portless_localhost_pattern_matches_any_port() {
+        assert!(allow_matches("localhost", &u("http://localhost:3000/")));
+    }
+
+    #[test]
+    fn port_qualified_localhost_matches_the_scheme_default_port() {
+        assert!(allow_matches("localhost:80", &u("http://localhost/")));
+        assert!(!allow_matches("localhost:80", &u("https://localhost/")));
     }
 
     #[test]

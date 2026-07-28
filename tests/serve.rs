@@ -149,3 +149,59 @@ fn continues_after_client_disconnect_and_rejects_untrusted_host() {
         .unwrap();
     assert_eq!(response.into_string().unwrap(), "alive");
 }
+
+#[test]
+fn adds_browser_boundary_headers_to_every_content_class() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("doc.md"), "# Title").unwrap();
+    std::fs::write(dir.path().join("plain.txt"), "plain text").unwrap();
+    let (child, port) = spawn_serve(dir.path());
+    let _guard = Guard(child);
+    let base = format!("http://127.0.0.1:{port}");
+    let path = dir.path().to_str().unwrap();
+
+    assert_browser_boundary_headers(&ureq::get(&format!("{base}{path}/doc.md")).call().unwrap());
+    assert_browser_boundary_headers(
+        &ureq::get(&format!("{base}{path}/plain.txt"))
+            .call()
+            .unwrap(),
+    );
+    assert_browser_boundary_headers(&ureq::get(&format!("{base}{path}/")).call().unwrap());
+}
+
+#[test]
+fn rendered_markdown_does_not_embed_executable_scripts() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("doc.md"),
+        "# Title\n\n```rust\nlet x = 1;\n```",
+    )
+    .unwrap();
+    let (child, port) = spawn_serve(dir.path());
+    let _guard = Guard(child);
+    let page = ureq::get(&format!(
+        "http://127.0.0.1:{port}{}/doc.md",
+        dir.path().to_str().unwrap()
+    ))
+    .call()
+    .unwrap()
+    .into_string()
+    .unwrap();
+
+    assert!(!page.contains("<script"));
+    assert!(!page.contains("hljs.highlightAll"));
+}
+
+fn assert_browser_boundary_headers(response: &ureq::Response) {
+    assert_eq!(
+        response.header("content-security-policy"),
+        Some(
+            "sandbox; default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net"
+        )
+    );
+    assert_eq!(response.header("x-content-type-options"), Some("nosniff"));
+    assert_eq!(
+        response.header("cross-origin-resource-policy"),
+        Some("same-origin")
+    );
+}

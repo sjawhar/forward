@@ -11,6 +11,14 @@ use url::Url;
 
 const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 const TEXT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
+const RESPONSE_SECURITY_HEADERS: [(&[u8], &[u8]); 3] = [
+    (
+        b"Content-Security-Policy",
+        b"sandbox; default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net",
+    ),
+    (b"X-Content-Type-Options", b"nosniff"),
+    (b"Cross-Origin-Resource-Policy", b"same-origin"),
+];
 
 type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
 
@@ -56,6 +64,16 @@ impl Reply {
             headers,
         } = self;
         let response = Response::from_data(body).with_status_code(StatusCode(status));
+        let response =
+            RESPONSE_SECURITY_HEADERS
+                .iter()
+                .fold(
+                    response,
+                    |response, (name, value)| match Header::from_bytes(*name, *value) {
+                        Ok(header) => response.with_header(header),
+                        Err(()) => response,
+                    },
+                );
         match Header::from_bytes(b"Content-Type", content_type.as_bytes()) {
             Ok(header) => headers
                 .into_iter()

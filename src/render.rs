@@ -13,7 +13,6 @@ pub(crate) const MARKDOWN_STYLE: &str = r#"</title>
           href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown-dark.css">
     <link rel="stylesheet"
           href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
-    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
     <style>
         body {
             background: #0d1117;
@@ -32,7 +31,6 @@ pub(crate) const MARKDOWN_STYLE: &str = r#"</title>
     <article class="markdown-body">
 "#;
 pub(crate) const MARKDOWN_TAIL: &str = r#"    </article>
-    <script>document.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
 </body>
 </html>"#;
 
