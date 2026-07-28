@@ -11,12 +11,14 @@ pub struct Config {
     pub notifier: Vec<String>,
     #[serde(default)]
     pub clipboard: Vec<String>,
-    #[serde(default = "default_ssh")]
-    pub ssh: Vec<String>,
-    #[serde(default = "default_tunnel")]
-    pub tunnel_host: String,
     #[serde(default = "default_forward_ttl_secs")]
     pub forward_ttl_secs: u64,
+    #[serde(default = "default_listen")]
+    pub listen: String,
+    #[serde(default)]
+    pub peer: String,
+    #[serde(default = "default_bridge_port")]
+    pub bridge_port: u16,
     #[serde(default)]
     pub allow: Vec<String>,
 }
@@ -42,6 +44,10 @@ pub enum ConfigError {
         #[source]
         source: toml::de::Error,
     },
+    #[error("forward: {field} must be a literal IP address, got {value:?}")]
+    Address { field: &'static str, value: String },
+    #[error("forward: a non-loopback listen address requires an explicit peer")]
+    PeerRequired,
 }
 
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
@@ -61,15 +67,75 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 }
 
 impl Config {
+    pub fn listen_ip(&self) -> Result<std::net::IpAddr, ConfigError> {
+        parse_ip("listen", &self.listen)
+    }
+
+    /// The counterpart's address, or `None` when none is configured.
+    ///
+    /// Always a literal address. There is no hostname counterpart to this
+    /// field: every outbound connection dials this literal value, so no name
+    /// is ever resolved and no DNS or admin-console state can move the
+    /// identity the inbound check in `peer::authorized` compares against.
+    pub fn peer_ip(&self) -> Result<Option<std::net::IpAddr>, ConfigError> {
+        if self.peer.is_empty() {
+            return Ok(None);
+        }
+        parse_ip("peer", &self.peer).map(Some)
+    }
+
+    /// Fail closed: a routable listen address without a named counterpart
+    /// would accept anything that can reach it.
+    pub fn validate(&self) -> Result<(), ConfigError> {
+        let listen = self.listen_ip()?;
+        // A wildcard bind exposes the path-serving port on every interface;
+        // require one specific address even when a peer is configured.
+        if listen.is_unspecified() {
+            return Err(ConfigError::Address {
+                field: "listen",
+                value: self.listen.clone(),
+            });
+        }
+        let peer = self.peer_ip()?;
+        if let Some(peer) = peer
+            && (peer.is_unspecified()
+                || peer.is_multicast()
+                || peer == std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST))
+        {
+            // These values do not name an individual counterpart, so they must
+            // not satisfy the peer requirement for a routable listener.
+            return Err(ConfigError::Address {
+                field: "peer",
+                value: self.peer.clone(),
+            });
+        }
+        if !listen.is_loopback() && peer.is_none() {
+            return Err(ConfigError::PeerRequired);
+        }
+        Ok(())
+    }
+
+    /// Build the on-disk defaults without touching the filesystem.
+    ///
+    /// `#[doc(hidden)] pub` and deliberately **not** `#[cfg(test)]`: the
+    /// integration tests under `tests/` are separate crates that link this one
+    /// normally, so a `#[cfg(test)]` item compiles here and then fails to
+    /// resolve there. Hidden from the rendered docs, not from the linker.
+    #[doc(hidden)]
+    pub fn default_values_for_test() -> Self {
+        Self::default_values()
+    }
+
     fn default_values() -> Self {
         Self {
             mode: default_mode(),
             opener: default_opener(),
             notifier: Vec::new(),
             clipboard: Vec::new(),
-            ssh: default_ssh(),
-            tunnel_host: default_tunnel(),
             forward_ttl_secs: default_forward_ttl_secs(),
+            listen: default_listen(),
+            peer: String::new(),
+            bridge_port: default_bridge_port(),
             allow: Vec::new(),
         }
     }
@@ -83,70 +149,24 @@ fn default_opener() -> Vec<String> {
     vec!["xdg-open".to_owned()]
 }
 
-fn default_ssh() -> Vec<String> {
-    vec!["ssh".to_owned()]
-}
-
-fn default_tunnel() -> String {
-    "devbox-tunnel".to_owned()
-}
-
 fn default_forward_ttl_secs() -> u64 {
     300
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn missing_file_gives_defaults() {
-        let cfg = load(std::path::Path::new("/no/such/config.toml")).unwrap();
-        assert_eq!(cfg.mode, Mode::Allowlist);
-        assert_eq!(cfg.opener, vec!["xdg-open".to_string()]);
-        assert!(cfg.allow.is_empty());
-    }
-
-    #[test]
-    fn parses_full_config() {
-        let f = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(
-            &f,
-            r#"
-mode = "auto"
-opener = ["firefox"]
-allow = ["localhost", "*.awsapps.com"]
-"#,
-        )
-        .unwrap();
-        let cfg = load(f.path()).unwrap();
-        assert_eq!(cfg.mode, Mode::Auto);
-        assert_eq!(cfg.opener, vec!["firefox".to_string()]);
-        assert!(cfg.notifier.is_empty());
-        assert_eq!(cfg.ssh, vec!["ssh".to_string()]);
-        assert_eq!(cfg.tunnel_host, "devbox-tunnel");
-        assert_eq!(cfg.forward_ttl_secs, 300);
-        assert_eq!(cfg.allow.len(), 2);
-    }
-
-    #[test]
-    fn unknown_field_errors() {
-        let f = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(&f, "moed = \"auto\"\n").unwrap();
-        assert!(load(f.path()).is_err());
-    }
-
-    #[test]
-    fn malformed_toml_errors() {
-        let f = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(&f, "mode = [\n").unwrap();
-        assert!(load(f.path()).is_err());
-    }
-
-    #[test]
-    fn directory_errors_as_read() {
-        let directory = tempfile::tempdir().unwrap();
-        let err = load(directory.path()).unwrap_err();
-        assert!(matches!(err, ConfigError::Read { .. }));
-    }
+fn default_listen() -> String {
+    "127.0.0.1".to_owned()
 }
+
+fn default_bridge_port() -> u16 {
+    12_801
+}
+
+fn parse_ip(field: &'static str, value: &str) -> Result<std::net::IpAddr, ConfigError> {
+    value.parse().map_err(|_| ConfigError::Address {
+        field,
+        value: value.to_owned(),
+    })
+}
+
+#[cfg(test)]
+mod tests;

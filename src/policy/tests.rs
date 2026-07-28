@@ -188,13 +188,7 @@ fn empty_allowlist_notifies_everything() {
 
 fn test_cfg(allow: Vec<String>) -> crate::config::Config {
     crate::config::Config {
-        mode: crate::config::Mode::Allowlist,
-        opener: vec!["xdg-open".into()],
-        notifier: vec![],
-        clipboard: vec![],
-        ssh: vec!["ssh".into()],
-        tunnel_host: "devbox-tunnel".into(),
-        forward_ttl_secs: 300,
         allow,
+        ..crate::config::Config::default_values_for_test()
     }
 }

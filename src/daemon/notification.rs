@@ -1,5 +1,5 @@
-use crate::config::Config;
 use crate::process::{WaitResult, run_command, stderr};
+use forward::config::Config;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -126,7 +126,7 @@ fn notify_with_approval(command: Command, url: &Url) -> bool {
                 false
             }
         }
-        Ok(WaitResult::TimedOut(_)) => {
+        Ok(WaitResult::TimedOut) => {
             // A killed notifier may have a captured `default`, but it is untrusted and never approves.
             eprintln!("{}", notification_expired_message(url));
             false

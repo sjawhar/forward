@@ -1,4 +1,4 @@
-use super::daemon_support::{send, start, stub, wait_for};
+use super::daemon_support::{send, spawn_bridge, start, stub, test_port, wait_for};
 
 #[test]
 fn allowlist_miss_notifies_click_opens() {
@@ -126,10 +126,13 @@ fn failing_custom_notifier_does_not_open() {
 
 #[test]
 fn declined_notification_does_not_forward_or_open() {
+    // Given: a declining notifier and a reachable callback bridge.
     let dir = tempfile::tempdir().unwrap();
     let opened = dir.path().join("opened");
     let notified = dir.path().join("notified");
-    let sshed = dir.path().join("sshed");
+    let bridged = dir.path().join("bridged");
+    let bridge_port = spawn_bridge(&bridged);
+    let callback_port = test_port();
     let opener = stub(
         dir.path(),
         "opener",
@@ -140,27 +143,30 @@ fn declined_notification_does_not_forward_or_open() {
         "notifier",
         &format!("echo \"$@\" >> {}", notified.display()),
     );
-    let ssh = stub(
-        dir.path(),
-        "ssh",
-        &format!("echo \"$@\" >> {}", sshed.display()),
-    );
     let (daemon, port) = start(
         dir.path(),
         &format!(
             r#"
 opener = ["{opener}"]
 notifier = ["{notifier}"]
-ssh = ["{ssh}"]
+peer = "127.0.0.1"
+bridge_port = {bridge_port}
 "#
         ),
     );
-    send(port, "http://localhost:8400/declined");
-    assert!(wait_for(&notified).contains("http://localhost:8400/declined"));
-    daemon.wait_for_log("notification declined: http://localhost:8400/declined");
+    // When: a loopback callback URL is declined.
+    let url = format!("http://localhost:{callback_port}/declined");
+    send(port, &url);
+    assert!(wait_for(&notified).contains(&url));
+    daemon.wait_for_log(&format!("notification declined: {url}"));
+
+    // Then: it neither opens nor leases the callback port.
     assert!(
-        !sshed.exists(),
-        "declined URLs must not create SSH forwards"
+        !daemon
+            .log()
+            .contains(&format!("callback port {callback_port}")),
+        "declined URLs must not lease callback ports"
     );
+    assert!(!bridged.exists(), "declined URLs must not dial the bridge");
     assert!(!opened.exists(), "declined URLs must not open");
 }

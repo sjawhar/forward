@@ -26,7 +26,7 @@ pub enum TargetError {
     UnsupportedScheme(String),
 }
 
-pub fn to_url(arg: &str, files_port: u16) -> Result<Url, TargetError> {
+pub fn to_url(arg: &str, host: &str, files_port: u16) -> Result<Url, TargetError> {
     if let Ok(url) = Url::parse(arg) {
         if url.cannot_be_a_base() {
             return Err(TargetError::UnsupportedScheme(url.scheme().to_owned()));
@@ -38,8 +38,21 @@ pub fn to_url(arg: &str, files_port: u16) -> Result<Url, TargetError> {
         _ => TargetError::Invalid(format!("{arg}: {e}")),
     })?;
     let encoded = encode_path(&abs);
-    Url::parse(&format!("http://localhost:{files_port}/{encoded}"))
+    Url::parse(&format!("http://{}:{files_port}/{encoded}", url_host(host)))
         .map_err(|e| TargetError::Invalid(e.to_string()))
+}
+
+/// A configured `listen` address rendered as a URL authority.
+///
+/// `listen` holds a bare literal address, so an IPv6 one has to be bracketed
+/// before a URL will parse. Anything else passes through untouched. Public
+/// because `doctor` builds `Host` headers from the same addresses.
+pub fn url_host(host: &str) -> String {
+    if host.parse::<std::net::Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host.to_owned()
+    }
 }
 
 fn encode_path(path: &Path) -> String {
@@ -59,15 +72,15 @@ mod tests {
 
     #[test]
     fn url_passes_through() {
-        let u = to_url("https://example.com/x?y=1", 12802).unwrap();
+        let u = to_url("https://example.com/x?y=1", "127.0.0.1", 12802).unwrap();
         assert_eq!(u.as_str(), "https://example.com/x?y=1");
     }
 
     #[test]
     fn existing_file_maps_to_files_url() {
         let f = tempfile::NamedTempFile::new().unwrap();
-        let u = to_url(f.path().to_str().unwrap(), 12802).unwrap();
-        assert_eq!(u.host_str(), Some("localhost"));
+        let u = to_url(f.path().to_str().unwrap(), "127.0.0.1", 12802).unwrap();
+        assert_eq!(u.host_str(), Some("127.0.0.1"));
         assert_eq!(u.port(), Some(12802));
         assert_eq!(u.scheme(), "http");
         let expected_directory = format!("/{}/", encode_path(f.path().parent().unwrap()));
@@ -85,14 +98,14 @@ mod tests {
         let dir = tempfile::tempdir_in(&cwd).unwrap();
         std::fs::write(dir.path().join("a b.md"), "x").unwrap();
         let rel = dir.path().strip_prefix(&cwd).unwrap().join("a b.md");
-        let u = to_url(rel.to_str().unwrap(), 12802).unwrap();
+        let u = to_url(rel.to_str().unwrap(), "127.0.0.1", 12802).unwrap();
         assert!(u.path().ends_with("/a%20b.md"));
     }
 
     #[test]
     fn missing_path_errors() {
         assert!(matches!(
-            to_url("/no/such/file", 12802),
+            to_url("/no/such/file", "127.0.0.1", 12802),
             Err(TargetError::NotFound(_))
         ));
     }
@@ -123,7 +136,7 @@ mod tests {
 
     #[test]
     fn opaque_url_scheme_is_not_openable() {
-        let error = to_url("mailto:user@example.com", 12802).unwrap_err();
+        let error = to_url("mailto:user@example.com", "127.0.0.1", 12802).unwrap_err();
 
         assert_eq!(
             error.to_string(),
@@ -138,7 +151,7 @@ mod tests {
         let name = "p%20c#h?q\\b.md";
         std::fs::write(dir.path().join(name), "x").unwrap();
         let rel = dir.path().strip_prefix(&cwd).unwrap().join(name);
-        let u = to_url(rel.to_str().unwrap(), 12802).unwrap();
+        let u = to_url(rel.to_str().unwrap(), "127.0.0.1", 12802).unwrap();
         assert!(u.path().ends_with("/p%2520c%23h%3Fq%5Cb.md"));
     }
 
@@ -153,7 +166,7 @@ mod tests {
         let link = dir.path().join("document-link.md");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let u = to_url(link.to_str().unwrap(), 12802).unwrap();
+        let u = to_url(link.to_str().unwrap(), "127.0.0.1", 12802).unwrap();
 
         assert!(u.path().contains("/caf%E9/document.md"));
     }
@@ -164,8 +177,35 @@ mod tests {
         let child = f.path().join("child.md");
 
         assert!(matches!(
-            to_url(child.to_str().unwrap(), 12802),
+            to_url(child.to_str().unwrap(), "127.0.0.1", 12802),
             Err(TargetError::Invalid(_))
         ));
+    }
+
+    #[test]
+    fn preview_url_names_this_machine_not_the_counterpart() {
+        // Given: a devbox serving previews on its own tailnet address.
+        let f = tempfile::NamedTempFile::new().unwrap();
+
+        // When: a path is minted for the laptop to open.
+        let u = to_url(f.path().to_str().unwrap(), "100.64.0.1", 12802).unwrap();
+
+        // Then: the URL names the machine holding the file. The counterpart is
+        // where the browser is, never where the file is.
+        assert_eq!(u.host_str(), Some("100.64.0.1"));
+        assert_eq!(u.port(), Some(12802));
+    }
+
+    #[test]
+    fn an_ipv6_listen_address_is_bracketed() {
+        // Given: a listen address held as a bare IPv6 literal, which is how
+        // Config stores it.
+        let f = tempfile::NamedTempFile::new().unwrap();
+
+        // When: a preview URL is minted against it.
+        let u = to_url(f.path().to_str().unwrap(), "::1", 12802).unwrap();
+
+        // Then: it parses, because the authority was bracketed first.
+        assert_eq!(u.host_str(), Some("[::1]"));
     }
 }
