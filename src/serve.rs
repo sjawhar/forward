@@ -1,5 +1,6 @@
+use crate::render::{MARKDOWN_HEAD, MARKDOWN_STYLE, MARKDOWN_TAIL, encode_path, escape_html};
 use comrak::Options;
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode, percent_encode};
+use percent_encoding::percent_decode;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
@@ -10,39 +11,6 @@ use url::Url;
 
 const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 const TEXT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
-const MARKDOWN_HEAD: &str = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>"#;
-const MARKDOWN_STYLE: &str = r#"</title>
-    <link rel="stylesheet"
-          href="https://cdn.jsdelivr.net/npm/github-markdown-css@5/github-markdown-dark.css">
-    <link rel="stylesheet"
-          href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/styles/github-dark.min.css">
-    <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11/build/highlight.min.js"></script>
-    <style>
-        body {
-            background: #0d1117;
-            padding: 2rem;
-            display: flex;
-            justify-content: center;
-        }
-        .markdown-body {
-            max-width: 980px;
-            width: 100%;
-            padding: 2rem;
-        }
-    </style>
-</head>
-<body>
-    <article class="markdown-body">
-"#;
-const MARKDOWN_TAIL: &str = r#"    </article>
-    <script>document.addEventListener('DOMContentLoaded',()=>hljs.highlightAll());</script>
-</body>
-</html>"#;
 
 type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
 
@@ -254,22 +222,4 @@ fn directory_reply(path: &Path) -> Result<Reply, io::Error> {
     }
     document.push_str("</ul></body></html>");
     Ok(Reply::new(200, HTML_CONTENT_TYPE, document))
-}
-
-fn encode_path(path: &Path) -> String {
-    path.as_os_str()
-        .as_bytes()
-        .split(|byte| *byte == b'/')
-        .map(|segment| percent_encode(segment, NON_ALPHANUMERIC).to_string())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn escape_html(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
 }

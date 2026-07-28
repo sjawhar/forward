@@ -1,19 +1,19 @@
 use clap::{Parser, Subcommand};
 use std::io::Write as _;
 
+mod config;
+mod daemon;
+mod localhost;
+mod policy;
+mod process;
+mod render;
+mod request;
 mod send;
 mod serve;
 mod target;
 
 const CHANNEL_PORT: u16 = 12_800;
-const FILES_PORT: u16 = 12_802;
-
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in Task 7"))]
-mod config;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in Task 7"))]
-mod localhost;
-#[cfg_attr(not(test), expect(dead_code, reason = "wired in Task 7"))]
-mod policy;
+pub(crate) const FILES_PORT: u16 = 12_802;
 
 #[derive(Parser)]
 #[command(
@@ -63,8 +63,33 @@ fn main() -> anyhow::Result<()> {
             serve::run(port).unwrap_or_else(|error| exit_with_error(error));
             Ok(())
         }
-        Command::Daemon { port, .. } => anyhow::bail!("not implemented: daemon {port}"),
+        Command::Daemon { port, config } => {
+            let config_path = config.unwrap_or_else(|| {
+                default_config_path().unwrap_or_else(|error| exit_with_error(error))
+            });
+            let config = config::load(&config_path).unwrap_or_else(|error| exit_with_error(error));
+            daemon::run(config, port).unwrap_or_else(|error| exit_with_error(error));
+            Ok(())
+        }
     }
+}
+
+fn default_config_path() -> anyhow::Result<std::path::PathBuf> {
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from)
+        && !path.as_os_str().is_empty()
+        && path.is_absolute()
+    {
+        return Ok(path.join("forward/config.toml"));
+    }
+    if let Some(path) = std::env::var_os("HOME").map(std::path::PathBuf::from)
+        && !path.as_os_str().is_empty()
+        && path.is_absolute()
+    {
+        return Ok(path.join(".config/forward/config.toml"));
+    }
+    anyhow::bail!(
+        "forward: cannot resolve config path: XDG_CONFIG_HOME and HOME are unset or not an absolute path"
+    )
 }
 
 fn exit_with_error(error: impl std::fmt::Display) -> ! {
