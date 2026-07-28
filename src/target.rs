@@ -1,48 +1,55 @@
 use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use url::Url;
+
+const PATH_SEGMENT: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'#')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'?')
+    .add(b'\\')
+    .add(b'`')
+    .add(b'{')
+    .add(b'}');
 
 #[derive(Debug, thiserror::Error)]
 pub enum TargetError {
     #[error("forward: path not found: {0}")]
     NotFound(String),
-    #[error("forward: cannot map to URL: {0}")]
+    #[error("forward: cannot use target: {0}")]
     Invalid(String),
+    #[error("forward: URL scheme is not openable: {0}")]
+    UnsupportedScheme(String),
 }
 
 pub fn to_url(arg: &str, files_port: u16) -> Result<Url, TargetError> {
-    if let Ok(u) = Url::parse(arg)
-        && !u.cannot_be_a_base()
-    {
-        return Ok(u);
+    if let Ok(url) = Url::parse(arg) {
+        if url.cannot_be_a_base() {
+            return Err(TargetError::UnsupportedScheme(url.scheme().to_owned()));
+        }
+        return Ok(url);
     }
     let abs = std::fs::canonicalize(arg).map_err(|e| match e.kind() {
         std::io::ErrorKind::NotFound => TargetError::NotFound(arg.to_string()),
         _ => TargetError::Invalid(format!("{arg}: {e}")),
     })?;
-    // Encode raw Unix path bytes; do NOT encode `.`, `-`, `_`, `~`.
-    const PATH_SEGMENT: &AsciiSet = &CONTROLS
-        .add(b' ')
-        .add(b'"')
-        .add(b'#')
-        .add(b'%')
-        .add(b'<')
-        .add(b'>')
-        .add(b'?')
-        .add(b'\\')
-        .add(b'`')
-        .add(b'{')
-        .add(b'}');
-    let encoded: String = abs
-        .components()
+    let encoded = encode_path(&abs);
+    Url::parse(&format!("http://localhost:{files_port}/{encoded}"))
+        .map_err(|e| TargetError::Invalid(e.to_string()))
+}
+
+fn encode_path(path: &Path) -> String {
+    path.components()
         .filter_map(|c| match c {
             std::path::Component::RootDir => None,
             c => Some(percent_encode(c.as_os_str().as_bytes(), PATH_SEGMENT).to_string()),
         })
         .collect::<Vec<_>>()
-        .join("/");
-    Url::parse(&format!("http://localhost:{files_port}/{encoded}"))
-        .map_err(|e| TargetError::Invalid(e.to_string()))
+        .join("/")
 }
 
 #[cfg(test)]
@@ -63,8 +70,8 @@ mod tests {
         assert_eq!(u.host_str(), Some("localhost"));
         assert_eq!(u.port(), Some(12802));
         assert_eq!(u.scheme(), "http");
-        let expected_directory = url::Url::from_directory_path(f.path().parent().unwrap()).unwrap();
-        assert!(u.path().starts_with(expected_directory.path()));
+        let expected_directory = format!("/{}/", encode_path(f.path().parent().unwrap()));
+        assert!(u.path().starts_with(&expected_directory));
         assert!(
             u.path()
                 .ends_with(f.path().file_name().unwrap().to_str().unwrap())
@@ -111,7 +118,17 @@ mod tests {
         let rendered = error.to_string();
 
         // Then: it identifies the forward command.
-        assert_eq!(rendered, "forward: cannot map to URL: invalid input");
+        assert_eq!(rendered, "forward: cannot use target: invalid input");
+    }
+
+    #[test]
+    fn opaque_url_scheme_is_not_openable() {
+        let error = to_url("mailto:user@example.com", 12802).unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "forward: URL scheme is not openable: mailto"
+        );
     }
 
     #[test]

@@ -9,10 +9,14 @@ pub struct Config {
     pub opener: Vec<String>,
     #[serde(default)]
     pub notifier: Vec<String>,
+    #[serde(default)]
+    pub clipboard: Vec<String>,
     #[serde(default = "default_ssh")]
     pub ssh: Vec<String>,
     #[serde(default = "default_tunnel")]
     pub tunnel_host: String,
+    #[serde(default = "default_forward_ttl_secs")]
+    pub forward_ttl_secs: u64,
     #[serde(default)]
     pub allow: Vec<String>,
 }
@@ -62,8 +66,10 @@ impl Config {
             mode: default_mode(),
             opener: default_opener(),
             notifier: Vec::new(),
+            clipboard: Vec::new(),
             ssh: default_ssh(),
             tunnel_host: default_tunnel(),
+            forward_ttl_secs: default_forward_ttl_secs(),
             allow: Vec::new(),
         }
     }
@@ -83,6 +89,10 @@ fn default_ssh() -> Vec<String> {
 
 fn default_tunnel() -> String {
     "devbox-tunnel".to_owned()
+}
+
+fn default_forward_ttl_secs() -> u64 {
+    300
 }
 
 #[cfg(test)]
@@ -115,6 +125,7 @@ allow = ["localhost", "*.awsapps.com"]
         assert!(cfg.notifier.is_empty());
         assert_eq!(cfg.ssh, vec!["ssh".to_string()]);
         assert_eq!(cfg.tunnel_host, "devbox-tunnel");
+        assert_eq!(cfg.forward_ttl_secs, 300);
         assert_eq!(cfg.allow.len(), 2);
     }
 
