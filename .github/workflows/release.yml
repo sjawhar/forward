@@ -1,27 +1,52 @@
 name: release
+
 on:
   push:
     tags: ["v*"]
+
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
+  quality:
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
   build:
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-musl
-            runner: ubuntu-latest
-          - target: aarch64-unknown-linux-musl
-            runner: ubuntu-24.04-arm
-    runs-on: ${{ matrix.runner }}
+    needs: quality
+    runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y musl-tools
-      - run: rustup target add ${{ matrix.target }}
-      - run: cargo build --release --target ${{ matrix.target }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - run: cargo install cross --version 0.2.5 --locked
       - run: |
-          tar -C target/${{ matrix.target }}/release -czf \
-            forward-${{ matrix.target }}.tar.gz forward
-      - uses: softprops/action-gh-release@v2
+          for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            export CARGO_TARGET_DIR="target/cross-$target"
+            cross build --locked --release --target "$target"
+            archive="forward-$target.tar.gz"
+            tar -C "$CARGO_TARGET_DIR/$target/release" -czf "$archive" forward
+            test "$(tar -tzf "$archive")" = forward
+          done
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          files: forward-${{ matrix.target }}.tar.gz
+          name: release-assets
+          path: forward-*-unknown-linux-musl.tar.gz
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-assets
+          path: release-assets
+      - uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: release-assets/forward-*-unknown-linux-musl.tar.gz
