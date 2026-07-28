@@ -2,6 +2,7 @@ use clap::{Parser, Subcommand};
 use std::io::Write as _;
 
 mod send;
+mod serve;
 mod target;
 
 const CHANNEL_PORT: u16 = 12_800;
@@ -58,7 +59,10 @@ fn main() -> anyhow::Result<()> {
             let _ = send::osc52_copy(url.as_str());
             Ok(())
         }
-        Command::Serve { port } => anyhow::bail!("not implemented: serve {port}"),
+        Command::Serve { port } => {
+            serve::run(port).unwrap_or_else(|error| exit_with_error(error));
+            Ok(())
+        }
         Command::Daemon { port, .. } => anyhow::bail!("not implemented: daemon {port}"),
     }
 }
