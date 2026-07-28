@@ -4,16 +4,12 @@ use url::Url;
 
 #[derive(Debug, thiserror::Error)]
 pub enum TargetError {
-    #[error("path not found: {0}")]
+    #[error("forward: path not found: {0}")]
     NotFound(String),
-    #[error("cannot map to URL: {0}")]
+    #[error("forward: cannot map to URL: {0}")]
     Invalid(String),
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "target integration precedes its CLI callers")
-)]
 pub fn to_url(arg: &str, files_port: u16) -> Result<Url, TargetError> {
     if let Ok(u) = Url::parse(arg)
         && !u.cannot_be_a_base()
@@ -92,6 +88,30 @@ mod tests {
             to_url("/no/such/file", 12802),
             Err(TargetError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn not_found_error_has_forward_prefix() {
+        // Given: a missing target error.
+        let error = TargetError::NotFound("missing.md".to_string());
+
+        // When: it is rendered for the CLI.
+        let rendered = error.to_string();
+
+        // Then: it identifies the forward command.
+        assert_eq!(rendered, "forward: path not found: missing.md");
+    }
+
+    #[test]
+    fn invalid_error_has_forward_prefix() {
+        // Given: an invalid target error.
+        let error = TargetError::Invalid("invalid input".to_string());
+
+        // When: it is rendered for the CLI.
+        let rendered = error.to_string();
+
+        // Then: it identifies the forward command.
+        assert_eq!(rendered, "forward: cannot map to URL: invalid input");
     }
 
     #[test]
