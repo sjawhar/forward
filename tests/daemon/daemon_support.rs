@@ -57,6 +57,11 @@ pub fn start(dir: &Path, config_body: &str) -> (Daemon, u16) {
         .local_addr()
         .unwrap()
         .port();
+    let existing_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(dir.to_path_buf()).chain(std::env::split_paths(&existing_path)),
+    )
+    .unwrap();
     let mut child = Command::new(env!("CARGO_BIN_EXE_forward"))
         .args([
             "daemon",
@@ -65,6 +70,7 @@ pub fn start(dir: &Path, config_body: &str) -> (Daemon, u16) {
             "--config",
             config.to_str().unwrap(),
         ])
+        .env("PATH", path)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();

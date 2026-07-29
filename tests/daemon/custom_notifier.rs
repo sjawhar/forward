@@ -56,7 +56,7 @@ notifier = ["{notifier}"]
     );
     send(port, "https://example.com/ignored");
     wait_for(&notified);
-    daemon.wait_for_log("notification not approved: https://example.com/ignored");
+    daemon.wait_for_log("notification declined: https://example.com/ignored");
     assert!(
         !opened.exists(),
         "opener must not run when notification not clicked"
@@ -89,10 +89,38 @@ notifier = ["{notifier}"]
     );
     send(port, "https://example.com/dismissed");
     wait_for(&notified);
-    daemon.wait_for_log("notification not approved: https://example.com/dismissed");
+    daemon.wait_for_log("notification declined: https://example.com/dismissed: \"dismissed\\n\"");
     assert!(
         !opened.exists(),
         "opener must not run when action is not 'default'"
+    );
+}
+
+#[test]
+fn failing_custom_notifier_does_not_open() {
+    // Given: a custom notifier whose UI process exits unsuccessfully.
+    let dir = tempfile::tempdir().unwrap();
+    let opened = dir.path().join("opened");
+    let opener = stub(
+        dir.path(),
+        "opener",
+        &format!("echo \"$@\" >> {}", opened.display()),
+    );
+    let notifier = stub(dir.path(), "notifier", "echo rejected >&2; exit 1");
+    let (daemon, port) = start(
+        dir.path(),
+        &format!("opener = [\"{opener}\"]\nnotifier = [\"{notifier}\"]"),
+    );
+
+    // When: the custom notifier cannot produce a successful approval result.
+    send(port, "https://example.com/notifier-failed");
+
+    // Then: its failed exit is logged and the URL remains unopened.
+    daemon
+        .wait_for_log("notification failed for https://example.com/notifier-failed: \"rejected\"");
+    assert!(
+        !opened.exists(),
+        "failed custom notifiers must not open URLs"
     );
 }
 
@@ -129,7 +157,7 @@ ssh = ["{ssh}"]
     );
     send(port, "http://localhost:8400/declined");
     assert!(wait_for(&notified).contains("http://localhost:8400/declined"));
-    daemon.wait_for_log("notification not approved: http://localhost:8400/declined");
+    daemon.wait_for_log("notification declined: http://localhost:8400/declined");
     assert!(
         !sshed.exists(),
         "declined URLs must not create SSH forwards"

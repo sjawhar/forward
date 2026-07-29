@@ -1,4 +1,12 @@
-use std::io::Write as _;
+use std::io::{BufRead as _, Write as _};
+use std::process::Stdio;
+use std::sync::mpsc;
+use std::time::Duration;
+
+#[path = "serve/host.rs"]
+mod host;
+#[path = "serve/limits.rs"]
+mod limits;
 
 fn raw_status(port: u16, request: &[u8]) -> [u8; 12] {
     let mut connection = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -9,25 +17,35 @@ fn raw_status(port: u16, request: &[u8]) -> [u8; 12] {
 }
 
 fn spawn_serve(root_marker: &std::path::Path) -> (std::process::Child, u16) {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port();
-    let child = std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
-        .args(["serve", "--port", &port.to_string()])
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
+        .args(["serve", "--port", "0"])
+        .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-
-    let mut ready = false;
-    for _ in 0..50 {
-        if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            ready = true;
-            break;
+    let stderr = child.stderr.take().unwrap();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    let reader = std::thread::spawn(move || {
+        let mut line = String::new();
+        let mut reader = std::io::BufReader::new(stderr);
+        let result = reader.read_line(&mut line);
+        let _ = sender.send((result, line));
+        let _ = std::io::copy(&mut reader, &mut std::io::sink());
+    });
+    let (result, line) = match receiver.recv_timeout(Duration::from_secs(1)) {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = reader.join();
+            panic!("forward serve did not announce its listener: {error}");
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    assert!(ready, "forward serve never became ready on port {port}");
+    };
+    result.unwrap();
+    drop(reader);
+    let port = line
+        .strip_prefix("forward: loopback server listening on 127.0.0.1:")
+        .and_then(|value| value.trim().parse().ok())
+        .unwrap_or_else(|| panic!("unexpected forward serve startup message: {line:?}"));
     let _ = root_marker;
     (child, port)
 }
@@ -142,6 +160,8 @@ fn continues_after_client_disconnect_and_rejects_untrusted_host() {
     let request = format!("GET {path}/file.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     let mut connection = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
     connection.write_all(request.as_bytes()).unwrap();
+    let connection = socket2::Socket::from(connection);
+    connection.set_linger(Some(Duration::ZERO)).unwrap();
     drop(connection);
 
     let response = ureq::get(&format!("http://127.0.0.1:{port}{path}/file.txt"))

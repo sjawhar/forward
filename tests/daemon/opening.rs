@@ -31,7 +31,7 @@ allow = ["localhost", "github.com/login"]
     assert!(wait_for(&opened).contains("http://localhost:8400/cb?code=abc"));
     assert_eq!(
         wait_for(&sshed).trim(),
-        "-O forward -L 8400:127.0.0.1:8400 devbox-tunnel"
+        "-O forward -L 127.0.0.1:8400:127.0.0.1:8400 devbox-tunnel"
     );
 }
 
@@ -63,6 +63,36 @@ ssh = ["{ssh}"]
     send(port, "https://random.example/x");
     assert!(wait_for(&opened).contains("https://random.example/x"));
     assert!(!sshed.exists());
+}
+
+#[test]
+fn opener_receives_reentry_marker() {
+    // Given: an opener stub that records its inherited marker.
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("marker");
+    let opener = stub(
+        dir.path(),
+        "opener",
+        &format!(
+            "printf '%s' \"$FORWARD_OPENER_REENTRY\" > {}",
+            marker.display()
+        ),
+    );
+    let (_daemon, port) = start(
+        dir.path(),
+        &format!(
+            r#"
+mode = "auto"
+opener = ["{opener}"]
+"#
+        ),
+    );
+
+    // When: the daemon opens a permitted URL.
+    send(port, "https://example.com/redirect");
+
+    // Then: the child process receives the re-entry marker.
+    assert_eq!(wait_for(&marker), "1");
 }
 
 #[test]

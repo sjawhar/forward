@@ -1,7 +1,10 @@
+mod file_handler;
+
 use crate::render::{MARKDOWN_HEAD, MARKDOWN_STYLE, MARKDOWN_TAIL, encode_path, escape_html};
 use comrak::Options;
+use file_handler::file_reply;
 use percent_encoding::percent_decode;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::fs;
 use std::io;
 use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
@@ -90,6 +93,10 @@ impl Reply {
 pub fn run(port: u16) -> Result<(), ServeError> {
     let server =
         Server::http(("127.0.0.1", port)).map_err(|source| ServeError::Bind { port, source })?;
+    eprintln!(
+        "forward: loopback server listening on {}",
+        server.server_addr()
+    );
     for request in server.incoming_requests() {
         let response = respond(&request).into_response();
         if let Err(error) = request.respond(response) {
@@ -122,7 +129,7 @@ fn respond(request: &Request) -> Reply {
             Ok(reply) => reply,
             Err(_) => Reply::new(500, TEXT_CONTENT_TYPE, "Internal Server Error\n"),
         },
-        Ok(metadata) if metadata.is_file() => file_reply(&path, raw),
+        Ok(metadata) if metadata.is_file() => file_reply(&path, raw, metadata.len()),
         Ok(_) => Reply::new(404, TEXT_CONTENT_TYPE, "Not Found\n"),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             Reply::new(404, TEXT_CONTENT_TYPE, "Not Found\n")
@@ -132,17 +139,18 @@ fn respond(request: &Request) -> Reply {
 }
 
 fn host_is_loopback(request: &Request) -> bool {
-    request
+    let Some(header) = request
         .headers()
         .iter()
         .find(|header| header.field.equiv("Host"))
-        .is_none_or(|header| {
-            let host = header.value.as_str();
-            matches!(host, "127.0.0.1" | "localhost" | "[::1]")
-                || ["127.0.0.1:", "localhost:", "[::1]:"].iter().any(|prefix| {
-                    host.strip_prefix(prefix)
-                        .is_some_and(|port| port.parse::<u16>().is_ok())
-                })
+    else {
+        return false;
+    };
+    let host = header.value.as_str().to_ascii_lowercase();
+    matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]")
+        || ["127.0.0.1:", "localhost:", "[::1]:"].iter().any(|prefix| {
+            host.strip_prefix(prefix)
+                .is_some_and(|port| port.parse::<u16>().is_ok())
         })
 }
 
@@ -160,41 +168,6 @@ fn request_path(request: &Request) -> Result<(PathBuf, bool), ()> {
         .query_pairs()
         .any(|(key, value)| key == "raw" && value == "1");
     Ok((path, raw))
-}
-
-fn file_reply(path: &Path, raw: bool) -> Reply {
-    let body = match fs::read(path) {
-        Ok(body) => body,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Reply::new(404, TEXT_CONTENT_TYPE, "Not Found\n");
-        }
-        Err(_) => return Reply::new(500, TEXT_CONTENT_TYPE, "Internal Server Error\n"),
-    };
-
-    if path
-        .extension()
-        .and_then(OsStr::to_str)
-        .is_some_and(|extension| extension.eq_ignore_ascii_case("md"))
-    {
-        return if raw {
-            Reply::new(200, TEXT_CONTENT_TYPE, body)
-        } else {
-            markdown_reply(path, &body)
-        };
-    }
-
-    let content_type = mime_guess::from_path(path).first().map_or_else(
-        || TEXT_CONTENT_TYPE.to_owned(),
-        |mime| {
-            let content_type = mime.essence_str();
-            if content_type.starts_with("text/") {
-                format!("{content_type}; charset=utf-8")
-            } else {
-                content_type.to_owned()
-            }
-        },
-    );
-    Reply::new(200, content_type, body)
 }
 
 fn markdown_reply(path: &Path, source: &[u8]) -> Reply {

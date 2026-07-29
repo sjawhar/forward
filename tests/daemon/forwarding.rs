@@ -26,7 +26,7 @@ ssh = ["{ssh}"]
     );
     assert_eq!(
         wait_for(&sshed).trim(),
-        "-O forward -L 8085:127.0.0.1:8085 devbox-tunnel"
+        "-O forward -L 127.0.0.1:8085:127.0.0.1:8085 devbox-tunnel"
     );
 }
 
