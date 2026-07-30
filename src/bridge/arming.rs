@@ -1,6 +1,7 @@
 use super::armed::Armed;
 use super::limit::ConnectionLimit;
 use std::io::{Read, Write};
+use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
@@ -22,11 +23,22 @@ const ARM_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// A unix socket in the runtime directory, never a TCP port: only local
 /// processes can reach it, and filesystem permissions scope it. Arming grants a
 /// local process nothing it could not already do by connecting to loopback
-/// directly; the gate exists to constrain the *remote* peer. Without a runtime
-/// directory, this deliberately returns a non-connectable path: arming is
-/// unavailable rather than trusting a predictable shared-directory socket.
+/// directly; the gate exists to constrain the *remote* peer.
+///
+/// When `XDG_RUNTIME_DIR` is unset the path falls back to systemd's
+/// `/run/user/<uid>` — pam_systemd sets the variable for login sessions, but a
+/// shell inside a tmux server that was itself started without it inherits the
+/// gap, while the socket is still there, because `forward serve` runs under
+/// the user manager, which always has it. The fallback is trusted only when
+/// the directory proves the same property `$XDG_RUNTIME_DIR` has — owned by
+/// this uid, writable by nobody else, so no other user can pre-create the
+/// socket. Anything less deliberately yields a non-connectable path: arming
+/// is unavailable rather than trusting a predictable shared directory.
 pub fn arm_socket_path() -> PathBuf {
-    arm_socket_path_in(std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from))
+    let configured = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| !path.as_os_str().is_empty());
+    arm_socket_path_in(configured.or_else(default_runtime_dir))
 }
 
 fn arm_socket_path_in(runtime_dir: Option<PathBuf>) -> PathBuf {
@@ -34,6 +46,20 @@ fn arm_socket_path_in(runtime_dir: Option<PathBuf>) -> PathBuf {
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| PathBuf::from("/dev/null"));
     dir.join("forward-arm.sock")
+}
+
+/// systemd's runtime directory for this process's own uid, if trustworthy.
+fn default_runtime_dir() -> Option<PathBuf> {
+    // /proc/self is owned by this process's effective uid; std exposes no
+    // getuid, and the no-new-dependencies rule forbids libc.
+    let uid = std::fs::metadata("/proc/self").ok()?.uid();
+    trusted_runtime_dir(PathBuf::from(format!("/run/user/{uid}")), uid)
+}
+
+/// `dir`, only if `uid` owns it and nobody else can write into it.
+fn trusted_runtime_dir(dir: PathBuf, uid: u32) -> Option<PathBuf> {
+    let metadata = std::fs::metadata(&dir).ok()?;
+    (metadata.uid() == uid && metadata.mode() & 0o022 == 0).then_some(dir)
 }
 
 /// Serve arming requests on `path` for the life of the process.
@@ -171,11 +197,29 @@ mod tests {
 
     #[test]
     fn arm_socket_path_is_nonconnectable_without_a_runtime_dir() {
-        // Given: a client whose environment has no per-user runtime directory.
+        // Given: a client with no configured and no trusted default directory.
         let path = arm_socket_path_in(None);
 
         // When/Then: it must not use the predictable global temporary directory.
         assert_eq!(path, PathBuf::from("/dev/null/forward-arm.sock"));
         assert!(UnixStream::connect(path).is_err());
+    }
+
+    #[test]
+    fn a_runtime_dir_is_trusted_only_when_owned_and_private() {
+        // Given: a directory owned by this uid with default private permissions,
+        // and this process's real uid.
+        let dir = tempfile::tempdir().unwrap();
+        let uid = std::fs::metadata("/proc/self").unwrap().uid();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+
+        // When/Then: it qualifies for this uid — and stops qualifying the
+        // moment the owner differs or anyone else can write into it, because
+        // either lets another user pre-create the socket and answer "ok".
+        assert!(trusted_runtime_dir(dir.path().to_path_buf(), uid).is_some());
+        assert!(trusted_runtime_dir(dir.path().to_path_buf(), uid + 1).is_none());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o722)).unwrap();
+        assert!(trusted_runtime_dir(dir.path().to_path_buf(), uid).is_none());
+        assert!(trusted_runtime_dir(PathBuf::from("/no/such/runtime/dir"), uid).is_none());
     }
 }
