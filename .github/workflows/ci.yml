@@ -29,7 +29,7 @@ jobs:
       - run: rustup component add clippy
       - run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - run: >-
-          cargo clippy --locked --bins --all-features --
+          cargo clippy --locked --lib --bins --all-features --
           -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
           -D clippy::indexing_slicing
 

@@ -1,21 +1,15 @@
 use clap::{Parser, Subcommand};
+use forward::callback::CHANNEL_PORT;
+use forward::config::{self, Config};
+use forward::{bridge, doctor, send, serve, target};
 use std::io::Write as _;
 
-mod config;
 mod daemon;
-mod forwards;
-mod localhost;
-mod policy;
 mod process;
 mod ratelimit;
-mod render;
 mod request;
-mod send;
-mod serve;
-mod target;
 
-use forwards::CHANNEL_PORT;
-pub(crate) use forwards::FILES_PORT;
+pub(crate) use forward::callback::FILES_PORT;
 const OPENER_REENTRY_ERROR: &str = "forward: refusing to open URL because the configured opener is routing back into forward open; set opener to an absolute path such as /usr/bin/xdg-open";
 
 #[derive(Parser)]
@@ -32,13 +26,25 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Open a URL or file path in the laptop browser
-    Open { target: String },
+    Open {
+        target: String,
+        #[arg(long, default_value_t = CHANNEL_PORT)]
+        port: u16,
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
     /// Print (and OSC 52 copy) the laptop-clickable URL for a file path
-    Url { target: String },
+    Url {
+        target: String,
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
     /// Serve devbox files read-only on loopback (devbox side)
     Serve {
         #[arg(long, default_value_t = FILES_PORT)]
         port: u16,
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
     },
     /// Receive URLs from the devbox and open them (laptop side)
     Daemon {
@@ -47,48 +53,105 @@ enum Command {
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },
+    /// Report the health of every channel forward owns
+    Doctor {
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+        #[arg(long, default_value_t = CHANNEL_PORT)]
+        channel_port: u16,
+        #[arg(long, default_value_t = FILES_PORT)]
+        files_port: u16,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
-        Command::Open { target } => {
+        Command::Open {
+            target,
+            port,
+            config,
+        } => {
+            let (cfg, _) = load_config(config)?;
             open_target(
+                &cfg,
                 &target,
-                CHANNEL_PORT,
+                port,
                 std::env::var_os("FORWARD_OPENER_REENTRY").is_some(),
             )
             .unwrap_or_else(|error| exit_with_error(error));
             Ok(())
         }
-        Command::Url { target } => {
-            let url = target::to_url(&target, FILES_PORT).unwrap_or_else(|e| exit_with_error(e));
+        Command::Url { target, config } => {
+            let (cfg, _) = load_config(config)?;
+            let url = target::to_url(&target, &cfg.listen, FILES_PORT)
+                .unwrap_or_else(|error| exit_with_error(error));
             let _ = writeln!(std::io::stdout(), "{url}");
             let _ = send::osc52_copy(url.as_str());
             Ok(())
         }
-        Command::Serve { port } => {
-            serve::run(port).unwrap_or_else(|error| exit_with_error(error));
+        Command::Serve { port, config } => {
+            let (cfg, _) = load_config(config)?;
+            let armed = bridge::Armed::new();
+            bridge::serve_arming(armed.clone(), bridge::arm_socket_path());
+            let bridge_cfg = cfg.clone();
+            drop(std::thread::spawn(move || {
+                if let Err(error) = bridge::serve(bridge_cfg, armed) {
+                    eprintln!("{error}");
+                }
+            }));
+            serve::run(&cfg, port).unwrap_or_else(|error| exit_with_error(error));
             Ok(())
         }
         Command::Daemon { port, config } => {
-            let config_path = std::path::absolute(config.unwrap_or_else(|| {
-                default_config_path().unwrap_or_else(|error| exit_with_error(error))
-            }))?;
-            let config = config::load(&config_path).unwrap_or_else(|error| exit_with_error(error));
-            daemon::run(config, &config_path, port).unwrap_or_else(|error| exit_with_error(error));
+            let (cfg, config_path) = load_config(config)?;
+            daemon::run(cfg, &config_path, port).unwrap_or_else(|error| exit_with_error(error));
             Ok(())
+        }
+        Command::Doctor {
+            config,
+            channel_port,
+            files_port,
+        } => {
+            let (cfg, _) = load_config(config)?;
+            if doctor::run(&cfg, channel_port, files_port) {
+                Ok(())
+            } else {
+                std::process::exit(1)
+            }
         }
     }
 }
 
-fn open_target(target: &str, channel_port: u16, opener_reentry: bool) -> anyhow::Result<()> {
+fn open_target(
+    cfg: &Config,
+    target: &str,
+    channel_port: u16,
+    opener_reentry: bool,
+) -> anyhow::Result<()> {
     if opener_reentry {
         anyhow::bail!(OPENER_REENTRY_ERROR);
     }
-    let url = target::to_url(target, FILES_PORT)?;
-    send::send_url(&url, channel_port)?;
+    let url = target::to_url(target, &cfg.listen, FILES_PORT)?;
+    bridge::arm_for_url(cfg, &url, &bridge::arm_socket_path());
+    if let Err(error) = send::send_url(cfg, &url, channel_port) {
+        // A URL that cannot be delivered is handed back rather than dropped.
+        let _ = writeln!(std::io::stdout(), "{url}");
+        let _ = send::osc52_copy(url.as_str());
+        return Err(error.into());
+    }
     Ok(())
+}
+
+fn load_config(path: Option<std::path::PathBuf>) -> anyhow::Result<(Config, std::path::PathBuf)> {
+    let config_path =
+        std::path::absolute(path.unwrap_or_else(|| {
+            default_config_path().unwrap_or_else(|error| exit_with_error(error))
+        }))?;
+    let cfg = config::load(&config_path).unwrap_or_else(|error| exit_with_error(error));
+    cfg.validate()
+        .unwrap_or_else(|error| exit_with_error(error));
+    Ok((cfg, config_path))
 }
 
 fn default_config_path() -> anyhow::Result<std::path::PathBuf> {
@@ -116,12 +179,13 @@ fn exit_with_error(error: impl std::fmt::Display) -> ! {
 
 #[cfg(test)]
 mod tests {
-    use super::open_target;
+    use super::{Config, open_target};
     use std::io::Read as _;
 
     #[test]
     fn open_sends_url_when_opener_reentry_is_unset() {
-        // Given: a listener for the opener channel.
+        // Given: a default configuration and a listener for the opener channel.
+        let cfg = Config::default_values_for_test();
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = listener.local_addr().unwrap().port();
         let receiver = std::thread::spawn(move || {
@@ -132,7 +196,7 @@ mod tests {
         });
 
         // When: open runs without the re-entry marker.
-        open_target("https://example.com/redirect", port, false).unwrap();
+        open_target(&cfg, "https://example.com/redirect", port, false).unwrap();
 
         // Then: it sends the URL through the opener channel.
         assert_eq!(receiver.join().unwrap(), "https://example.com/redirect\n");

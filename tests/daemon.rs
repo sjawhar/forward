@@ -10,8 +10,12 @@ mod daemon_support;
 mod forward_lifecycle;
 #[path = "daemon/forwarding.rs"]
 mod forwarding;
+#[path = "daemon/open_command.rs"]
+mod open_command;
 #[path = "daemon/opening.rs"]
 mod opening;
+#[path = "daemon/peer.rs"]
+mod peer;
 #[path = "daemon/reentry.rs"]
 mod reentry;
 #[path = "daemon/startup.rs"]

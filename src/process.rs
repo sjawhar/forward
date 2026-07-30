@@ -9,7 +9,7 @@ pub(crate) struct CommandOutput {
 }
 pub(crate) enum WaitResult {
     Exited(CommandOutput),
-    TimedOut(CommandOutput),
+    TimedOut,
 }
 
 pub(crate) fn run_command(mut command: Command, timeout: Duration) -> std::io::Result<WaitResult> {
@@ -36,10 +36,10 @@ pub(crate) fn run_command(mut command: Command, timeout: Duration) -> std::io::R
             Ok(None) if Instant::now() >= deadline => {
                 let kill_error = child.kill().err();
                 let status = child.wait();
-                let output = collect_output(status?, stdout_reader, stderr_reader)?;
+                collect_output(status?, stdout_reader, stderr_reader)?;
                 return match kill_error {
                     Some(error) => Err(error),
-                    None => Ok(WaitResult::TimedOut(output)),
+                    None => Ok(WaitResult::TimedOut),
                 };
             }
             Ok(None) => thread::sleep(Duration::from_millis(10)),
@@ -119,7 +119,7 @@ mod tests {
 
         let result = run_command(command, Duration::from_millis(200)).unwrap();
 
-        assert!(matches!(result, WaitResult::TimedOut(_)));
+        assert!(matches!(result, WaitResult::TimedOut));
         let pid = std::fs::read_to_string(pid_file).unwrap();
         assert!(!std::path::Path::new(&format!("/proc/{}", pid.trim())).exists());
     }

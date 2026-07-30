@@ -1,124 +1,108 @@
-use super::daemon_support::{send, start, stub};
+use super::daemon_support::{connect, connection_is_refused, send, spawn_bridge, start, test_port};
 use std::path::Path;
-use std::thread;
-use std::time::Duration;
 
-fn config(ssh: &str) -> String {
+fn config(bridge_port: u16, ttl_secs: u64) -> String {
     format!(
         r#"
 mode = "auto"
 opener = ["true"]
-ssh = ["{ssh}"]
-forward_ttl_secs = 1
+peer = "127.0.0.1"
+bridge_port = {bridge_port}
+forward_ttl_secs = {ttl_secs}
 "#
     )
 }
 
-fn wait_for_lines(path: &Path, count: usize) -> Vec<String> {
-    for _ in 0..50 {
-        if let Ok(contents) = std::fs::read_to_string(path) {
-            let lines = contents.lines().map(str::to_owned).collect::<Vec<_>>();
-            if lines.len() >= count {
-                return lines;
-            }
-        }
-        thread::sleep(Duration::from_millis(100));
-    }
-    panic!("expected {count} SSH invocations at {path:?}");
+fn bridge(dir: &Path) -> u16 {
+    spawn_bridge(&dir.join("bridged"))
 }
 
 #[test]
-fn expires_with_the_exact_local_forward_cancel_spec() {
+fn an_expired_lease_stops_listening() {
+    // Given: a callback port leased for one second.
     let dir = tempfile::tempdir().unwrap();
-    let calls = dir.path().join("ssh-calls");
-    let ssh = stub(
-        dir.path(),
-        "ssh",
-        &format!("echo \"$@\" >> {}", calls.display()),
-    );
-    let (_daemon, port) = start(dir.path(), &config(&ssh));
+    let callback_port = test_port();
+    let (daemon, port) = start(dir.path(), &config(bridge(dir.path()), 1));
+    send(port, &format!("http://localhost:{callback_port}/callback"));
+    daemon.wait_for_log(&format!("callback port {callback_port} served on loopback"));
+    assert!(connect(callback_port).peer_addr().is_ok());
 
-    send(port, "http://localhost:19001/callback");
+    // When: the lease expires.
+    daemon.wait_for_log(&format!("callback port {callback_port} released"));
 
-    let calls = wait_for_lines(&calls, 2);
-    assert_eq!(
-        calls,
-        [
-            "-O forward -L 127.0.0.1:19001:127.0.0.1:19001 devbox-tunnel",
-            "-O cancel -L 127.0.0.1:19001:127.0.0.1:19001 devbox-tunnel",
-        ]
+    // Then: release is the listener closing, not an `ssh -O cancel` that could
+    // take unrelated forwards with it.
+    assert!(
+        connection_is_refused(callback_port),
+        "port {callback_port} still listening after its lease expired"
     );
 }
 
 #[test]
-fn static_tunnel_ports_are_never_created_or_cancelled() {
+fn static_tunnel_ports_are_never_leased() {
+    // Given: a daemon that can serve callback ports.
     let dir = tempfile::tempdir().unwrap();
-    let calls = dir.path().join("ssh-calls");
-    let ssh = stub(
-        dir.path(),
-        "ssh",
-        &format!("echo \"$@\" >> {}", calls.display()),
-    );
-    let (_daemon, port) = start(dir.path(), &config(&ssh));
+    let bridged = dir.path().join("bridged");
+    let bridge_port = spawn_bridge(&bridged);
+    let (daemon, port) = start(dir.path(), &config(bridge_port, 1));
 
+    // When: URLs naming each static tunnel port arrive.
     for static_port in [12_799, 12_800, 12_802] {
         send(port, &format!("http://localhost:{static_port}/callback"));
+        daemon.wait_for_log(&format!(
+            "opener spawned for http://localhost:{static_port}/callback"
+        ));
     }
-    thread::sleep(Duration::from_millis(1_500));
 
+    // Then: none of them is ever leased or relayed. 12799 above all: on the
+    // devbox that port is the far end of the PC/SC tunnel.
     assert!(
-        !calls.exists(),
-        "static tunnel ports must never be passed to SSH: {calls:?}"
+        !daemon.log().contains("served on loopback"),
+        "static tunnel ports must never be leased"
+    );
+    assert!(
+        !bridged.exists(),
+        "static tunnel ports must never be dialled"
     );
 }
 
 #[test]
-fn re_request_refreshes_a_live_forward_without_a_second_create() {
+fn re_request_refreshes_a_live_lease_without_a_second_listener() {
+    // Given: a live lease on a callback port, with a TTL long enough that the
+    // second request lands inside it.
     let dir = tempfile::tempdir().unwrap();
-    let calls = dir.path().join("ssh-calls");
-    let ssh = stub(
-        dir.path(),
-        "ssh",
-        &format!("echo \"$@\" >> {}", calls.display()),
-    );
-    let (_daemon, port) = start(dir.path(), &config(&ssh));
+    let callback_port = test_port();
+    let (daemon, port) = start(dir.path(), &config(bridge(dir.path()), 30));
+    send(port, &format!("http://localhost:{callback_port}/first"));
+    daemon.wait_for_log(&format!("callback port {callback_port} served on loopback"));
 
-    send(port, "http://localhost:19002/first");
-    assert_eq!(wait_for_lines(&calls, 1).len(), 1);
-    thread::sleep(Duration::from_millis(600));
-    send(port, "http://localhost:19002/second");
-    thread::sleep(Duration::from_millis(600));
+    // When: the same port is requested again.
+    send(port, &format!("http://localhost:{callback_port}/second"));
 
-    assert_eq!(wait_for_lines(&calls, 1).len(), 1);
-    assert_eq!(wait_for_lines(&calls, 2).len(), 2);
+    // Then: the lease is refreshed, and no second bind is attempted.
+    daemon.wait_for_log(&format!(
+        "refreshed callback lease for port {callback_port}"
+    ));
+    assert_eq!(daemon.log().matches("served on loopback").count(), 1);
+    assert!(connect(callback_port).peer_addr().is_ok());
 }
 
 #[test]
-fn failed_cancel_is_logged_without_stopping_later_urls() {
+fn an_unreachable_bridge_does_not_stop_later_urls() {
+    // Given: a daemon whose bridge port has nothing behind it.
     let dir = tempfile::tempdir().unwrap();
-    let calls = dir.path().join("ssh-calls");
-    let ssh = stub(
-        dir.path(),
-        "ssh",
-        &format!(
-            "echo \"$@\" >> {}; if [ \"$2\" = cancel ]; then echo release-failed >&2; exit 1; fi",
-            calls.display()
-        ),
-    );
-    let (daemon, port) = start(dir.path(), &config(&ssh));
+    let bridge_port = test_port();
+    let first_port = test_port();
+    let second_port = test_port();
+    let (daemon, port) = start(dir.path(), &config(bridge_port, 30));
+    send(port, &format!("http://localhost:{first_port}/callback"));
+    daemon.wait_for_log(&format!("callback port {first_port} served on loopback"));
 
-    send(port, "http://localhost:19003/callback");
-    let calls = wait_for_lines(&calls, 2);
-    assert_eq!(
-        calls[1],
-        "-O cancel -L 127.0.0.1:19003:127.0.0.1:19003 devbox-tunnel"
-    );
-    daemon.wait_for_log("SSH forward release failed for port 19003");
+    // When: a browser connects and the relay cannot reach the bridge.
+    drop(connect(first_port));
+    daemon.wait_for_log("cannot reach callback bridge");
 
-    send(port, "http://localhost:19004/callback");
-    let calls = wait_for_lines(&dir.path().join("ssh-calls"), 3);
-    assert_eq!(
-        calls[2],
-        "-O forward -L 127.0.0.1:19004:127.0.0.1:19004 devbox-tunnel"
-    );
+    // Then: the failure is logged and later URLs are still served.
+    send(port, &format!("http://localhost:{second_port}/callback"));
+    daemon.wait_for_log(&format!("callback port {second_port} served on loopback"));
 }

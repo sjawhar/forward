@@ -1,19 +1,17 @@
-use super::daemon_support::{send, start, stub, wait_for};
+use super::daemon_support::{connect, send, spawn_bridge, start, stub, test_port, wait_for};
 
 #[test]
 fn allowlist_hit_opens_and_forwards_localhost() {
+    // Given: an allowlisted loopback URL and a fake devbox bridge.
     let dir = tempfile::tempdir().unwrap();
     let opened = dir.path().join("opened");
-    let sshed = dir.path().join("sshed");
+    let bridged = dir.path().join("bridged");
+    let bridge_port = spawn_bridge(&bridged);
+    let callback_port = test_port();
     let opener = stub(
         dir.path(),
         "opener",
         &format!("echo \"$@\" >> {}", opened.display()),
-    );
-    let ssh = stub(
-        dir.path(),
-        "ssh",
-        &format!("echo \"$@\" >> {}", sshed.display()),
     );
     let (_daemon, port) = start(
         dir.path(),
@@ -21,48 +19,57 @@ fn allowlist_hit_opens_and_forwards_localhost() {
             r#"
 mode = "allowlist"
 opener = ["{opener}"]
-ssh = ["{ssh}"]
-tunnel_host = "devbox-tunnel"
+peer = "127.0.0.1"
+bridge_port = {bridge_port}
 allow = ["localhost", "github.com/login"]
 "#
         ),
     );
-    send(port, "http://localhost:8400/cb?code=abc");
-    assert!(wait_for(&opened).contains("http://localhost:8400/cb?code=abc"));
+    // When: the URL arrives and a browser connects to the port it named.
+    let url = format!("http://localhost:{callback_port}/cb?code=abc");
+    send(port, &url);
+    assert!(wait_for(&opened).contains(&url));
+    _daemon.wait_for_log(&format!("callback port {callback_port} served on loopback"));
+    drop(connect(callback_port));
+
+    // Then: it opens and the callback port is relayed to the bridge.
     assert_eq!(
-        wait_for(&sshed).trim(),
-        "-O forward -L 127.0.0.1:8400:127.0.0.1:8400 devbox-tunnel"
+        wait_for(&bridged).trim(),
+        format!("CONNECT {callback_port}")
     );
 }
 
 #[test]
 fn auto_mode_opens_everything_no_ssh_for_remote() {
+    // Given: a daemon that could lease callback ports, so a remote URL having
+    // none is the only reason nothing is leased.
     let dir = tempfile::tempdir().unwrap();
     let opened = dir.path().join("opened");
-    let sshed = dir.path().join("sshed");
+    let bridged = dir.path().join("bridged");
+    let bridge_port = spawn_bridge(&bridged);
     let opener = stub(
         dir.path(),
         "opener",
         &format!("echo \"$@\" >> {}", opened.display()),
     );
-    let ssh = stub(
-        dir.path(),
-        "ssh",
-        &format!("echo \"$@\" >> {}", sshed.display()),
-    );
-    let (_daemon, port) = start(
+    let (daemon, port) = start(
         dir.path(),
         &format!(
             r#"
 mode = "auto"
 opener = ["{opener}"]
-ssh = ["{ssh}"]
+peer = "127.0.0.1"
+bridge_port = {bridge_port}
 "#
         ),
     );
+    // When: a URL with no loopback port arrives.
     send(port, "https://random.example/x");
+
+    // Then: it opens and no callback port is leased.
     assert!(wait_for(&opened).contains("https://random.example/x"));
-    assert!(!sshed.exists());
+    assert!(!daemon.log().contains("served on loopback"));
+    assert!(!bridged.exists());
 }
 
 #[test]

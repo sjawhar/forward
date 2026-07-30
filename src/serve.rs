@@ -1,9 +1,12 @@
 mod file_handler;
+mod security;
 
+use crate::config::Config;
 use crate::render::{MARKDOWN_HEAD, MARKDOWN_STYLE, MARKDOWN_TAIL, encode_path, escape_html};
 use comrak::Options;
 use file_handler::file_reply;
 use percent_encoding::percent_decode;
+use security::{host_allowed, peer_allowed};
 use std::ffi::OsString;
 use std::fs;
 use std::io;
@@ -14,26 +17,32 @@ use url::Url;
 
 const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 const TEXT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
-const RESPONSE_SECURITY_HEADERS: [(&[u8], &[u8]); 3] = [
+const RESPONSE_SECURITY_HEADERS: [(&[u8], &[u8]); 4] = [
     (
         b"Content-Security-Policy",
         b"sandbox; default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net",
     ),
     (b"X-Content-Type-Options", b"nosniff"),
     (b"Cross-Origin-Resource-Policy", b"same-origin"),
+    // Preview URLs carry absolute filesystem paths; rendered markdown can link
+    // to external sites, and a click would otherwise leak that path as the
+    // Referer.
+    (b"Referrer-Policy", b"no-referrer"),
 ];
 
 type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ServeError {
-    #[error("forward: could not bind loopback server on port {port}: {source}")]
+    #[error(transparent)]
+    Config(#[from] crate::config::ConfigError),
+    #[error("forward: could not bind file server on {address}: {source}")]
     Bind {
-        port: u16,
+        address: String,
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("forward: loopback listener closed")]
+    #[error("forward: file server listener closed")]
     ListenerClosed,
 }
 
@@ -90,15 +99,19 @@ impl Reply {
     }
 }
 
-pub fn run(port: u16) -> Result<(), ServeError> {
-    let server =
-        Server::http(("127.0.0.1", port)).map_err(|source| ServeError::Bind { port, source })?;
-    eprintln!(
-        "forward: loopback server listening on {}",
-        server.server_addr()
-    );
+pub fn run(cfg: &Config, port: u16) -> Result<(), ServeError> {
+    cfg.validate()?;
+    let ip = cfg.listen_ip().map_err(|source| ServeError::Bind {
+        address: cfg.listen.clone(),
+        source: Box::new(source),
+    })?;
+    let server = Server::http((ip, port)).map_err(|source| ServeError::Bind {
+        address: format!("{ip}:{port}"),
+        source,
+    })?;
+    eprintln!("forward: file server listening on {}", server.server_addr());
     for request in server.incoming_requests() {
-        let response = respond(&request).into_response();
+        let response = respond(cfg, &request).into_response();
         if let Err(error) = request.respond(response) {
             eprintln!("forward: client disconnected before response completed: {error}");
         }
@@ -106,7 +119,15 @@ pub fn run(port: u16) -> Result<(), ServeError> {
     Err(ServeError::ListenerClosed)
 }
 
-fn respond(request: &Request) -> Reply {
+fn respond(cfg: &Config, request: &Request) -> Reply {
+    if !peer_allowed(cfg, request) {
+        eprintln!(
+            "forward: file server refused peer {:?}",
+            request.remote_addr()
+        );
+        return Reply::new(403, TEXT_CONTENT_TYPE, "Forbidden\n");
+    }
+
     if request.method() != &Method::Get && request.method() != &Method::Head {
         let reply = Reply::new(405, TEXT_CONTENT_TYPE, "Method Not Allowed\n");
         return match Header::from_bytes(b"Allow", b"GET, HEAD") {
@@ -115,7 +136,7 @@ fn respond(request: &Request) -> Reply {
         };
     }
 
-    if !host_is_loopback(request) {
+    if !host_allowed(cfg, request) {
         return Reply::new(403, TEXT_CONTENT_TYPE, "Forbidden\n");
     }
 
@@ -136,22 +157,6 @@ fn respond(request: &Request) -> Reply {
         }
         Err(_) => Reply::new(500, TEXT_CONTENT_TYPE, "Internal Server Error\n"),
     }
-}
-
-fn host_is_loopback(request: &Request) -> bool {
-    let Some(header) = request
-        .headers()
-        .iter()
-        .find(|header| header.field.equiv("Host"))
-    else {
-        return false;
-    };
-    let host = header.value.as_str().to_ascii_lowercase();
-    matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]")
-        || ["127.0.0.1:", "localhost:", "[::1]:"].iter().any(|prefix| {
-            host.strip_prefix(prefix)
-                .is_some_and(|port| port.parse::<u16>().is_ok())
-        })
 }
 
 fn request_path(request: &Request) -> Result<(PathBuf, bool), ()> {

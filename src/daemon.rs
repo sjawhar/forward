@@ -1,12 +1,13 @@
-use crate::config::Config;
-use crate::forwards::{ForwardTracker, is_dynamic_port, request_forward, spawn_reaper};
-use crate::localhost::forward_ports;
-use crate::policy::{Decision, decide};
 use crate::ratelimit::{OpenDecision, RecentOpens};
 use crate::request::read_url;
+use forward::callback::{Leases, MAX_DYNAMIC_FORWARDS, is_dynamic_port, request, spawn_reaper};
+use forward::config::Config;
+use forward::localhost::forward_ports;
+use forward::peer::authorized;
+use forward::policy::{Decision, decide};
 mod notification;
 use notification::notify_url;
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
@@ -15,9 +16,13 @@ use std::time::Instant;
 use thiserror::Error;
 use url::Url;
 
-const MAX_DYNAMIC_FORWARDS: usize = 4;
 #[derive(Debug, Error)]
 pub enum DaemonError {
+    #[error("forward: refusing to start: {source}")]
+    Config {
+        #[source]
+        source: forward::config::ConfigError,
+    },
     #[error("forward: failed to bind daemon on port {port}: {source}")]
     Bind {
         port: u16,
@@ -27,28 +32,40 @@ pub enum DaemonError {
 }
 
 pub fn run(cfg: Config, config_path: &Path, port: u16) -> Result<(), DaemonError> {
-    let listener = TcpListener::bind(("127.0.0.1", port))
-        .map_err(|source| DaemonError::Bind { port, source })?;
+    cfg.validate()
+        .map_err(|source| DaemonError::Config { source })?;
+    let ip = cfg
+        .listen_ip()
+        .map_err(|source| DaemonError::Config { source })?;
+    let address = SocketAddr::new(ip, port);
+    let listener =
+        TcpListener::bind(address).map_err(|source| DaemonError::Bind { port, source })?;
     eprintln!(
-        "forward: daemon config={} mode={:?} opener={:?} allow_entries={}",
+        "forward: daemon config={} listen={address} peer={:?} mode={:?} opener={:?} allow_entries={}",
         config_path.display(),
+        cfg.peer,
         cfg.mode,
         cfg.opener,
         cfg.allow.len()
     );
     let recent_opens = Arc::new(Mutex::new(RecentOpens::new()));
-    let forwards = ForwardTracker::new();
-    spawn_reaper(cfg.clone(), forwards.clone());
+    let leases = Leases::new();
+    spawn_reaper(leases.clone());
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {
-                let peer_port = stream
-                    .peer_addr()
-                    .map(|address| address.port())
-                    .unwrap_or_default();
+                let Ok(remote) = stream.peer_addr() else {
+                    eprintln!("forward: dropping daemon connection with no peer address");
+                    continue;
+                };
+                if !authorized(&cfg, remote.ip()) {
+                    eprintln!("forward: refused URL channel peer {}", remote.ip());
+                    continue;
+                }
+                let peer_port = remote.port();
                 let connection_config = cfg.clone();
                 let connection_opens = Arc::clone(&recent_opens);
-                let connection_forwards = forwards.clone();
+                let connection_leases = leases.clone();
                 if let Err(error) = thread::Builder::new()
                     .name(format!("fwd-{peer_port}"))
                     .spawn(move || {
@@ -56,7 +73,7 @@ pub fn run(cfg: Config, config_path: &Path, port: u16) -> Result<(), DaemonError
                             stream,
                             connection_config,
                             connection_opens,
-                            connection_forwards,
+                            connection_leases,
                         )
                     })
                 {
@@ -72,7 +89,7 @@ fn handle_connection(
     stream: TcpStream,
     cfg: Config,
     recent_opens: Arc<Mutex<RecentOpens>>,
-    forwards: ForwardTracker,
+    leases: Leases,
 ) {
     let Some(url) = read_url(stream) else {
         return;
@@ -80,31 +97,26 @@ fn handle_connection(
     match decide(&cfg, &url) {
         Decision::Open => {
             eprintln!("forward: URL {url} decision=open");
-            open_permitted_url(&cfg, &url, &recent_opens, &forwards);
+            open_permitted_url(&cfg, &url, &recent_opens, &leases);
         }
         Decision::Notify => {
             eprintln!("forward: URL {url} decision=notify");
             if notify_url(&cfg, &url) {
                 eprintln!("forward: notification approved; opening {url}");
-                open_permitted_url(&cfg, &url, &recent_opens, &forwards);
+                open_permitted_url(&cfg, &url, &recent_opens, &leases);
             }
         }
     }
 }
 
-fn open_permitted_url(
-    cfg: &Config,
-    url: &Url,
-    recent_opens: &Mutex<RecentOpens>,
-    forwards: &ForwardTracker,
-) {
+fn open_permitted_url(cfg: &Config, url: &Url, recent_opens: &Mutex<RecentOpens>, leases: &Leases) {
     let decision = match recent_opens.lock() {
         Ok(mut opens) => opens.record(url, Instant::now()),
         Err(poisoned) => poisoned.into_inner().record(url, Instant::now()),
     };
     match decision {
         OpenDecision::Permit => {
-            forward_url(cfg, url, forwards);
+            forward_url(cfg, url, leases);
             open_url(cfg, url);
         }
         OpenDecision::Drop { count } => {
@@ -113,7 +125,7 @@ fn open_permitted_url(
     }
 }
 
-fn forward_url(cfg: &Config, url: &Url, forwards: &ForwardTracker) {
+fn forward_url(cfg: &Config, url: &Url, leases: &Leases) {
     let mut forwarded = 0;
     let mut dropped = 0;
     for port in forward_ports(url) {
@@ -124,7 +136,7 @@ fn forward_url(cfg: &Config, url: &Url, forwards: &ForwardTracker) {
             dropped += 1;
             continue;
         }
-        request_forward(cfg, forwards, port);
+        request(cfg, leases, port);
         forwarded += 1;
     }
     if dropped > 0 {

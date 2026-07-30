@@ -3,31 +3,54 @@ use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
+const SERVE_STARTUP_PREFIX: &str = "forward: file server listening on ";
+
+#[path = "serve/headers.rs"]
+mod headers;
 #[path = "serve/host.rs"]
 mod host;
 #[path = "serve/limits.rs"]
 mod limits;
 
-fn raw_status(port: u16, request: &[u8]) -> [u8; 12] {
-    let mut connection = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+fn raw_status(host: &str, port: u16, request: &[u8]) -> [u8; 12] {
+    let mut connection = std::net::TcpStream::connect((host, port)).unwrap();
     connection.write_all(request).unwrap();
     let mut status = [0_u8; 12];
     std::io::Read::read_exact(&mut connection, &mut status).unwrap();
     status
 }
 
-fn spawn_serve(root_marker: &std::path::Path) -> (std::process::Child, u16) {
+fn spawn_serve(config_root: &std::path::Path) -> (std::process::Child, u16) {
+    spawn_serve_with_config(config_root, "")
+}
+
+fn spawn_serve_with_config(
+    config_root: &std::path::Path,
+    config_body: &str,
+) -> (std::process::Child, u16) {
+    let config = config_root.join(".forward-config.toml");
+    std::fs::write(&config, config_body).unwrap();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
-        .args(["serve", "--port", "0"])
+        .args(["serve", "--port", "0", "--config"])
+        .arg(&config)
+        .env("XDG_RUNTIME_DIR", config_root)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
     let stderr = child.stderr.take().unwrap();
     let (sender, receiver) = mpsc::sync_channel(1);
     let reader = std::thread::spawn(move || {
-        let mut line = String::new();
         let mut reader = std::io::BufReader::new(stderr);
-        let result = reader.read_line(&mut line);
+        let mut line = String::new();
+        // The callback bridge announces itself from another thread, so the file
+        // server's line is not reliably first; skip anything that is not it.
+        let result = loop {
+            line.clear();
+            match reader.read_line(&mut line) {
+                Ok(count) if count > 0 && !line.starts_with(SERVE_STARTUP_PREFIX) => continue,
+                other => break other,
+            }
+        };
         let _ = sender.send((result, line));
         let _ = std::io::copy(&mut reader, &mut std::io::sink());
     });
@@ -43,10 +66,11 @@ fn spawn_serve(root_marker: &std::path::Path) -> (std::process::Child, u16) {
     result.unwrap();
     drop(reader);
     let port = line
-        .strip_prefix("forward: loopback server listening on 127.0.0.1:")
-        .and_then(|value| value.trim().parse().ok())
+        .strip_prefix(SERVE_STARTUP_PREFIX)
+        .map(str::trim)
+        .and_then(|value| value.rsplit_once(':'))
+        .and_then(|(_, port)| port.parse().ok())
         .unwrap_or_else(|| panic!("unexpected forward serve startup message: {line:?}"));
-    let _ = root_marker;
     (child, port)
 }
 
@@ -60,13 +84,14 @@ impl Drop for Guard {
 
 #[test]
 fn serves_files_dirs_and_markdown() {
+    let config_root = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("img.png"), b"\x89PNG").unwrap();
     std::fs::write(dir.path().join("doc.md"), "# Title\n\nbody").unwrap();
     std::fs::write(dir.path().join("UPPER.MD"), "# Upper").unwrap();
     std::fs::write(dir.path().join("plain.txt"), "text").unwrap();
     std::fs::write(dir.path().join("noext"), "plain text").unwrap();
-    let (child, port) = spawn_serve(dir.path());
+    let (child, port) = spawn_serve(config_root.path());
     let _guard = Guard(child);
     let base = format!("http://127.0.0.1:{port}");
     let path = dir.path().to_str().unwrap();
@@ -141,21 +166,29 @@ fn serves_files_dirs_and_markdown() {
     assert_eq!(response.into_string().unwrap(), "spaced");
 
     assert_eq!(
-        raw_status(port, b"GET relative HTTP/1.1\r\nHost: localhost\r\n\r\n"),
+        raw_status(
+            "127.0.0.1",
+            port,
+            b"GET relative HTTP/1.1\r\nHost: localhost\r\n\r\n"
+        ),
         *b"HTTP/1.1 400"
     );
 }
 
 #[test]
 fn continues_after_client_disconnect_and_rejects_untrusted_host() {
+    let config_root = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("file.txt"), "alive").unwrap();
-    let (child, port) = spawn_serve(dir.path());
+    let (child, port) = spawn_serve(config_root.path());
     let _guard = Guard(child);
     let path = dir.path().to_str().unwrap();
 
     let request = format!("GET {path}/file.txt HTTP/1.1\r\nHost: evil.example\r\n\r\n");
-    assert_eq!(raw_status(port, request.as_bytes()), *b"HTTP/1.1 403");
+    assert_eq!(
+        raw_status("127.0.0.1", port, request.as_bytes()),
+        *b"HTTP/1.1 403"
+    );
 
     let request = format!("GET {path}/file.txt HTTP/1.1\r\nHost: localhost\r\n\r\n");
     let mut connection = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
@@ -171,33 +204,15 @@ fn continues_after_client_disconnect_and_rejects_untrusted_host() {
 }
 
 #[test]
-fn adds_browser_boundary_headers_to_every_content_class() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("doc.md"), "# Title").unwrap();
-    std::fs::write(dir.path().join("plain.txt"), "plain text").unwrap();
-    let (child, port) = spawn_serve(dir.path());
-    let _guard = Guard(child);
-    let base = format!("http://127.0.0.1:{port}");
-    let path = dir.path().to_str().unwrap();
-
-    assert_browser_boundary_headers(&ureq::get(&format!("{base}{path}/doc.md")).call().unwrap());
-    assert_browser_boundary_headers(
-        &ureq::get(&format!("{base}{path}/plain.txt"))
-            .call()
-            .unwrap(),
-    );
-    assert_browser_boundary_headers(&ureq::get(&format!("{base}{path}/")).call().unwrap());
-}
-
-#[test]
 fn rendered_markdown_does_not_embed_executable_scripts() {
+    let config_root = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("doc.md"),
         "# Title\n\n```rust\nlet x = 1;\n```",
     )
     .unwrap();
-    let (child, port) = spawn_serve(dir.path());
+    let (child, port) = spawn_serve(config_root.path());
     let _guard = Guard(child);
     let page = ureq::get(&format!(
         "http://127.0.0.1:{port}{}/doc.md",
@@ -210,18 +225,4 @@ fn rendered_markdown_does_not_embed_executable_scripts() {
 
     assert!(!page.contains("<script"));
     assert!(!page.contains("hljs.highlightAll"));
-}
-
-fn assert_browser_boundary_headers(response: &ureq::Response) {
-    assert_eq!(
-        response.header("content-security-policy"),
-        Some(
-            "sandbox; default-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src https://cdn.jsdelivr.net"
-        )
-    );
-    assert_eq!(response.header("x-content-type-options"), Some("nosniff"));
-    assert_eq!(
-        response.header("cross-origin-resource-policy"),
-        Some("same-origin")
-    );
 }
