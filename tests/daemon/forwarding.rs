@@ -41,6 +41,52 @@ bridge_port = {bridge_port}
 }
 
 #[test]
+fn a_notified_url_still_gets_its_callback_port_served() {
+    // Given: an allowlist daemon whose peer is a fake devbox bridge, and a
+    // login URL that is NOT allowlisted — the paste path.
+    let dir = tempfile::tempdir().unwrap();
+    let bridged = dir.path().join("bridged");
+    let bridge_port = spawn_bridge(&bridged);
+    let callback_port = test_port();
+    let opener = stub(dir.path(), "opener", "true");
+    let notifier = stub(dir.path(), "notifier", "true");
+    let (daemon, port) = start(
+        dir.path(),
+        &format!(
+            r#"
+mode = "allowlist"
+opener = ["{opener}"]
+notifier = ["{notifier}"]
+peer = "127.0.0.1"
+bridge_port = {bridge_port}
+"#
+        ),
+    );
+
+    // When: the URL arrives, is only notified, and the user opens it by hand —
+    // then the provider redirects their browser to the loopback callback.
+    send(
+        port,
+        &format!(
+            "https://sso.example.com/authorize?redirect_uri=http%3A%2F%2Flocalhost%3A{callback_port}%2Fcallback"
+        ),
+    );
+    daemon.wait_for_log("decision=notify");
+    daemon.wait_for_log(&format!("callback port {callback_port} served on loopback"));
+    let mut browser = connect(callback_port);
+    browser
+        .write_all(b"GET /callback?code=x HTTP/1.1\r\n\r\n")
+        .unwrap();
+
+    // Then: the callback finds a listener and reaches the bridge — the paste
+    // gate controls browser opening, never the callback plumbing.
+    assert_eq!(
+        wait_for(&bridged).trim(),
+        format!("CONNECT {callback_port}")
+    );
+}
+
+#[test]
 fn callback_setup_failure_still_opens_url() {
     // Given: a daemon with no peer, so no callback port can be served at all.
     let dir = tempfile::tempdir().unwrap();
