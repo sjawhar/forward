@@ -94,31 +94,36 @@ fn handle_connection(
     let Some(url) = read_url(stream) else {
         return;
     };
+    // Callback ports belong to the URL, not to the open decision. A notified
+    // URL is handed to the user precisely so they can open it themselves, and
+    // that login's callback must find a listener when the provider redirects
+    // to localhost — otherwise the paste path completes the auth page and then
+    // dies on a refused connection. Leasing on notify grants nothing new:
+    // this machine is the bridge's authorized peer, so any local process
+    // could already ask the bridge directly for anything the lease relays.
+    forward_url(&cfg, &url, &leases);
     match decide(&cfg, &url) {
         Decision::Open => {
             eprintln!("forward: URL {url} decision=open");
-            open_permitted_url(&cfg, &url, &recent_opens, &leases);
+            open_permitted_url(&cfg, &url, &recent_opens);
         }
         Decision::Notify => {
             eprintln!("forward: URL {url} decision=notify");
             if notify_url(&cfg, &url) {
                 eprintln!("forward: notification approved; opening {url}");
-                open_permitted_url(&cfg, &url, &recent_opens, &leases);
+                open_permitted_url(&cfg, &url, &recent_opens);
             }
         }
     }
 }
 
-fn open_permitted_url(cfg: &Config, url: &Url, recent_opens: &Mutex<RecentOpens>, leases: &Leases) {
+fn open_permitted_url(cfg: &Config, url: &Url, recent_opens: &Mutex<RecentOpens>) {
     let decision = match recent_opens.lock() {
         Ok(mut opens) => opens.record(url, Instant::now()),
         Err(poisoned) => poisoned.into_inner().record(url, Instant::now()),
     };
     match decision {
-        OpenDecision::Permit => {
-            forward_url(cfg, url, leases);
-            open_url(cfg, url);
-        }
+        OpenDecision::Permit => open_url(cfg, url),
         OpenDecision::Drop { count } => {
             eprintln!("forward: dropping {url}: opened {count} times in 2s, refusing to loop")
         }
