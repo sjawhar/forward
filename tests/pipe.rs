@@ -33,13 +33,18 @@ fn spawn_greeting_upstream() -> (u16, mpsc::Receiver<Vec<u8>>) {
     (port, answered)
 }
 
-/// An upstream that accepts and immediately resets, the way a callback tool that
-/// crashed mid-request does.
-fn spawn_resetting_upstream() -> u16 {
+/// An upstream that accepts and then resets, the way a callback tool that
+/// crashed mid-request does. The reset waits for `dialed`: on a slow machine an
+/// immediate RST can land while the dialing side's `connect()` is still
+/// returning, failing the dial itself instead of the copy the test is about.
+fn spawn_resetting_upstream(dialed: mpsc::Receiver<()>) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
         let (stream, _) = listener.accept().unwrap();
+        // A timeout still resets, so a wedged dialer fails the test loudly
+        // instead of hanging it.
+        let _ = dialed.recv_timeout(Duration::from_secs(5));
         let stream = socket2::Socket::from(stream);
         stream.set_linger(Some(Duration::ZERO)).unwrap();
         drop(stream);
@@ -110,9 +115,20 @@ fn half_close_from_the_upstream_reaches_the_client() {
 
 #[test]
 fn a_mid_copy_reset_surfaces_as_an_error() {
-    // Given: an upstream that resets, and a client that stays idle, so the
-    // client-to-upstream copy is parked on a read that will never complete.
-    let (front_port, outcome) = spawn_pipe(spawn_resetting_upstream());
+    // Given: an upstream that resets only once the pipe holds both sockets,
+    // and a client that stays idle, so the client-to-upstream copy is parked
+    // on a read that will never complete on its own.
+    let (dialed, dial_observed) = mpsc::channel();
+    let upstream_port = spawn_resetting_upstream(dial_observed);
+    let front = TcpListener::bind("127.0.0.1:0").unwrap();
+    let front_port = front.local_addr().unwrap().port();
+    let (outcomes, outcome) = mpsc::channel();
+    std::thread::spawn(move || {
+        let (client, _) = front.accept().unwrap();
+        let up = TcpStream::connect(("127.0.0.1", upstream_port)).unwrap();
+        let _ = dialed.send(());
+        let _ = outcomes.send(forward::pipe::bidirectional(client, up));
+    });
     let _client = TcpStream::connect(("127.0.0.1", front_port)).unwrap();
 
     // When: the reset lands mid-copy.
