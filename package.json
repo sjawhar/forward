@@ -1,6 +1,6 @@
 {
   "name": "secretsd",
-  "version": "1.0.4",
+  "version": "2.0.0",
   "description": "OpenCode plugin for the secretsd session secrets broker.",
   "type": "module",
   "main": "opencode/plugins/secretsd.ts",
