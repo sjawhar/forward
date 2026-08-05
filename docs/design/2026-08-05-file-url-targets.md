@@ -35,6 +35,10 @@ Details:
   (`file:///doc.md#anchor` → `http://…/doc.md#anchor`); anchors are
   common in agent-emitted links.
 - Missing file → existing `TargetError::NotFound`, same as a bare path.
+- Relative and opaque `file:` spellings are whatever the `url` crate
+  normalizes them to — `file:x` parses as `file:///x`, so they resolve as
+  absolute paths, never against the cwd. No new reachability: any
+  resulting path was already openable as a bare path.
 - No laptop-side or protocol change. The laptop only ever sees the http
   preview URL, so the security model (peer address check, scheme
   whitelist) is untouched.
@@ -63,6 +67,8 @@ Unit tests in `src/target/tests.rs`:
 - `file://otherhost/path` → `Invalid`.
 - Missing file → `NotFound`.
 - Fragment preserved.
+- Non-UTF-8 path bytes survive the decode/re-encode (the branch keeps a
+  `PathBuf` end-to-end).
 
 Manual end-to-end: `forward open file:///…` on a real file opens the
 preview in the laptop browser.
