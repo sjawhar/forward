@@ -107,9 +107,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Each cross container gets its own target dir, as ci.yml's cross jobs
+          # and the previous release workflow do. Sharing one rust-cache-restored
+          # target/ across both containers left the aarch64 build resolving stale
+          # host proc-macro artifacts (E0463 on zerofrom_derive) in this
+          # workflow's first run.
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+            export CARGO_TARGET_DIR="target/cross-$target"
             cross build --locked --release --target "$target"
-            tar -czf "forward-$target.tar.gz" -C "target/$target/release" forward
+            tar -czf "forward-$target.tar.gz" -C "$CARGO_TARGET_DIR/$target/release" forward
             tar -tzf "forward-$target.tar.gz" | grep -Fx forward
           done
 
