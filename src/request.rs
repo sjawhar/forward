@@ -6,7 +6,7 @@ use url::Url;
 const MAX_URL_BYTES: usize = 8_192;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) fn read_url(stream: TcpStream) -> Option<Url> {
+pub(crate) fn read_url(stream: &TcpStream) -> Option<Url> {
     let line = String::from_utf8(read_line(stream)?)
         .map_err(|error| {
             eprintln!("forward: invalid daemon URL bytes: {error}");
@@ -24,7 +24,7 @@ pub(crate) fn read_url(stream: TcpStream) -> Option<Url> {
     Some(url)
 }
 
-fn read_line(stream: TcpStream) -> Option<Vec<u8>> {
+fn read_line(stream: &TcpStream) -> Option<Vec<u8>> {
     let mut reader = BufReader::new(stream);
     let mut bytes = Vec::new();
     let started = Instant::now();

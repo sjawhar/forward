@@ -5,12 +5,12 @@ use forward::{bridge, doctor, send, serve, target};
 use std::io::Write as _;
 
 mod daemon;
+mod opener;
 mod process;
 mod ratelimit;
 mod request;
 
 pub(crate) use forward::callback::FILES_PORT;
-const OPENER_REENTRY_ERROR: &str = "forward: refusing to open URL because the configured opener is routing back into forward open; set opener to an absolute path such as /usr/bin/xdg-open";
 
 #[derive(Parser)]
 #[command(
@@ -73,7 +73,7 @@ fn main() -> anyhow::Result<()> {
             config,
         } => {
             let (cfg, _) = load_config(config)?;
-            open_target(
+            opener::open_target(
                 &cfg,
                 &target,
                 port,
@@ -123,26 +123,6 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-fn open_target(
-    cfg: &Config,
-    target: &str,
-    channel_port: u16,
-    opener_reentry: bool,
-) -> anyhow::Result<()> {
-    if opener_reentry {
-        anyhow::bail!(OPENER_REENTRY_ERROR);
-    }
-    let url = target::to_url(target, &cfg.listen, FILES_PORT)?;
-    bridge::arm_for_url(cfg, &url, &bridge::arm_socket_path());
-    if let Err(error) = send::send_url(cfg, &url, channel_port) {
-        // A URL that cannot be delivered is handed back rather than dropped.
-        let _ = writeln!(std::io::stdout(), "{url}");
-        let _ = send::osc52_copy(url.as_str());
-        return Err(error.into());
-    }
-    Ok(())
-}
-
 fn load_config(path: Option<std::path::PathBuf>) -> anyhow::Result<(Config, std::path::PathBuf)> {
     let config_path =
         std::path::absolute(path.unwrap_or_else(|| {
@@ -175,30 +155,4 @@ fn default_config_path() -> anyhow::Result<std::path::PathBuf> {
 fn exit_with_error(error: impl std::fmt::Display) -> ! {
     eprintln!("{error}");
     std::process::exit(1)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{Config, open_target};
-    use std::io::Read as _;
-
-    #[test]
-    fn open_sends_url_when_opener_reentry_is_unset() {
-        // Given: a default configuration and a listener for the opener channel.
-        let cfg = Config::default_values_for_test();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let receiver = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut received = String::new();
-            stream.read_to_string(&mut received).unwrap();
-            received
-        });
-
-        // When: open runs without the re-entry marker.
-        open_target(&cfg, "https://example.com/redirect", port, false).unwrap();
-
-        // Then: it sends the URL through the opener channel.
-        assert_eq!(receiver.join().unwrap(), "https://example.com/redirect\n");
-    }
 }

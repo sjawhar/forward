@@ -1,3 +1,4 @@
+use std::io::{BufRead as _, Write as _};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -23,6 +24,17 @@ fn open_arms_a_dynamic_callback_port_on_the_local_arming_socket() {
     wait_for_socket(&socket);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let channel_port = listener.local_addr().unwrap().port();
+    // `forward open` waits to be told what happened to the URL, so the stand-in
+    // counterpart has to answer as the daemon would.
+    let counterpart = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut url = String::new();
+        std::io::BufReader::new(&stream)
+            .read_line(&mut url)
+            .unwrap();
+        stream.write_all(b"opened\n").unwrap();
+        stream.flush().unwrap();
+    });
     let config = runtime_dir.path().join("config.toml");
     std::fs::write(&config, "").unwrap();
 
@@ -43,6 +55,7 @@ fn open_arms_a_dynamic_callback_port_on_the_local_arming_socket() {
     // Then: the callback port arrives at the socket before the URL is delivered.
     assert!(output.status.success(), "stderr: {:?}", output.stderr);
     assert!(armed.is_armed(8400));
+    counterpart.join().unwrap();
 }
 
 #[test]

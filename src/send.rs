@@ -1,7 +1,49 @@
 use crate::config::{Config, ConfigError};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use std::io::Write;
+use std::io::{BufRead as _, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+use std::time::Duration;
+
+/// How long to wait for the daemon to report what it did with a URL. The
+/// counterpart answers as soon as it has decided, before any browser has
+/// finished loading, so this only has to cover the round trip.
+const OUTCOME_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// What the counterpart did with a URL.
+///
+/// The caller cannot infer this: the allowlist lives in the daemon's config on
+/// the machine with the browser, so only the daemon knows whether a URL opened.
+/// Reporting it is what lets `forward open` fail when nothing opened, which in
+/// turn is what lets callers that read an exit status — `xdg-open` consumers,
+/// Python's `webbrowser`, agents reading tool output — fall back to handling the
+/// URL themselves instead of waiting for a browser that never arrived.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// The opener was spawned; a browser is coming up.
+    Opened,
+    /// The URL was handed to the user as a notification and a clipboard entry.
+    /// Nothing opened, and nothing will without the user acting.
+    Notified,
+}
+
+impl Outcome {
+    #[must_use]
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            Self::Opened => "opened",
+            Self::Notified => "notified",
+        }
+    }
+
+    #[must_use]
+    pub fn from_wire(line: &str) -> Option<Self> {
+        match line.trim() {
+            "opened" => Some(Self::Opened),
+            "notified" => Some(Self::Notified),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum SendError {
@@ -18,9 +60,15 @@ pub enum SendError {
     },
     #[error("forward: send failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error(
+        "forward: the counterpart at {target} accepted {url} but never reported what it did with it; \
+         upgrade the daemon so opens can be told apart from handovers"
+    )]
+    Unreported { target: String, url: String },
 }
 
-/// Sends one newline-terminated URL to the counterpart's URL channel.
+/// Sends one newline-terminated URL to the counterpart's URL channel and returns
+/// what the counterpart did with it.
 ///
 /// The literal `peer` address is dialled, never a name: a name would put DNS and
 /// the Tailscale admin console inside the decision. A `peer` that will not parse
@@ -36,7 +84,7 @@ pub enum SendError {
 /// is not a swallow. A review read it as one; changing it would break the
 /// migration step that removes the SSH forwards only after the tailnet path is
 /// verified working.
-pub fn send_url(cfg: &Config, url: &url::Url, channel_port: u16) -> Result<(), SendError> {
+pub fn send_url(cfg: &Config, url: &url::Url, channel_port: u16) -> Result<Outcome, SendError> {
     let ip = cfg
         .peer_ip()
         .map_err(|source| SendError::Config { source })?
@@ -50,7 +98,17 @@ pub fn send_url(cfg: &Config, url: &url::Url, channel_port: u16) -> Result<(), S
     })?;
     writeln!(stream, "{url}")?;
     stream.flush()?;
-    Ok(())
+    stream.set_read_timeout(Some(OUTCOME_TIMEOUT))?;
+
+    // A counterpart that answers nothing is a counterpart whose answer we must
+    // not invent: guessing "opened" is exactly the silent success that leaves a
+    // caller waiting on a browser that was never launched.
+    let mut line = String::new();
+    BufReader::new(&stream).read_line(&mut line)?;
+    Outcome::from_wire(&line).ok_or_else(|| SendError::Unreported {
+        target: target.to_string(),
+        url: url.to_string(),
+    })
 }
 
 fn osc52_sequence(text: &str, in_tmux: bool) -> String {
@@ -71,88 +129,4 @@ pub fn osc52_copy(text: &str) -> std::io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::Read;
-
-    #[test]
-    fn sends_newline_terminated_url() {
-        // Given: an opener-channel listener, and a config with no peer, which
-        // means loopback.
-        let cfg = Config::default_values_for_test();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let handle = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut received = String::new();
-            stream.read_to_string(&mut received).unwrap();
-            received
-        });
-
-        // When: a URL is sent to the listener.
-        send_url(
-            &cfg,
-            &url::Url::parse("https://example.com/a").unwrap(),
-            port,
-        )
-        .unwrap();
-
-        // Then: the listener receives one newline-terminated URL.
-        assert_eq!(handle.join().unwrap(), "https://example.com/a\n");
-    }
-
-    #[test]
-    fn osc52_sequence_is_bare_outside_tmux() {
-        // Given: text copied outside tmux.
-        let text = "hello";
-
-        // When: OSC 52 is encoded.
-        let sequence = osc52_sequence(text, false);
-
-        // Then: it is a bare OSC 52 sequence.
-        assert_eq!(sequence, "\x1b]52;c;aGVsbG8=\x07");
-    }
-
-    #[test]
-    fn osc52_sequence_is_wrapped_inside_tmux() {
-        // Given: text copied inside tmux.
-        let text = "hello";
-
-        // When: OSC 52 is encoded.
-        let sequence = osc52_sequence(text, true);
-
-        // Then: tmux passthrough wraps the OSC 52 sequence.
-        assert_eq!(sequence, "\x1bPtmux;\x1b\x1b]52;c;aGVsbG8=\x07\x1b\\");
-    }
-
-    #[test]
-    fn unreachable_peer_is_reported_with_its_target() {
-        // Given: a peer with nothing listening. Port 9 (discard) is outside the
-        // ephemeral range, so nothing binds it in tests.
-        let mut cfg = Config::default_values_for_test();
-        cfg.peer = "127.0.0.1".to_owned();
-
-        // When: a URL is sent.
-        let result = send_url(&cfg, &url::Url::parse("https://example.com").unwrap(), 9);
-
-        // Then: the error names what could not be reached, so the caller can
-        // print and OSC 52 copy the URL instead of losing it.
-        match result {
-            Err(SendError::Unreachable { target, .. }) => assert_eq!(target, "127.0.0.1:9"),
-            other => panic!("expected Unreachable, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn malformed_peer_is_reported_rather_than_falling_back_to_loopback() {
-        // Given: a peer that is not an address, which Config::validate rejects.
-        let mut cfg = Config::default_values_for_test();
-        cfg.peer = "not-an-address".to_owned();
-
-        // When: a URL is sent.
-        let result = send_url(&cfg, &url::Url::parse("https://example.com").unwrap(), 9);
-
-        // Then: it fails loudly rather than silently sending to this machine.
-        assert!(matches!(result, Err(SendError::Config { .. })));
-    }
-}
+mod tests;
