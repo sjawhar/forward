@@ -5,8 +5,10 @@ use forward::config::Config;
 use forward::localhost::forward_ports;
 use forward::peer::authorized;
 use forward::policy::{Decision, decide};
+use forward::send::Outcome;
 mod notification;
 use notification::notify_url;
+use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -86,12 +88,12 @@ pub fn run(cfg: Config, config_path: &Path, port: u16) -> Result<(), DaemonError
     Ok(())
 }
 fn handle_connection(
-    stream: TcpStream,
+    mut stream: TcpStream,
     cfg: Config,
     recent_opens: Arc<Mutex<RecentOpens>>,
     leases: Leases,
 ) {
-    let Some(url) = read_url(stream) else {
+    let Some(url) = read_url(&stream) else {
         return;
     };
     // Callback ports belong to the URL, not to the open decision. A notified
@@ -102,18 +104,31 @@ fn handle_connection(
     // this machine is the bridge's authorized peer, so any local process
     // could already ask the bridge directly for anything the lease relays.
     forward_url(&cfg, &url, &leases);
-    match decide(&cfg, &url) {
+    let outcome = match decide(&cfg, &url) {
         Decision::Open => {
             eprintln!("forward: URL {url} decision=open");
             open_permitted_url(&cfg, &url, &recent_opens);
+            Outcome::Opened
         }
         Decision::Notify => {
             eprintln!("forward: URL {url} decision=notify");
             if notify_url(&cfg, &url) {
                 eprintln!("forward: notification approved; opening {url}");
                 open_permitted_url(&cfg, &url, &recent_opens);
+                Outcome::Opened
+            } else {
+                Outcome::Notified
             }
         }
+    };
+    // The sender blocks on this line to learn whether a browser is coming, so a
+    // failure to write it must be visible here rather than leaving them to time
+    // out against a silent socket.
+    if let Err(error) = writeln!(stream, "{}", outcome.as_wire()) {
+        eprintln!(
+            "forward: failed to report {} for {url}: {error}",
+            outcome.as_wire()
+        );
     }
 }
 

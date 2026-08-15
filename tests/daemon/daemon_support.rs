@@ -1,4 +1,4 @@
-use std::io::{Read, Write};
+use std::io::{BufRead as _, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
@@ -134,6 +134,21 @@ pub fn start_expecting_failure(dir: &Path, config_body: &str) -> String {
 pub fn send(port: u16, url: &str) {
     let mut stream = connect(port);
     writeln!(stream, "{url}").unwrap();
+}
+
+/// Sends a URL and returns the outcome line the daemon reports for it, which is
+/// what `forward open` reads to tell an open from a handover.
+pub fn send_reading_outcome(port: u16, url: &str) -> String {
+    let mut stream = connect(port);
+    writeln!(stream, "{url}").unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(10)))
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(&stream)
+        .read_line(&mut line)
+        .unwrap();
+    line
 }
 
 pub fn send_bytes(port: u16, bytes: &[u8]) {

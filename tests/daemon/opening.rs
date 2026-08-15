@@ -1,4 +1,6 @@
-use super::daemon_support::{connect, send, spawn_bridge, start, stub, test_port, wait_for};
+use super::daemon_support::{
+    connect, send, send_reading_outcome, spawn_bridge, start, stub, test_port, wait_for,
+};
 
 #[test]
 fn allowlist_hit_opens_and_forwards_localhost() {
@@ -149,4 +151,71 @@ opener = ["{opener}"]
     assert!(wait_for(&opened).contains("https://example.com/first"));
     send(port, "https://example.com/second");
     daemon.wait_for_log("opener spawned for https://example.com/second");
+}
+
+#[test]
+fn an_opened_url_is_reported_as_opened() {
+    // Given: a daemon that allowlists the URL it is about to receive.
+    let dir = tempfile::tempdir().unwrap();
+    let opened = dir.path().join("opened");
+    let opener = stub(
+        dir.path(),
+        "opener",
+        &format!("echo \"$@\" >> {}", opened.display()),
+    );
+    let (_daemon, port) = start(
+        dir.path(),
+        &format!(
+            r#"
+opener = ["{opener}"]
+allow = ["example.com"]
+"#
+        ),
+    );
+
+    // When: the URL arrives.
+    let outcome = send_reading_outcome(port, "https://example.com/welcome");
+
+    // Then: the sender is told a browser is coming, so `forward open` can exit
+    // zero and its caller can wait for the callback.
+    assert_eq!(outcome, "opened\n");
+    assert!(wait_for(&opened).contains("https://example.com/welcome"));
+}
+
+#[test]
+fn a_notified_url_is_reported_as_notified_rather_than_opened() {
+    // Given: a daemon whose allowlist does not cover the URL, and a notifier that
+    // hands it over without approving an open.
+    let dir = tempfile::tempdir().unwrap();
+    let opened = dir.path().join("opened");
+    let notified = dir.path().join("notified");
+    let opener = stub(
+        dir.path(),
+        "opener",
+        &format!("echo \"$@\" >> {}", opened.display()),
+    );
+    let notifier = stub(
+        dir.path(),
+        "notifier",
+        &format!("echo \"$@\" >> {}", notified.display()),
+    );
+    let (_daemon, port) = start(
+        dir.path(),
+        &format!(
+            r#"
+opener = ["{opener}"]
+notifier = ["{notifier}"]
+allow = ["github.com"]
+"#
+        ),
+    );
+
+    // When: the URL arrives.
+    let outcome = send_reading_outcome(port, "https://example.com/surprise");
+
+    // Then: the sender is told nothing opened. This is the whole point: an
+    // exit-zero here would leave callers waiting on a browser that never starts.
+    assert_eq!(outcome, "notified\n");
+    assert!(wait_for(&notified).contains("https://example.com/surprise"));
+    assert!(!opened.exists());
 }
