@@ -53,7 +53,11 @@ struct DoctorPorts {
 fn run_doctor(ports: DoctorPorts) -> std::process::Output {
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
-    std::fs::write(&config, format!("bridge_port = {}\n", ports.bridge)).unwrap();
+    std::fs::write(
+        &config,
+        format!("bridge_port = {}\nrelay_port = 0\n", ports.bridge),
+    )
+    .unwrap();
     std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
         .args([
             "doctor",
