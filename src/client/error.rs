@@ -73,6 +73,14 @@ pub enum CliError {
     EncryptEditedSecret(PathBuf),
     /// Atomically installing the new ciphertext failed.
     InstallEditedSecret,
+    /// Reading the piped secret value failed.
+    PipedHumanRead(std::io::Error),
+    /// A piped human secret retained an empty value.
+    EmptyPipedHumanSecret(SecretName),
+    /// A piped human secret was not one assignment for its requested key.
+    InvalidPipedHumanSecret(SecretName),
+    /// Disabling core dumps before reading a piped secret failed.
+    Hardening(crate::hardening::HardeningError),
     /// The broker rejected the request with a stable protocol error code.
     Broker(ErrCode),
     /// Broker transport or framing failed before an error code was available.
@@ -159,6 +167,16 @@ impl fmt::Display for CliError {
                 target.display()
             ),
             Self::InstallEditedSecret => formatter.write_str("could not install encrypted secret"),
+            Self::PipedHumanRead(error) => write!(formatter, "could not read piped secret: {error}"),
+            Self::EmptyPipedHumanSecret(name) => {
+                write!(formatter, "piped secret '{}' value must not be empty", name.as_str())
+            }
+            Self::InvalidPipedHumanSecret(name) => write!(
+                formatter,
+                "piped secret '{}' must be one single-line assignment value",
+                name.as_str()
+            ),
+            Self::Hardening(error) => write!(formatter, "could not disable core dumps: {error}"),
             Self::Broker(code) => write!(formatter, "{AGENT_NOTICE} {}", broker_guidance(*code)),
             Self::BrokerTransport(error) => write!(formatter, "{AGENT_NOTICE} {error}"),
             Self::Exec(error) => write!(formatter, "could not execute command: {error}"),
@@ -175,7 +193,9 @@ impl std::error::Error for CliError {
             | Self::HumanDirectory(error)
             | Self::Exec(error)
             | Self::Stdout(error)
-            | Self::EditorStart(error) => Some(error),
+            | Self::EditorStart(error)
+            | Self::PipedHumanRead(error) => Some(error),
+            Self::Hardening(error) => Some(error),
             Self::Config(error) => Some(error),
             Self::BrokerTransport(error) => Some(error),
             Self::Usage
@@ -195,6 +215,8 @@ impl std::error::Error for CliError {
             | Self::EmptyEditedHumanSecret(_)
             | Self::EncryptEditedSecret(_)
             | Self::InstallEditedSecret
+            | Self::EmptyPipedHumanSecret(_)
+            | Self::InvalidPipedHumanSecret(_)
             | Self::Broker(_) => None,
         }
     }

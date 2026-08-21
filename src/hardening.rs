@@ -1,4 +1,7 @@
-//! Process-level hardening applied before the daemon holds any plaintext.
+//! Process-level hardening applied before any plaintext is held.
+//!
+//! This covers the daemon before it holds decrypted secrets, and the client
+//! before it reads a non-interactive human-secret write from stdin.
 
 use std::fmt;
 
@@ -89,14 +92,22 @@ pub fn validate_memlock_limit() -> Result<(), HardeningError> {
     validate_memlock_limits(soft, hard)
 }
 
+/// Disable core dumps before this process can hold plaintext.
+///
+/// The core limit is inherited by child processes, protecting commands spawned
+/// with plaintext on their standard input.
+pub fn apply_no_core_dumps() -> Result<(), HardeningError> {
+    set_dumpable(false).map_err(HardeningError::Dumpable)?;
+    setrlimit(Resource::RLIMIT_CORE, 0, 0).map_err(HardeningError::CoreLimit)?;
+    Ok(())
+}
+
 /// Apply every hardening step.
 ///
 /// Dumpability and core limits are set before memlock because they must hold
 /// even when optional memlock is unavailable in a test environment.
 pub fn apply(policy: MemlockPolicy) -> Result<(), HardeningError> {
-    set_dumpable(false).map_err(HardeningError::Dumpable)?;
-    setrlimit(Resource::RLIMIT_CORE, 0, 0).map_err(HardeningError::CoreLimit)?;
-
+    apply_no_core_dumps()?;
     match validate_memlock_limit() {
         Ok(()) => {}
         Err(error) => {

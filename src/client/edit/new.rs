@@ -5,9 +5,11 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{ChildStdout, Command, Stdio};
 
-use nix::unistd::Uid;
+use nix::fcntl::{Flock, FlockArg};
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::{Pid, Uid};
 use tempfile::{Builder, TempPath};
 use zeroize::Zeroize;
 
@@ -15,6 +17,8 @@ use super::super::{CliError, runtime_dir};
 use crate::secret::{SecretBytes, SecretName, parse_single_assignment};
 
 const SCRUB_BLOCK: [u8; 8192] = [0; 8192];
+const MAX_SOPS_CIPHERTEXT_BYTES: u64 = 1024 * 1024;
+
 const SCRUB_BLOCK_LEN: u64 = 8192;
 
 pub(super) fn agent(path: &Path, local: bool) -> Result<(), CliError> {
@@ -28,6 +32,23 @@ pub(super) fn agent(path: &Path, local: bool) -> Result<(), CliError> {
 
 pub(super) fn human(path: &Path, name: &SecretName) -> Result<(), CliError> {
     create(path, &format!("{}=\n", name.as_str()), Some(name))
+}
+/// Store a human-tier key from a non-terminal standard input stream.
+///
+/// Concurrent calls serialize on the target directory; the last writer wins,
+/// and each completed write is atomic. Rotation replaces the ciphertext inode,
+/// so `HumanStore` detects the changed `FileIdentity` and revokes stale grants.
+pub(super) fn write_piped_human(path: &Path, name: &SecretName) -> Result<(), CliError> {
+    crate::hardening::apply_no_core_dumps().map_err(CliError::Hardening)?;
+    let assignment = read_piped_assignment(name)?;
+    let directory = path.parent().ok_or(CliError::InstallEditedSecret)?;
+    let directory = File::open(directory).map_err(|_| CliError::InstallEditedSecret)?;
+    let _lock = Flock::lock(directory, FlockArg::LockExclusive)
+        .map_err(|_| CliError::InstallEditedSecret)?;
+    let rotated = path.exists();
+    encrypt_bytes(&assignment, path)?;
+    let action = if rotated { "rotated" } else { "created" };
+    writeln!(std::io::stdout().lock(), "{action} {}", path.display()).map_err(CliError::Stdout)
 }
 
 fn create(path: &Path, prefill: &str, human_name: Option<&SecretName>) -> Result<(), CliError> {
@@ -67,6 +88,42 @@ fn validate_human(plaintext: &mut PlaintextTemp, name: &SecretName) -> Result<()
         Ok(())
     }
 }
+fn read_piped_assignment(name: &SecretName) -> Result<SecretBytes, CliError> {
+    let stdin = std::io::stdin();
+
+    let mut value = Vec::new();
+    let read_result = stdin.lock().read_to_end(&mut value);
+    if let Err(error) = read_result {
+        value.zeroize();
+        return Err(CliError::PipedHumanRead(error));
+    }
+    if value.last() == Some(&b'\n') {
+        let _ = value.pop();
+        if value.last() == Some(&b'\r') {
+            let _ = value.pop();
+        }
+    }
+    if value.is_empty() {
+        value.zeroize();
+        return Err(CliError::EmptyPipedHumanSecret(name.clone()));
+    }
+    if value.contains(&b'\n') || value.contains(&b'\r') {
+        value.zeroize();
+        return Err(CliError::InvalidPipedHumanSecret(name.clone()));
+    }
+
+    let mut assignment = Vec::new();
+    assignment.extend_from_slice(name.as_str().as_bytes());
+    assignment.push(b'=');
+    assignment.extend_from_slice(&value);
+    assignment.push(b'\n');
+    value.zeroize();
+    let assignment = SecretBytes::from_vec(assignment);
+    if parse_single_assignment(assignment.as_slice(), name).is_err() {
+        return Err(CliError::InvalidPipedHumanSecret(name.clone()));
+    }
+    Ok(assignment)
+}
 
 fn encrypt(plaintext: &mut PlaintextTemp, target: &Path) -> Result<(), CliError> {
     let directory = target.parent().ok_or(CliError::InstallEditedSecret)?;
@@ -79,12 +136,7 @@ fn encrypt(plaintext: &mut PlaintextTemp, target: &Path) -> Result<(), CliError>
         .as_file()
         .try_clone()
         .map_err(|_| CliError::InstallEditedSecret)?;
-    let mut child = Command::new("sops")
-        .current_dir(directory)
-        .arg("encrypt")
-        .arg("--filename-override")
-        .arg(target)
-        .args(["--input-type", "dotenv", "--output-type", "dotenv"])
+    let mut child = sops_encrypt_command(directory, target)
         .stdin(Stdio::from(input))
         .stdout(Stdio::from(output))
         .stderr(Stdio::piped())
@@ -107,6 +159,89 @@ fn encrypt(plaintext: &mut PlaintextTemp, target: &Path) -> Result<(), CliError>
     }
     ciphertext
         .persist_noclobber(target)
+        .map(|_| ())
+        .map_err(|_| CliError::InstallEditedSecret)
+}
+
+fn sops_encrypt_command(directory: &Path, target: &Path) -> Command {
+    let mut command = Command::new("sops");
+    command
+        .current_dir(directory)
+        .arg("encrypt")
+        .arg("--filename-override")
+        .arg(target)
+        .args(["--input-type", "dotenv", "--output-type", "dotenv"]);
+    command
+}
+
+fn drain_sops_stdout(mut stdout: ChildStdout, process_id: Pid) -> Result<Vec<u8>, ()> {
+    let mut output = Vec::new();
+    let read_result = stdout
+        .by_ref()
+        .take(MAX_SOPS_CIPHERTEXT_BYTES + 1)
+        .read_to_end(&mut output);
+    let output_too_large =
+        u64::try_from(output.len()).map_or(true, |length| length > MAX_SOPS_CIPHERTEXT_BYTES);
+    if read_result.is_err() || output_too_large {
+        output.zeroize();
+        let _ = kill(process_id, Signal::SIGKILL);
+        Err(())
+    } else {
+        Ok(output)
+    }
+}
+
+fn encrypt_bytes(plaintext: &SecretBytes, target: &Path) -> Result<(), CliError> {
+    let directory = target.parent().ok_or(CliError::InstallEditedSecret)?;
+    let mut child = sops_encrypt_command(directory, target)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|_| CliError::EncryptEditedSecret(target.to_path_buf()))?;
+    let process_id = i32::try_from(child.id())
+        .map(Pid::from_raw)
+        .map_err(|_| CliError::EncryptEditedSecret(target.to_path_buf()))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| CliError::EncryptEditedSecret(target.to_path_buf()))?;
+    let stdout_reader = std::thread::spawn(move || drain_sops_stdout(stdout, process_id));
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| CliError::EncryptEditedSecret(target.to_path_buf()))?;
+    let stderr_reader =
+        std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
+    let mut stdin = child
+        .stdin
+        .take()
+        .ok_or_else(|| CliError::EncryptEditedSecret(target.to_path_buf()))?;
+    let write_result = stdin.write_all(plaintext.as_slice());
+    drop(stdin);
+    let status = child.wait();
+    let stdout_result = stdout_reader.join();
+    let stderr_result = stderr_reader.join();
+    let Ok(Ok(mut output)) = stdout_result else {
+        return Err(CliError::EncryptEditedSecret(target.to_path_buf()));
+    };
+    if write_result.is_err()
+        || !matches!(status, Ok(status) if status.success())
+        || !matches!(stderr_result, Ok(Ok(_)))
+    {
+        output.zeroize();
+        return Err(CliError::EncryptEditedSecret(target.to_path_buf()));
+    }
+
+    let mut ciphertext = Builder::new()
+        .prefix(".secretsd-ciphertext-")
+        .tempfile_in(directory)
+        .map_err(|_| CliError::InstallEditedSecret)?;
+    let write_result = ciphertext.as_file_mut().write_all(&output);
+    output.zeroize();
+    write_result.map_err(|_| CliError::InstallEditedSecret)?;
+    ciphertext
+        .persist(target)
         .map(|_| ())
         .map_err(|_| CliError::InstallEditedSecret)
 }
