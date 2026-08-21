@@ -121,7 +121,11 @@ In `src/config/tests.rs`:
 - Add `relay_port = 12803` to the TOML in `parses_full_config` so the full-config fixture keeps covering every field.
 - `test_constructor_matches_file_defaults` and `missing_file_gives_defaults` must stay green (both paths flow through `default_relay_port()`); if either enumerates fields explicitly, extend it with `relay_port`.
 
-Note `Config` carries `#[serde(deny_unknown_fields)]` (`src/config.rs:4`): the dotfiles config edits (owned by the Phase 3 section) must not be deployed before the forward release containing this field, or the current daemon/serve fails to parse its config on restart.
+**Serde compatibility — both directions** (`Config` carries `#[serde(deny_unknown_fields)]`, `src/config.rs:4`):
+- **Old binary + new config** (a config containing `relay_port`): parse FAILURE — the running daemon/serve dies on its next restart. The dotfiles config edits (owned by the Phase 3 section) must therefore never be deployed before the forward release carrying this field.
+- **New binary + old config** (no `relay_port` key): parses fine but defaults to `12803`. On the laptop that means the daemon binds the channel before any config says so (harmless: listener up, upstream absent until the relay unit lands, doctor names it). On the devbox it means `forward doctor` applies laptop-role reporting — a failing `browser relay` row and exit 1 — until `relay_port = 0` is deployed there.
+
+The binding deploy order that follows is stated in Task 9 and is the contract with the Phase 3 section.
 
 **Verify:** `cargo test --lib config` — new assertions pass; `unknown_field_errors` and `config_with_retired_ssh_fields_is_refused` still pass.
 
@@ -171,6 +175,16 @@ use std::time::Duration;
 const PIPE_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 /// Waiting after a failed accept avoids a tight EMFILE error loop.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
+/// How many nonblocking scratch reads a refusal spends draining the client's
+/// pending bytes before writing the refusal and closing regardless. Draining
+/// empties the receive queue so close() sends FIN rather than RST and the
+/// refusal text survives to the peer — every legitimate client (a doctor
+/// probe, a misconfigured Puppeteer) sends one burst far smaller than this
+/// budget, so it still gets an empty queue and a readable refusal. The cap
+/// exists because a peer that never stops writing must not pin this handler
+/// — and its ConnectionPermit — forever; past the budget the flooder may lose
+/// the refusal to an RST, which costs nothing.
+const REFUSAL_DRAIN_READS: usize = 32;
 const GENERIC_REFUSAL: &[u8] = b"REFUSED\n";
 const PEER_REFUSAL: &[u8] = b"REFUSED PEER\n";
 const BUSY_REFUSAL: &[u8] = b"REFUSED BUSY\n";
@@ -183,19 +197,61 @@ pub enum BrowserError {
         #[source]
         source: std::io::Error,
     },
+    #[error("forward: failed to start browser relay accept loop: {source}")]
+    Spawn {
+        #[source]
+        source: std::io::Error,
+    },
 }
 ```
 
 (`PIPE_IDLE_TIMEOUT` is deliberately a third private copy — `src/bridge/listener.rs` and `src/callback.rs` each already keep their own; likewise replicate `configure_pipe_timeouts` from `src/callback/relay.rs` as a private fn setting read+write timeouts on both streams.)
 
-Public API, mirrored on `bridge::serve` / `bridge::spawn_with_listener`:
+`fn refuse(stream: &mut TcpStream, response: &[u8])` — a browser-specific, **bounded** variant of `bridge::listener::refuse` (do NOT copy that fn verbatim: its `while matches!(stream.read(..), Ok(count) if count > 0)` drain is unbounded, so a peer that keeps writing could hold the handler and its permit forever; 32 such peers would exhaust `ConnectionLimit` and lock out both real sessions and the doctor probe):
 
-- `pub fn spawn(cfg: &Config) -> Result<(), BrowserError>` — if `cfg.relay_port == 0`: `eprintln!("forward: browser relay channel disabled (relay_port = 0)")` and return `Ok(())`. Otherwise `cfg.validate()` then `cfg.listen_ip()` (map both errors into `BrowserError::Bind` with `address: format!("{}:{}", cfg.listen, cfg.relay_port)` and `std::io::Error::other(source)`, exactly as `bridge::serve` maps them), `TcpListener::bind((ip, cfg.relay_port))` (map to `Bind { address: format!("{ip}:{}", cfg.relay_port), source }`), `eprintln!("forward: browser relay channel on {ip}:{}", cfg.relay_port)`, then `spawn_with_listener(cfg.clone(), listener, SocketAddr::from(([127, 0, 0, 1], RELAY_TARGET_PORT)))`. Binding happens on the caller's thread so a bind failure is fatal to the daemon (Task 4); only the accept loop moves to a thread.
-- `#[doc(hidden)] pub fn spawn_with_listener(cfg: Config, listener: TcpListener, upstream: SocketAddr)` — test seam and production path: `drop(thread::spawn(move || accept_loop(cfg, listener, upstream)))`. The `upstream` parameter exists so tests can stand a stub in for the relay; production passes `127.0.0.1:RELAY_TARGET_PORT`.
-- `fn accept_loop(cfg: Config, listener: TcpListener, upstream: SocketAddr)` — clone of `bridge::listener::accept_loop` without `Armed`/listener-port: per connection acquire `ConnectionLimit::standard()` permit (held across the handler thread via `let _permit = permit;`), refuse with `BUSY_REFUSAL` + `eprintln!("forward: browser relay refused connection: concurrency limit reached")` when exhausted; on accept error `eprintln!("forward: browser relay accept failed: {error}")` + `thread::sleep(ACCEPT_ERROR_BACKOFF)`. A per-connection error kills only that connection: the loop `continue`s.
+```rust
+fn refuse(stream: &mut TcpStream, response: &[u8]) {
+    let _ = stream.set_nonblocking(true);
+    let mut pending = [0_u8; 512];
+    for _ in 0..REFUSAL_DRAIN_READS {
+        if !matches!(stream.read(&mut pending), Ok(count) if count > 0) {
+            break;
+        }
+    }
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.write_all(response);
+}
+```
+
+Bound-before-write rather than write-then-drain, deliberately: writing first would not remove the close-time RST hazard (bytes arriving after the write still force an RST at close, destroying the unread refusal) and would still need a drain bound of its own — whereas a pre-write bounded drain preserves the empty-queue-at-close guarantee for every client with a legitimate read interest, whose whole request fits inside the budget (32 × 512 B = 16 KiB, an order of magnitude above any HTTP upgrade preamble or doctor `GET`). The bound also protects the accept-loop thread itself, which issues `BUSY_REFUSAL` inline exactly as the bridge does. Note: `bridge::listener::refuse` has the same unbounded shape on the callback bridge; that is existing behaviour outside this phase's scope and is flagged to the controller rather than changed here.
+
+Public API, mirrored on `bridge::serve` / `bridge::spawn_with_listener`, with one deliberate difference — **the accept loop is supervised, never a detached fire-and-forget thread**, because an accept-loop death would kill the browser channel while the daemon keeps serving the URL channel, the silent-failure mode the spec forbids:
+
+- `pub fn spawn(cfg: &Config) -> Result<(), BrowserError>` — if `cfg.relay_port == 0`: `eprintln!("forward: browser relay channel disabled (relay_port = 0)")` and return `Ok(())`. Otherwise `cfg.validate()` then `cfg.listen_ip()` (map both errors into `BrowserError::Bind` with `address: format!("{}:{}", cfg.listen, cfg.relay_port)` and `std::io::Error::other(source)`, exactly as `bridge::serve` maps them), `TcpListener::bind((ip, cfg.relay_port))` (map to `Bind { address: format!("{ip}:{}", cfg.relay_port), source }`), `eprintln!("forward: browser relay channel on {ip}:{}", cfg.relay_port)`, then delegate to `spawn_with_listener(cfg.clone(), listener, SocketAddr::from(([127, 0, 0, 1], RELAY_TARGET_PORT)))?`. Binding happens on the caller's thread so a bind failure is fatal to the daemon (Task 4); only the accept loop moves to a thread.
+- `#[doc(hidden)] pub fn spawn_with_listener(cfg: Config, listener: TcpListener, upstream: SocketAddr) -> Result<(), BrowserError>` — test seam and production path:
+
+```rust
+thread::Builder::new()
+    .name("browser-relay".to_owned())
+    .spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            accept_loop(cfg, listener, upstream)
+        }));
+        match outcome {
+            Err(_) => eprintln!("forward: browser relay accept loop panicked; exiting"),
+            Ok(()) => eprintln!("forward: browser relay accept loop ended; exiting"),
+        }
+        std::process::exit(1);
+    })
+    .map(drop)
+    .map_err(|source| BrowserError::Spawn { source })
+```
+
+  Thread-creation failure is a startup error (`Spawn`), not an implicit panic. The `Ok(())` arm defends the same invariant against a future `break`/`return`: an ended accept loop means the channel is dead, and the daemon must die loudly with it rather than keep reporting the URL channel healthy. The `upstream` parameter exists so tests can stand a stub in for the relay; production passes `127.0.0.1:RELAY_TARGET_PORT`.
+- `fn accept_loop(cfg: Config, listener: TcpListener, upstream: SocketAddr)` — clone of `bridge::listener::accept_loop` without `Armed`/listener-port: per connection acquire `ConnectionLimit::standard()` permit (held across the handler thread via `let _permit = permit;`), refuse with `BUSY_REFUSAL` + `eprintln!("forward: browser relay refused connection: concurrency limit reached")` when exhausted; on accept error `eprintln!("forward: browser relay accept failed: {error}")` + `thread::sleep(ACCEPT_ERROR_BACKOFF)`. A per-connection error kills only that connection: the loop `continue`s, and per-connection handler threads stay plain `thread::spawn` exactly like the bridge's — a panic there kills one connection and shows in stderr, which is the intended containment.
 - `fn handle(cfg: &Config, upstream: SocketAddr, mut stream: TcpStream)` — `stream.peer_addr()`; on error refuse `GENERIC_REFUSAL` and return; else delegate to `handle_from(cfg, upstream, remote.ip(), stream)`.
 - `#[doc(hidden)] pub fn handle_from(cfg: &Config, upstream: SocketAddr, remote: IpAddr, mut stream: TcpStream)` — the per-connection path with the remote address supplied by the caller. This seam exists because an integration test cannot originate a connection from a foreign address — the doctrine already written down in `tests/daemon/peer.rs`. Body, in order:
-  1. `if !authorized(cfg, remote)` → `eprintln!("forward: browser relay refused peer {remote}")`, `refuse(&mut stream, PEER_REFUSAL)`, return. The authorization decision is made before any payload byte is read; `refuse` (copy the fn from `src/bridge/listener.rs` verbatim: nonblocking drain of pending bytes, then `write_all(response)`) drains only so the refusal survives TCP RST semantics — pending bytes never influence the decision and never reach the upstream.
+  1. `if !authorized(cfg, remote)` → `eprintln!("forward: browser relay refused peer {remote}")`, `refuse(&mut stream, PEER_REFUSAL)`, return. **The enforced invariant, stated precisely:** the authorization decision is made before any payload byte is inspected or forwarded, and the upstream is never dialed for an unauthorized peer; the refusal's bounded drain-and-discard exists only for RST-safe delivery of the refusal text, and the drained bytes influence nothing and reach nothing. (The spec's older "before reading a byte" wording is being amended to this bounded-drain ruling — plan to this behaviour.)
   2. `TcpStream::connect(upstream)`; on error `eprintln!("forward: browser relay could not reach {upstream}: {error}")`, `refuse(&mut stream, GENERIC_REFUSAL)`, return — this is the "relay process down" wire signal Task 7's doctor reads.
   3. `configure_pipe_timeouts(&stream, &upstream_stream, PIPE_IDLE_TIMEOUT)`; on error log and return.
   4. `bidirectional(stream, upstream_stream)`; on error `eprintln!("forward: browser relay session for {remote} ended: {error}")` — errors carry the peer address, per the spec's failure-handling split.
@@ -224,100 +280,111 @@ BrowserRelay(#[from] forward::browser::BrowserError),
 forward::browser::spawn(&cfg)?;
 ```
 
-That ordering keeps the URL channel unchanged (it binds first, exactly as today) and makes a relay bind failure fatal at startup with the address in the error — `exit_with_error` in `main.rs` already prints `DaemonError` via `Display`, so the process dies with `forward: failed to bind browser relay channel on <ip>:<port>: <oserror>`. A daemon that silently ran without the channel would be the silent-fallback pattern. `relay_port = 0` is not a failure: `browser::spawn` returns `Ok` after logging `forward: browser relay channel disabled (relay_port = 0)`. No change to `src/main.rs` or the `Daemon` subcommand args.
+That ordering keeps the URL channel unchanged (it binds first, exactly as today) and makes a relay bind failure fatal at startup with the address in the error — `exit_with_error` in `main.rs` already prints `DaemonError` via `Display`, so the process dies with `forward: failed to bind browser relay channel on <ip>:<port>: <oserror>` (and a thread-spawn failure dies as `failed to start browser relay accept loop`). A daemon that silently ran without the channel would be the silent-fallback pattern. `relay_port = 0` is not a failure: `browser::spawn` returns `Ok` after logging `forward: browser relay channel disabled (relay_port = 0)`. No change to `src/main.rs` or the `Daemon` subcommand args.
 
 **Verify (devbox smoke, no laptop needed — loopback is authorized by `peer::authorized`):**
 
 ```sh
 cargo build
 printf 'listen = "127.0.0.1"\nrelay_port = 12811\n' > /tmp/relay-smoke.toml
-timeout 3 target/debug/forward daemon --port 12810 --config /tmp/relay-smoke.toml &
+timeout 5 target/debug/forward daemon --port 12810 --config /tmp/relay-smoke.toml &
 sleep 0.5
 printf 'GET /json/version HTTP/1.0\r\n\r\n' | timeout 2 nc 127.0.0.1 12811
+nc -z 127.0.0.1 12810; echo "url-channel-alive=$?"
 wait
 ```
 
-stderr shows `forward: browser relay channel on 127.0.0.1:12811`; `nc` prints `REFUSED` (upstream `127.0.0.1:9224` absent on the devbox — the connection died without killing the daemon). Then rerun with `relay_port = 0` in the config and observe the `disabled (relay_port = 0)` stderr line and that `nc 127.0.0.1 12811` cannot connect.
+stderr shows `forward: browser relay channel on 127.0.0.1:12811`; `nc` prints `REFUSED` (upstream `127.0.0.1:9224` absent on the devbox); and the explicit post-check prints `url-channel-alive=0` — the dead upstream killed only that connection, the daemon and its URL channel are demonstrably still serving. Then rerun with `relay_port = 0` in the config and observe the `disabled (relay_port = 0)` stderr line and that `nc -z 127.0.0.1 12811` fails while `nc -z 127.0.0.1 12810` still succeeds.
 
 ## Task 5 — Channel behavior tests: `tests/browser.rs`
 
 **Files:** `tests/browser.rs` (new)
 **Depends on:** Task 3. **Parallel-safe with:** Tasks 4, 7.
 
-New integration-test crate mirroring `tests/bridge.rs` style: Given/When/Then comments, helpers first (`fn cfg_with_peer(peer: &str)` via `forward::config::Config::default_values_for_test()`, `fn assert_refused(client, expected)` copied from `tests/bridge.rs`, a pong upstream mirroring `spawn_echo_upstream` — replies `pong` once it has received four bytes, so a reply proves the payload arrived intact). All listeners bind `127.0.0.1:0` (ephemeral); the channel comes up via the `forward::browser::spawn_with_listener(cfg, listener, upstream)` seam. Stay under 250 lines (`scripts/check-source-line-limit.sh` covers `tests/**`).
+New integration-test crate mirroring `tests/bridge.rs` style: Given/When/Then comments, helpers first (`fn cfg_with_peer(peer: &str)` via `forward::config::Config::default_values_for_test()`, `fn assert_refused(client, expected)` copied from `tests/bridge.rs`, a pong upstream mirroring `spawn_echo_upstream` — replies `pong` once it has received four bytes, so a reply proves the payload arrived intact, and a socket-pair helper: bind `127.0.0.1:0`, connect, accept). The listener-path tests come up via `forward::browser::spawn_with_listener(cfg, listener, upstream).unwrap()`; the peer-identity tests inject the remote address via `forward::browser::handle_from`, because an integration test cannot originate a connection from a foreign address (`tests/daemon/peer.rs` doctrine) — and for the same reason a loopback client can never exercise the peer-equality branch, since `peer::authorized` accepts loopback before it ever compares `cfg.peer`. Stay under 250 lines (`scripts/check-source-line-limit.sh` covers `tests/**`).
 
-Four tests, matching the spec's Testing list:
+Seven tests:
 
-1. `an_unauthorized_peer_is_refused_before_its_payload_is_read` — build a loopback socket pair (bind, connect, accept); write a payload from the client FIRST; bind a nonblocking upstream stub listener that never accepts; call `forward::browser::handle_from(&cfg_with_peer("100.64.0.9"), upstream_addr, "100.64.0.7".parse().unwrap(), server_side)`. Assert the client reads exactly `REFUSED PEER\n` then EOF, and the upstream listener's `accept()` returns `WouldBlock` — no upstream connection was ever attempted, so the payload could not have been read or forwarded. (Foreign source injection via the seam, per the `tests/daemon/peer.rs` doctrine; the address-equality logic itself is covered by `src/peer.rs` unit tests.)
-2. `the_configured_peer_is_proxied_bidirectionally` — channel via `spawn_with_listener` with `cfg_with_peer("100.64.0.9")` and a pong upstream; loopback client (the always-authorized branch of `peer::authorized`, standing in for the peer) writes `ping`, reads `pong`.
-3. `half_close_propagates_in_each_direction` — upstream stub: accept, `read_to_end`, then write `gone` and shutdown write. Client: write `data`, `shutdown(Shutdown::Write)`. Assert the upstream's `read_to_end` returned `data` (client→upstream EOF propagated) and the client's `read_to_string` returns `gone` then EOF (upstream could still send after the client's half-close, and its own EOF propagated back) — the property `src/pipe.rs` exists to preserve, asserted through the listener.
-4. `an_absent_upstream_closes_the_connection_without_killing_the_accept_loop` — reserve an ephemeral port by bind-then-drop; spawn the channel with that dead upstream address; client 1 gets `REFUSED\n` then EOF. Rebind the same port with the pong stub; client 2 completes `ping`→`pong` — the accept loop survived.
+1. `an_unauthorized_peer_is_refused_and_its_payload_never_reaches_the_upstream` — socket pair; write a payload from the client FIRST; bind a nonblocking upstream stub listener that never accepts; call `handle_from(&cfg_with_peer("100.64.0.9"), upstream_addr, "100.64.0.7".parse().unwrap(), server_side)`. Assert the client reads exactly `REFUSED PEER\n` then EOF, and the upstream listener's `accept()` returns `WouldBlock` — the upstream was never dialed, so the payload could not have been inspected or forwarded.
+2. `a_flooding_unauthorized_peer_still_gets_the_refusal_and_frees_its_slot` — the bounded-drain contract. Socket pair; foreign remote (`100.64.0.7`), upstream stub that never accepts. A writer thread floods the client side with 4096-byte chunks in a loop (ignoring write errors, stopping on a shared `AtomicBool`); the main thread reads from the client with a 1 s read timeout until it has seen `REFUSED PEER\n`. Run `handle_from` on its own thread and poll `JoinHandle::is_finished` for up to 5 s (the `wait_for_exit` polling pattern from `tests/bridge/security.rs`), asserting it terminated — `handle_from` returning IS the permit release, because in `accept_loop` the `ConnectionPermit` is dropped by RAII exactly when the handler returns. Assert both: the refusal text was received, and the handler terminated despite the peer never stopping on its own. This fails against the unbounded bridge-style drain (the handler never returns) and against a drain-free refusal (the refusal is lost to RST).
+3. `the_configured_peer_is_proxied_bidirectionally` — `handle_from(&cfg_with_peer("100.64.0.9"), pong_upstream_addr, "100.64.0.9".parse().unwrap(), server_side)`: remote equals the configured peer literally, exercising the peer-equality branch of `peer::authorized` through the channel; client writes `ping`, reads `pong`.
+4. `a_mapped_ipv6_peer_matches_the_configured_ipv4_peer` — same as 3 but `remote = "::ffff:100.64.0.9".parse::<std::net::IpAddr>().unwrap()`: channel-level proof that canonicalization applies (mirrors `src/peer.rs`'s `mapped_ipv6_peer_matches_ipv4_configured_peer`); `ping` → `pong`.
+5. `a_loopback_client_stays_authorized_for_local_tooling` — through the REAL listener via `spawn_with_listener` with `cfg_with_peer("100.64.0.9")` and a pong upstream; a plain loopback `TcpStream::connect` client completes `ping` → `pong` — the always-authorized loopback branch that local doctor probes rely on, proven end to end through accept loop, permit, and pipe.
+6. `half_close_propagates_in_each_direction` — through the listener: upstream stub accepts, `read_to_end`, then writes `gone` and shuts down write. Client writes `data`, `shutdown(Shutdown::Write)`. Assert the upstream's `read_to_end` returned `data` (client→upstream EOF propagated) and the client's `read_to_string` returns `gone` then EOF (upstream could still send after the client's half-close, and its own EOF propagated back) — the property `src/pipe.rs` exists to preserve, asserted through the channel.
+7. `an_absent_upstream_closes_the_connection_without_killing_the_accept_loop` — reserve an ephemeral port by bind-then-drop; spawn the channel with that dead upstream address; client 1 gets `REFUSED\n` then EOF. Rebind the same port with the pong stub; client 2 completes `ping`→`pong` — the accept loop survived.
 
-**Verify:** `cargo test --test browser` — all four pass; `bash scripts/check-source-line-limit.sh` stays clean.
+**Verify:** `cargo test --test browser` — all seven pass; `bash scripts/check-source-line-limit.sh` stays clean.
 
 ## Task 6 — Daemon-level tests: fatal bind, `relay_port = 0`, banner
 
-**Files:** `tests/daemon.rs`, `tests/daemon/browser.rs` (new)
+**Files:** `tests/daemon.rs`, `tests/daemon/browser.rs` (new), `tests/daemon/daemon_support.rs` (accessor only, if missing)
 **Depends on:** Task 4 (and Task 5's seam conventions, but no shared files). **Parallel-safe with:** Tasks 7, 8.
 
-Add `#[path = "daemon/browser.rs"] mod browser;` to `tests/daemon.rs` (alphabetical position, after `boundary`). New `tests/daemon/browser.rs` using the existing `daemon_support` helpers (`start`, `start_expecting_failure`, `test_port`, `connection_is_refused`, `Daemon::wait_for_log`):
+Add `#[path = "daemon/browser.rs"] mod browser;` to `tests/daemon.rs` (alphabetical position, after `boundary`). New `tests/daemon/browser.rs` using the existing `daemon_support` helpers (`start`, `start_expecting_failure`, `test_port`, `Daemon::wait_for_log`). **No test touches a real production port** (12803 / 9224 sockets are never bound by tests; see the one dial-dependency note in test 3):
 
 1. `a_bind_failure_is_fatal_and_names_the_address` — `let port = test_port();`, hold `TcpListener::bind(("127.0.0.1", port)).unwrap()` alive as the squatter; then `start_expecting_failure(dir, &format!("relay_port = {port}\n"))`; assert the returned stderr contains `failed to bind browser relay channel on 127.0.0.1:` and the port string. This is the spec's "bind failure surfaces as a fatal daemon error naming the address".
-2. `relay_port_zero_skips_the_spawn_and_logs_disabled` — `start(dir, "relay_port = 0\n")`; `daemon.wait_for_log("browser relay channel disabled (relay_port = 0)")`; then assert `TcpListener::bind(("127.0.0.1", 12_803)).is_ok()` — the default channel port was never bound (binds nothing) — and the URL channel port still accepts (`daemon_support::connect(port)`), proving the URL channel is unchanged.
-3. `the_daemon_serves_the_channel_it_announces` — `let relay_port = test_port();` `start(dir, &format!("relay_port = {relay_port}\n"))`; `daemon.wait_for_log(&format!("browser relay channel on 127.0.0.1:{relay_port}"))`; connect to it and assert `REFUSED\n` + EOF (loopback authorized, upstream `127.0.0.1:9224` absent in the test environment) — the spawn is wired through the real binary, and a dead upstream kills only the connection: the daemon's URL port still accepts afterwards.
+2. `relay_port_zero_skips_the_spawn_and_logs_disabled` — `start(dir, "relay_port = 0\n")`; `daemon.wait_for_log("browser relay channel disabled (relay_port = 0)")`; then assert the URL channel port still accepts (`daemon_support::connect(port)`), and assert the stderr captured so far does NOT contain `browser relay channel on ` — the disabled and bind branches of `browser::spawn` are mutually exclusive at the single call site, and the bind banner is printed only after a successful bind, so its absence after the disabled line has appeared proves nothing was bound, without probing any real port. If `Daemon` lacks an accumulated-log accessor, add a small `logs_so_far() -> String` to `tests/daemon/daemon_support.rs` beside `wait_for_log` (test-support file; the line-limit script applies to it too).
+3. `the_daemon_serves_the_channel_it_announces` — `let relay_port = test_port();` `start(dir, &format!("relay_port = {relay_port}\n"))`; `daemon.wait_for_log(&format!("browser relay channel on 127.0.0.1:{relay_port}"))`; connect to it and assert `REFUSED\n` + EOF, then that the daemon's URL port still accepts. Precondition comment in the test: this asserts the generic refusal because nothing listens on `127.0.0.1:9224` here — the omp relay never runs on the devbox or CI; the test dials the daemon's ephemeral listener only and never binds 9224 itself.
 
 **Verify:** `cargo test --test daemon browser` — the three new tests pass; `cargo test --test daemon startup` still green.
 
 ## Task 7 — Doctor: browser relay row with role-split reporting
 
-**Files:** `src/doctor.rs`, `src/doctor/browser.rs` (new)
+**Files:** `src/doctor.rs`, `src/doctor/browser.rs` (new), `src/doctor/tests.rs`
 **Depends on:** Tasks 1, 2 (compiles without Task 3; its wire conventions come from Task 3's refusals). **Parallel-safe with:** Tasks 4, 5.
 
 `src/doctor.rs` is 212 lines, so the row lives in a child module. In `src/doctor.rs`: add `mod browser;` beside the existing `#[cfg(test)] mod tests;`, and in `run()` add `let relay = browser::report(cfg);` after the bridge report and before `report_pcsc();`, returning `url && preview && bridge && relay`. Child modules can use the parent's private `connect`, `print_line`, and `PROBE_TIMEOUT` via `super::`; no visibility changes in doctor.rs.
 
-`src/doctor/browser.rs` — `pub(super) fn report(cfg: &Config) -> bool`, plus a pure `fn classify(body: &[u8]) -> Result<RelayEvidence, String>` over a module-local `enum RelayEvidence { PeerRefused, UpstreamDown, Busy, ExtensionDisconnected, Healthy }`:
+`src/doctor/browser.rs` — logic only, structured for port injection so no test ever binds the real 12803 or 9224:
 
-- Probe = `super::connect(host, port)`, write `format!("GET /json/version HTTP/1.0\r\nHost: {}:{port}\r\nConnection: close\r\n\r\n", url_host(host))` (mirror `probe_file_preview`; `use crate::target::url_host;`), `read_to_end`, classify: body starting `REFUSED PEER` → `PeerRefused`; exactly `REFUSED\n` → `UpstreamDown`; starting `REFUSED BUSY` → `Busy`; an HTTP status line carrying ` 200` → `Healthy`; ` 503` → `ExtensionDisconnected`; anything else → `Err` with the bytes, like `probe_bridge`'s unexpected-response arm.
+- `pub(super) fn report(cfg: &Config) -> bool` — exactly `let (healthy, line) = evaluate(cfg, crate::config::default_relay_port()); super::print_line(line); healthy`.
+- `pub(super) fn evaluate(cfg: &Config, well_known_port: u16) -> (bool, String)` — all probing and message building; `well_known_port` is the devbox-role probe port, injected so unit tests use ephemeral stubs while production passes the config default.
+- `pub(super) fn classify(body: &[u8]) -> Result<RelayEvidence, String>` over `pub(super) enum RelayEvidence { PeerRefused, UpstreamDown, Busy, ExtensionDisconnected, Healthy }`: body starting `REFUSED PEER` → `PeerRefused`; exactly `REFUSED\n` → `UpstreamDown`; starting `REFUSED BUSY` → `Busy`; an HTTP status line carrying ` 200` → `Healthy`; ` 503` → `ExtensionDisconnected`; anything else → `Err` with the bytes, like `probe_bridge`'s unexpected-response arm.
+- Probe = `super::connect(host, port)`, write `format!("GET /json/version HTTP/1.0\r\nHost: {}:{port}\r\nConnection: close\r\n\r\n", url_host(host))` (mirror `probe_file_preview`; `use crate::target::url_host;`), `read_to_end`, classify.
 - Role split, exactly the spec's: **the devbox probes the channel end to end; the laptop probes the listener bind plus `127.0.0.1:9224` directly; a laptop cannot probe its own tailnet listener because the source address of that connection is the tailnet address, not loopback, and the peer check correctly refuses it — that refusal IS the bind evidence** (same rule `evidence_is_healthy` already applies to `BridgePeerRefused` at `host == cfg.listen`).
-  - `cfg.relay_port == 0 && cfg.peer.is_empty()` → `print_line("browser relay: disabled (relay_port = 0)")`, return `true` (not a failure — mirrors the daemon).
-  - `cfg.relay_port == 0`, peer set (devbox role): probe `(cfg.peer, crate::config::default_relay_port())` — the local `0` means "this machine binds nothing"; the channel's well-known port comes from the config default so it cannot drift.
-  - `cfg.relay_port != 0` (laptop role): probe `(cfg.listen, cfg.relay_port)` first. `PeerRefused` from that self-vantage (only when `cfg.listen_ip()` is non-loopback) is positive bind evidence — continue to the second leg, `("127.0.0.1", RELAY_TARGET_PORT)`. An HTTP answer on the first leg (loopback-listen dev config, where the self-probe is authorized and proxied) is already end-to-end; report it and skip the second leg.
-- Report lines (`print_line`), carrying the spec's messages verbatim; returns in parentheses:
+  - `cfg.relay_port == 0 && cfg.peer.is_empty()` → `(true, "browser relay: disabled (relay_port = 0)")` (not a failure — mirrors the daemon).
+  - `cfg.relay_port == 0`, peer set (devbox role): probe `(cfg.peer, well_known_port)` — the local `0` means "this machine binds nothing"; the channel's well-known port comes from the config default so it cannot drift.
+  - `cfg.relay_port != 0` (laptop role): probe `(cfg.listen, cfg.relay_port)` first. `PeerRefused` from that self-vantage (only when `cfg.listen_ip()` is non-loopback) is positive bind evidence — continue to the second leg, `("127.0.0.1", RELAY_TARGET_PORT)` (this leg keeps the real constant: it is only reachable on a machine with a non-loopback listen, i.e. the laptop, and is covered by the laptop-in-the-loop check). An HTTP answer on the first leg (loopback-listen dev config, where the self-probe is authorized and proxied) is already end-to-end; report it and skip the second leg.
+- Row lines returned by `evaluate` (spec messages verbatim; health in parentheses):
   - connect error on the channel leg → `browser relay: FAIL — {host}:{port} ({error}); relay channel down — is forward daemon running?` (false)
   - `PeerRefused` from the peer vantage → `browser relay: FAIL — {host}:{port}: not the configured peer — check peer on the laptop` (false)
   - `UpstreamDown`, or connect error on `127.0.0.1:9224` → `browser relay: FAIL — relay process down — start omp-browser-relay (via {host}:{port})` (false)
   - `Busy` → `browser relay: FAIL — {host}:{port} at its connection limit` (false)
   - `ExtensionDisconnected` → `browser relay: relay up, extension not connected — check the badge (at {host}:{port})` (**true** — every forward-owned hop provably delivered an HTTP response; the missing piece is the human's browser state, informational like the PC/SC row)
   - `Healthy` → issue a second request `GET /json/list` the same way, count occurrences of the substring `"webSocketDebuggerUrl"` (one per target, no JSON parsing, no new deps) → `browser relay: healthy at {host}:{port} ({n} targets)` (true)
-- `#[cfg(test)] mod tests` in-file: unit-test `classify` on exactly `b"REFUSED PEER\n"`, `b"REFUSED\n"`, `b"REFUSED BUSY\n"`, `b"HTTP/1.1 200 OK\r\n\r\n{}"`, `b"HTTP/1.1 503 Service Unavailable\r\n\r\n"`, and garbage → `Err`. Keep the file under 250 lines.
 
-**Verify:** `cargo test --lib doctor` (new classify tests + existing `probe_targets_cover_both_roles_without_duplicates` etc. pass) and `bash scripts/check-source-line-limit.sh`.
+Unit tests go in the existing `src/doctor/tests.rs` (`pub(super)` items are visible there via `super::browser::`), keeping `src/doctor/browser.rs` logic-only and both files under 250 lines:
+- `classify` table: exactly `b"REFUSED PEER\n"`, `b"REFUSED\n"`, `b"REFUSED BUSY\n"`, `b"HTTP/1.1 200 OK\r\n\r\n{}"`, `b"HTTP/1.1 503 Service Unavailable\r\n\r\n"`, and garbage → `Err`.
+- `evaluate` scenarios, every stub on an ephemeral `127.0.0.1:0` port, asserting the returned `(bool, String)` (`.contains` on the spec phrases): disabled → `(true, …disabled (relay_port = 0)…)`; devbox role (`relay_port = 0`, `peer = "127.0.0.1"`, `well_known_port` = stub): 200+list stub → `(true, …healthy…(1 targets)…)`; 503 stub → `(true, …extension not connected — check the badge…)`; `REFUSED PEER\n` stub → `(false, …not the configured peer — check peer on the laptop…)`; `REFUSED\n` stub → `(false, …relay process down — start omp-browser-relay…)`; bind-then-drop dead port → `(false, …relay channel down — is forward daemon running?…)`; laptop role loopback-listen (`relay_port` = 200-stub port) → `(true, …healthy…)`.
 
-## Task 8 — Doctor tests: keep the rig green, prove both roles
+**Verify:** `cargo test --lib doctor` (new classify/evaluate tests + existing `probe_targets_cover_both_roles_without_duplicates` etc. pass) and `bash scripts/check-source-line-limit.sh`.
+
+## Task 8 — Doctor binary-level tests: keep the rig green
 
 **Files:** `tests/doctor.rs`, `tests/doctor/browser.rs` (new)
 **Depends on:** Task 7. **Parallel-safe with:** Tasks 4, 5, 6.
 
 `tests/doctor.rs` must change or every existing doctor test breaks: `run_doctor` writes a config of only `bridge_port = {}`, so the new field would default to 12803 and put every run in laptop role against unbound ports. Change the template to `format!("bridge_port = {}\nrelay_port = 0\n", ports.bridge)` — peer stays empty, so the row prints `disabled` and stays healthy for the whole existing suite. Also add `#[path = "doctor/browser.rs"] mod browser;` at the top (file is 223 lines; these two edits keep it under 250 — new tests go in the new file).
 
-New `tests/doctor/browser.rs`, reusing the crate-root helpers (`run_doctor`, `DoctorPorts`, `output_text`, and the stub spawners are crate-private, which makes them visible to a child module via `super::`). Define one local helper in the new file: `fn run_doctor_with(ports: super::DoctorPorts, relay_lines: &str) -> std::process::Output` — a copy of `run_doctor` whose config is `format!("bridge_port = {}\n{relay_lines}", ports.bridge)`; the root `run_doctor` stays single-purpose with its baked-in `relay_port = 0`. Tests:
+New `tests/doctor/browser.rs`, reusing the crate-root helpers (`run_doctor`, `DoctorPorts`, `output_text`, and the stub spawners are crate-private, which makes them visible to a child module via `super::`). Define one local helper: `fn run_doctor_with(ports: super::DoctorPorts, relay_lines: &str) -> std::process::Output` — a copy of `run_doctor` whose config is `format!("bridge_port = {}\n{relay_lines}", ports.bridge)`; the root `run_doctor` stays single-purpose with its baked-in `relay_port = 0`.
 
-1. `the_disabled_row_reports_and_never_fails` — healthy stubs for the three channels, `relay_port = 0`, no peer: exit 0 and output contains `browser relay: disabled (relay_port = 0)`.
-2. `laptop_role_reports_relay_channel_down_when_nothing_is_bound` — healthy stubs, config `relay_port = <reserved-and-dropped ephemeral port>`: exit 1, output contains `browser relay: FAIL` and `relay channel down — is forward daemon running?`.
-3. `loopback_listen_answers_end_to_end_on_the_listen_leg` — bind a stub HTTP listener on an ephemeral port answering `/json/version` with `HTTP/1.0 200 OK` and (second connection) `/json/list` with a one-target body containing one `"webSocketDebuggerUrl"`; config `relay_port = <that port>`: exit 0, output contains `browser relay: healthy` and `(1 targets)`.
-4. `devbox_role_classifies_the_peer_channel_end_to_end` — ONE sequential test (fixed port, so phases must not run as parallel sibling tests): config `relay_port = 0`, `peer = "127.0.0.1"` (dedup keeps `probe_hosts` = `[127.0.0.1]`, so the other channel stubs are unaffected). Sequentially bind `127.0.0.1:12803` (the well-known default the devbox leg probes — this test owns that port, in the spirit of `daemon_support`'s fixed 20000+ range) with, in turn: (a) a 200+list stub → exit 0, `browser relay: healthy`; (b) a 503 stub → exit 0 AND output contains `relay up, extension not connected — check the badge` (the informational-503 decision is itself under test); (c) a stub replying `REFUSED PEER\n` (mirror `spawn_bridge_refusal`, bound to 12803) → exit 1, `not the configured peer — check peer on the laptop`; (d) a stub replying `REFUSED\n` → exit 1, `relay process down — start omp-browser-relay`. Join each stub thread before rebinding.
+**No test binds `12803` or `9224`, ever** — a fixed production port in `cargo test` is a flake against a live daemon or any parallel process; the devbox-role classification matrix already lives at unit level with injected ports (Task 7). Binary-level tests, all ephemeral:
 
-**Laptop-in-the-loop flag:** the laptop-role bind-evidence path (`REFUSED PEER` at own `listen:12803`, then the `127.0.0.1:9224` leg) requires a non-loopback listen address and cannot execute on the devbox. Devbox proxies: the `classify` unit tests (Task 7) cover the byte-level decisions, test 3 covers the listen-leg HTTP path, and phase (d) covers the upstream-down message. The real check happens post-deploy: `forward doctor` on the laptop with the daemon and relay running.
+1. `the_disabled_row_reports_and_never_fails` — healthy stubs for the three channels, plain `run_doctor`: exit 0 and output contains `browser relay: disabled (relay_port = 0)`.
+2. `laptop_role_reports_relay_channel_down_when_nothing_is_bound` — healthy stubs, `run_doctor_with(ports, &format!("relay_port = {dead}\n"))` with a reserved-and-dropped ephemeral port: exit 1, output contains `browser relay: FAIL` and `relay channel down — is forward daemon running?`.
+3. `loopback_listen_answers_end_to_end_on_the_listen_leg` — bind a stub HTTP listener on an ephemeral port answering `/json/version` with `HTTP/1.0 200 OK` and (second connection) `/json/list` with a one-target body containing one `"webSocketDebuggerUrl"`; `run_doctor_with(ports, &format!("relay_port = {stub}\n"))`: exit 0, output contains `browser relay: healthy` and `(1 targets)` — proving the row is wired through the real binary and gates the exit code.
 
-**Verify:** `cargo test --test doctor` — all pre-existing tests plus the four new ones pass.
+**Laptop-in-the-loop flag:** the laptop-role bind-evidence path (`REFUSED PEER` at own `listen:12803`, then the `127.0.0.1:9224` leg) requires a non-loopback listen address and cannot execute on the devbox; the devbox-vantage messages against a real channel likewise need the laptop. Devbox proxies: the `classify`/`evaluate` unit matrix (Task 7), test 3's listen-leg HTTP path, and Task 5's `handle_from` refusal tests. The real check happens post-deploy: `forward doctor` on the laptop with the daemon and relay running, and `forward doctor` on the devbox against the laptop.
 
-## Task 9 — End-to-end devbox smoke, line-limit sweep, commit
+**Verify:** `cargo test --test doctor` — all pre-existing tests plus the three new ones pass.
+
+## Task 9 — End-to-end devbox smoke, deploy order, line-limit sweep, commit
 
 **Files:** none new (verification + jj commit)
 **Depends on:** Tasks 1–8. **Parallel-safe with:** nothing.
 
 1. Full gate: `cargo test` and `bash scripts/check-source-line-limit.sh` (must print nothing and exit 0).
-2. End-to-end transport smoke on the devbox alone — a stub relay on the REAL upstream port `9224` (free on the devbox; the genuine relay runs only on the laptop), the daemon's channel in front, HTTP passing through both hops:
+2. End-to-end transport smoke on the devbox alone — a stub relay on the REAL upstream port `9224` (free on the devbox; the genuine relay runs only on the laptop; real ports are permitted here, in the ad-hoc smoke, not in `cargo test`), the daemon's channel in front, HTTP passing through both hops:
 
 ```sh
 python3 -c '
@@ -338,7 +405,12 @@ kill $STUB $DAEMON
 
 Expected: the stub's JSON printed by curl — proving bind, loopback authorization, upstream connect to `127.0.0.1:9224`, pipe timeouts, and `pipe::bidirectional` carrying a full HTTP round trip. Also run `target/debug/forward doctor --config /tmp/relay-e2e.toml` while both are up and observe `browser relay: healthy at 127.0.0.1:12811 (1 targets)` (the three legacy channels will FAIL in this ad-hoc config — only the relay row is under observation; exit code 1 is expected here).
 
-**Laptop-in-the-loop flag:** the true tailnet path — devbox → `100.100.92.97:12803` with the peer check accepting exactly `100.113.243.90` and refusing everything else — needs the laptop running the released binary with its Phase 3 config. Devbox proxy: this smoke (loopback vantage) plus Task 5's `handle_from` foreign-address refusal test. Post-deploy check from the devbox: `curl --max-time 3 http://100.100.92.97:12803/json/version`.
+**Deploy order (binding; the contract with the Phase 3 section, which owns the config and unit edits).** Both serde directions matter: an OLD binary reading a config containing `relay_port` fails to parse (`deny_unknown_fields`) and the service dies on restart; a NEW binary reading an OLD config parses but defaults `relay_port` to 12803 — the laptop daemon binds the channel early (harmless), and devbox `forward doctor` reports a failing laptop-role browser relay row until its config says `relay_port = 0`. Therefore:
+1. Install the new `forward` binary on BOTH machines first, with configs untouched. Transient, expected: devbox doctor exits 1 with a `browser relay: FAIL` row during this window; nothing else degrades.
+2. Then deploy the config edits together: `relay_port = 12803` in the laptop's `config.toml`, `relay_port = 0` in the devbox's `config-serve.toml`.
+3. Then restart the services and run `forward doctor` on both machines. Never deploy the configs before the binary.
+
+**Laptop-in-the-loop flag:** the true tailnet path — devbox → `100.100.92.97:12803` with the peer check accepting exactly `100.113.243.90` and refusing everything else — needs the laptop running the released binary with its Phase 3 config. Devbox proxy: this smoke (loopback vantage) plus Task 5's `handle_from` peer-equality, refusal, and flood tests. Post-deploy check from the devbox: `curl --max-time 3 http://100.100.92.97:12803/json/version`.
 
 3. Commit with jj (no git mutation commands):
 
@@ -348,7 +420,9 @@ jj describe -m "forward: browser relay channel (devbox -> laptop byte proxy on 1
 New src/browser.rs listener bound to listen:relay_port, peer-checked
 fail-closed, proxying to 127.0.0.1:9224 via pipe::bidirectional.
 relay_port config field (default 12803, 0 disables). Fatal bind at
-daemon startup; per-connection errors kill only the connection.
+daemon startup; supervised accept loop exits the daemon rather than
+dying silently; bounded refusal drain so a flooding peer cannot pin
+a connection permit; per-connection errors kill only the connection.
 Doctor grows a role-split browser relay row."
 jj new
 ```
