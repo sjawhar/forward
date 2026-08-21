@@ -1,5 +1,7 @@
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
+#[path = "doctor/browser.rs"]
+mod browser;
 
 fn spawn_accept_and_close() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -90,7 +92,11 @@ fn doctor_names_every_channel_and_exits_non_zero_when_one_is_down() {
     // 127.0.0.2 is a second loopback address so both probe candidates are tried.
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
-    std::fs::write(&config, "peer = \"127.0.0.2\"\nbridge_port = 9\n").unwrap();
+    std::fs::write(
+        &config,
+        "peer = \"127.0.0.2\"\nbridge_port = 9\nrelay_port = 9\n",
+    )
+    .unwrap();
 
     // When: doctor runs.
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
@@ -112,6 +118,7 @@ fn doctor_names_every_channel_and_exits_non_zero_when_one_is_down() {
     assert!(text.contains("url channel: FAIL"), "got {text}");
     assert!(text.contains("file preview: FAIL"), "got {text}");
     assert!(text.contains("callback bridge: FAIL"), "got {text}");
+    assert!(text.contains("browser relay: FAIL"), "got {text}");
     assert!(text.contains("pcsc: info"), "got {text}");
     assert!(text.contains("belongs to the secrets broker"), "got {text}");
     assert!(!output.status.success());
@@ -119,14 +126,15 @@ fn doctor_names_every_channel_and_exits_non_zero_when_one_is_down() {
 
 #[test]
 fn the_pcsc_line_never_decides_overall_health() {
-    // Given: all three channels forward owns answering the way doctor expects,
-    // and no assumption whatsoever about the PC/SC forward, which stays on SSH
-    // and may or may not have a listener on this machine.
+    // Given: the channels this test exercises answer as doctor expects, the
+    // browser relay is disabled, and no assumption whatsoever about the PC/SC
+    // forward, which stays on SSH and may or may not have a listener here.
     let channel_port = spawn_accept_and_close();
     let bridge_port = spawn_bridge_refusal(b"REFUSED DENIED\n");
     let files_port = spawn_file_preview(200);
     let mut cfg = forward::config::Config::default_values_for_test();
     cfg.bridge_port = bridge_port;
+    cfg.relay_port = 0;
 
     // When: doctor reports.
     let healthy = forward::doctor::run(&cfg, channel_port, files_port);
