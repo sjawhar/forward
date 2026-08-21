@@ -39,25 +39,55 @@ pub(super) fn evaluate_with(
     }
 
     let result = probe(request, &cfg.listen, cfg.relay_port, "/json/version");
-    if matches!(result, Ok(RelayEvidence::PeerRefused))
-        && matches!(cfg.listen_ip(), Ok(address) if !address.is_loopback())
-    {
-        return report_laptop_upstream(
+    match result {
+        Ok(RelayEvidence::PeerRefused) if has_routable_listen(cfg) => report_laptop_upstream(
             probe(request, "127.0.0.1", relay_target_port, "/json/version"),
             &cfg.listen,
             cfg.relay_port,
             relay_target_port,
             request,
-        );
+        ),
+        Err(local_error) if has_routable_listen(cfg) && !cfg.peer.is_empty() => {
+            report_devbox_peer(cfg, local_error, well_known_port, request)
+        }
+        result => report_probe(
+            result,
+            &cfg.listen,
+            cfg.relay_port,
+            &cfg.listen,
+            cfg.relay_port,
+            request,
+        ),
     }
-    report_probe(
-        result,
-        &cfg.listen,
-        cfg.relay_port,
-        &cfg.listen,
-        cfg.relay_port,
-        request,
-    )
+}
+
+fn has_routable_listen(cfg: &Config) -> bool {
+    matches!(cfg.listen_ip(), Ok(address) if !address.is_loopback())
+}
+
+fn report_devbox_peer(
+    cfg: &Config,
+    local_error: String,
+    well_known_port: u16,
+    request: &mut Request,
+) -> (bool, String) {
+    match probe(request, &cfg.peer, well_known_port, "/json/version") {
+        Err(peer_error) => (
+            false,
+            format!(
+                "browser relay: FAIL — neither local listener {}:{} ({local_error}) nor laptop peer {}:{well_known_port} ({peer_error}) answered",
+                cfg.listen, cfg.relay_port, cfg.peer
+            ),
+        ),
+        result => report_probe(
+            result,
+            &cfg.peer,
+            well_known_port,
+            &cfg.peer,
+            well_known_port,
+            request,
+        ),
+    }
 }
 
 fn report_laptop_upstream(
