@@ -125,7 +125,7 @@ In `src/config/tests.rs`:
 - **Old binary + new config** (a config containing `relay_port`): parse FAILURE — the running daemon/serve dies on its next restart. The dotfiles config edits (owned by the Phase 3 section) must therefore never be deployed before the forward release carrying this field.
 - **New binary + old config** (no `relay_port` key): parses fine but defaults to `12803`. On the laptop that means the daemon binds the channel before any config says so (harmless: listener up, upstream absent until the relay unit lands, doctor names it). On the devbox it means `forward doctor` applies laptop-role reporting — a failing `browser relay` row and exit 1 — until `relay_port = 0` is deployed there.
 
-The binding deploy order that follows is stated in Task 9 and is the contract with the Phase 3 section.
+The binding deploy order that follows is stated in Task 18 and is the contract with the Phase 3 section.
 
 **Verify:** `cargo test --lib config` — new assertions pass; `unknown_field_errors` and `config_with_retired_ssh_fields_is_refused` still pass.
 
@@ -207,10 +207,10 @@ pub enum BrowserError {
 
 (`PIPE_IDLE_TIMEOUT` is deliberately a third private copy — `src/bridge/listener.rs` and `src/callback.rs` each already keep their own; likewise replicate `configure_pipe_timeouts` from `src/callback/relay.rs` as a private fn setting read+write timeouts on both streams.)
 
-`fn refuse(stream: &mut TcpStream, response: &[u8])` — a browser-specific, **bounded** variant of `bridge::listener::refuse` (do NOT copy that fn verbatim: its `while matches!(stream.read(..), Ok(count) if count > 0)` drain is unbounded, so a peer that keeps writing could hold the handler and its permit forever; 32 such peers would exhaust `ConnectionLimit` and lock out both real sessions and the doctor probe):
+`pub(crate) fn refuse(stream: &mut TcpStream, response: &[u8])` — the **bounded** refusal, and the crate's single implementation of it (do NOT copy `bridge::listener::refuse` verbatim: its `while matches!(stream.read(..), Ok(count) if count > 0)` drain is unbounded, so a peer that keeps writing could hold the handler and its permit forever; 32 such peers would exhaust `ConnectionLimit` and lock out both real sessions and the doctor probe):
 
 ```rust
-fn refuse(stream: &mut TcpStream, response: &[u8]) {
+pub(crate) fn refuse(stream: &mut TcpStream, response: &[u8]) {
     let _ = stream.set_nonblocking(true);
     let mut pending = [0_u8; 512];
     for _ in 0..REFUSAL_DRAIN_READS {
@@ -223,7 +223,7 @@ fn refuse(stream: &mut TcpStream, response: &[u8]) {
 }
 ```
 
-Bound-before-write rather than write-then-drain, deliberately: writing first would not remove the close-time RST hazard (bytes arriving after the write still force an RST at close, destroying the unread refusal) and would still need a drain bound of its own — whereas a pre-write bounded drain preserves the empty-queue-at-close guarantee for every client with a legitimate read interest, whose whole request fits inside the budget (32 × 512 B = 16 KiB, an order of magnitude above any HTTP upgrade preamble or doctor `GET`). The bound also protects the accept-loop thread itself, which issues `BUSY_REFUSAL` inline exactly as the bridge does. Note: `bridge::listener::refuse` has the same unbounded shape on the callback bridge; that is existing behaviour outside this phase's scope and is flagged to the controller rather than changed here.
+Bound-before-write rather than write-then-drain, deliberately: writing first would not remove the close-time RST hazard (bytes arriving after the write still force an RST at close, destroying the unread refusal) and would still need a drain bound of its own — whereas a pre-write bounded drain preserves the empty-queue-at-close guarantee for every client with a legitimate read interest, whose whole request fits inside the budget (32 × 512 B = 16 KiB, an order of magnitude above any HTTP upgrade preamble or doctor `GET`). The bound also protects the accept-loop thread itself, which issues `BUSY_REFUSAL` inline exactly as the bridge does. The helper is `pub(crate)` because Task 9 replaces the callback bridge's unbounded drain with this same function (controller ruling — it is a live DoS on a shipped path). **On completion, report the helper's final location and signature** (expected: `crate::browser::refuse(&mut TcpStream, &[u8])` with `REFUSAL_DRAIN_READS` beside it); Task 9's brief consumes that report.
 
 Public API, mirrored on `bridge::serve` / `bridge::spawn_with_listener`, with one deliberate difference — **the accept loop is supervised, never a detached fire-and-forget thread**, because an accept-loop death would kill the browser channel while the daemon keeps serving the URL channel, the silent-failure mode the spec forbids:
 
@@ -258,12 +258,12 @@ thread::Builder::new()
 
 No new dependencies (std + the existing `thiserror` only); errors use `thiserror`. Keep the file well under 250 lines — no `#[cfg(test)]` module here; behavior tests live in `tests/browser.rs` (Task 5).
 
-**Verify:** `cargo build && bash scripts/check-source-line-limit.sh` (script must list no file, including the new one) and `cargo test --lib` (existing unit tests unaffected).
+**Verify:** `cargo build && bash scripts/check-source-line-limit.sh` (script must list no file, including the new one) and `cargo test --lib` (existing unit tests unaffected). Completion report must state the shared `refuse` helper's path and signature for Task 9.
 
 ## Task 4 — Wire the channel into `forward daemon`, bind failure fatal
 
 **Files:** `src/daemon.rs`
-**Depends on:** Task 3. **Parallel-safe with:** Tasks 5, 7.
+**Depends on:** Task 3. **Parallel-safe with:** Tasks 5, 7, 9.
 
 `src/daemon.rs` is 194 lines against the 250 cap, so it gains only the spawn and one error variant; all logic stays in `src/browser.rs`.
 
@@ -299,7 +299,7 @@ stderr shows `forward: browser relay channel on 127.0.0.1:12811`; `nc` prints `R
 ## Task 5 — Channel behavior tests: `tests/browser.rs`
 
 **Files:** `tests/browser.rs` (new)
-**Depends on:** Task 3. **Parallel-safe with:** Tasks 4, 7.
+**Depends on:** Task 3. **Parallel-safe with:** Tasks 4, 7, 9.
 
 New integration-test crate mirroring `tests/bridge.rs` style: Given/When/Then comments, helpers first (`fn cfg_with_peer(peer: &str)` via `forward::config::Config::default_values_for_test()`, `fn assert_refused(client, expected)` copied from `tests/bridge.rs`, a pong upstream mirroring `spawn_echo_upstream` — replies `pong` once it has received four bytes, so a reply proves the payload arrived intact, and a socket-pair helper: bind `127.0.0.1:0`, connect, accept). The listener-path tests come up via `forward::browser::spawn_with_listener(cfg, listener, upstream).unwrap()`; the peer-identity tests inject the remote address via `forward::browser::handle_from`, because an integration test cannot originate a connection from a foreign address (`tests/daemon/peer.rs` doctrine) — and for the same reason a loopback client can never exercise the peer-equality branch, since `peer::authorized` accepts loopback before it ever compares `cfg.peer`. Stay under 250 lines (`scripts/check-source-line-limit.sh` covers `tests/**`).
 
@@ -318,7 +318,7 @@ Seven tests:
 ## Task 6 — Daemon-level tests: fatal bind, `relay_port = 0`, banner
 
 **Files:** `tests/daemon.rs`, `tests/daemon/browser.rs` (new), `tests/daemon/daemon_support.rs` (accessor only, if missing)
-**Depends on:** Task 4 (and Task 5's seam conventions, but no shared files). **Parallel-safe with:** Tasks 7, 8.
+**Depends on:** Task 4 (and Task 5's seam conventions, but no shared files). **Parallel-safe with:** Tasks 7, 8, 9.
 
 Add `#[path = "daemon/browser.rs"] mod browser;` to `tests/daemon.rs` (alphabetical position, after `boundary`). New `tests/daemon/browser.rs` using the existing `daemon_support` helpers (`start`, `start_expecting_failure`, `test_port`, `Daemon::wait_for_log`). **No test touches a real production port** (12803 / 9224 sockets are never bound by tests; see the one dial-dependency note in test 3):
 
@@ -331,7 +331,7 @@ Add `#[path = "daemon/browser.rs"] mod browser;` to `tests/daemon.rs` (alphabeti
 ## Task 7 — Doctor: browser relay row with role-split reporting
 
 **Files:** `src/doctor.rs`, `src/doctor/browser.rs` (new), `src/doctor/tests.rs`
-**Depends on:** Tasks 1, 2 (compiles without Task 3; its wire conventions come from Task 3's refusals). **Parallel-safe with:** Tasks 4, 5.
+**Depends on:** Tasks 1, 2 (compiles without Task 3; its wire conventions come from Task 3's refusals). **Parallel-safe with:** Tasks 4, 5, 9.
 
 `src/doctor.rs` is 212 lines, so the row lives in a child module. In `src/doctor.rs`: add `mod browser;` beside the existing `#[cfg(test)] mod tests;`, and in `run()` add `let relay = browser::report(cfg);` after the bridge report and before `report_pcsc();`, returning `url && preview && bridge && relay`. Child modules can use the parent's private `connect`, `print_line`, and `PROBE_TIMEOUT` via `super::`; no visibility changes in doctor.rs.
 
@@ -362,7 +362,7 @@ Unit tests go in the existing `src/doctor/tests.rs` (`pub(super)` items are visi
 ## Task 8 — Doctor binary-level tests: keep the rig green
 
 **Files:** `tests/doctor.rs`, `tests/doctor/browser.rs` (new)
-**Depends on:** Task 7. **Parallel-safe with:** Tasks 4, 5, 6.
+**Depends on:** Task 7. **Parallel-safe with:** Tasks 4, 5, 6, 9.
 
 `tests/doctor.rs` must change or every existing doctor test breaks: `run_doctor` writes a config of only `bridge_port = {}`, so the new field would default to 12803 and put every run in laptop role against unbound ports. Change the template to `format!("bridge_port = {}\nrelay_port = 0\n", ports.bridge)` — peer stays empty, so the row prints `disabled` and stays healthy for the whole existing suite. Also add `#[path = "doctor/browser.rs"] mod browser;` at the top (file is 223 lines; these two edits keep it under 250 — new tests go in the new file).
 
@@ -378,10 +378,27 @@ New `tests/doctor/browser.rs`, reusing the crate-root helpers (`run_doctor`, `Do
 
 **Verify:** `cargo test --test doctor` — all pre-existing tests plus the three new ones pass.
 
-## Task 9 — End-to-end devbox smoke, deploy order, line-limit sweep, commit
+## Task 9 — Bound the callback bridge's refusal drain (shared helper)
+
+**Files:** `src/bridge/listener.rs`, `tests/bridge/security.rs`
+**Depends on:** Task 3 (consumes its shared `refuse` helper; the helper's exact import path and signature come from the Task 3 completion report — expected `crate::browser::refuse(stream: &mut TcpStream, response: &[u8])` with `REFUSAL_DRAIN_READS = 32` beside it). **Parallel-safe with:** Tasks 4, 5, 6, 7, 8 (no shared files).
+
+Controller ruling: `bridge::listener::refuse` carries the identical unbounded drain on a shipped production path — `while matches!(stream.read(&mut pending), Ok(count) if count > 0) {}` — and is fixed in this same change rather than shipped past.
+
+In `src/bridge/listener.rs`:
+- Delete the local `fn refuse` (its whole body: nonblocking set, unbounded drain loop, nonblocking unset, `write_all`) and import the shared bounded helper from the location the Task 3 report names. Reuse, don't duplicate: after this task the crate has exactly one refusal implementation.
+- Every existing callsite keeps its exact shape and refusal constant — `refuse(&mut stream, PEER_REFUSAL | GENERIC_REFUSAL | DENIED_PORT_REFUSAL | UNARMED_PORT_REFUSAL)` inside `handle` (each while the handler thread holds its `ConnectionPermit`) and `refuse(&mut stream, BUSY_REFUSAL)` on the accept-loop thread — so the single funnel bounds all five paths: PEER, DENIED, UNARMED, GENERIC, and BUSY. No wire-format change: the refusal bytes and their ordering are identical; only the drain's iteration count is now capped.
+
+In `tests/bridge/security.rs`, mirror Task 5's flood test against the real bridge (the crate-root helpers `spawn_bridge`, `cfg`, and `assert_refused` in `tests/bridge.rs` are visible to this child module via `super::`):
+- `a_flooding_client_still_gets_its_refusal_and_frees_its_slot` — spawn a bridge via `super::spawn_bridge` with a fresh unarmed `forward::bridge::Armed`; connect from loopback and send `CONNECT 12799\n` (12799 is `PCSC_PORT`, permanently denylisted — the same deterministic refusal the doctor's `probe_bridge` relies on); then a writer thread floods 4096-byte chunks, ignoring errors, stopping on a shared `AtomicBool`. Main thread reads with a 1 s read timeout, polling up to ~5 s (the `wait_for_exit` pattern already in this file), and asserts `REFUSED DENIED\n` was received. Receiving the refusal proves the drain terminated; `refuse` is the tail call of that `handle` arm, so the handler returns immediately after and its `ConnectionPermit` drops by RAII — state that equivalence in the test comment, as Task 5 does. Against today's unbounded drain this test hangs its 5 s budget and fails; against a drain-free refusal it loses the bytes to RST and fails.
+- Keep the file under 250 lines (`scripts/check-source-line-limit.sh` covers `tests/**`; the file is ~148 lines today).
+
+**Verify:** `cargo test --test bridge` — the new flood test passes AND every pre-existing test in `tests/bridge.rs`, `tests/bridge/security.rs`, and `tests/bridge/arming.rs` stays green (this changes a shipped code path; the existing suite is the regression net). Then `cargo test --test doctor` (the doctor's `probe_bridge` still receives `REFUSED DENIED\n`/`REFUSED PEER\n` — refusal delivery to legitimate small-burst clients is exactly what the bounded drain preserves) and `cargo test --test callback --test open_arming` (bridge-adjacent flows unaffected).
+
+## Task 18 — End-to-end devbox smoke, deploy order, line-limit sweep, commit
 
 **Files:** none new (verification + jj commit)
-**Depends on:** Tasks 1–8. **Parallel-safe with:** nothing.
+**Depends on:** Tasks 1–9. **Parallel-safe with:** nothing.
 
 1. Full gate: `cargo test` and `bash scripts/check-source-line-limit.sh` (must print nothing and exit 0).
 2. End-to-end transport smoke on the devbox alone — a stub relay on the REAL upstream port `9224` (free on the devbox; the genuine relay runs only on the laptop; real ports are permitted here, in the ad-hoc smoke, not in `cargo test`), the daemon's channel in front, HTTP passing through both hops:
@@ -422,12 +439,13 @@ fail-closed, proxying to 127.0.0.1:9224 via pipe::bidirectional.
 relay_port config field (default 12803, 0 disables). Fatal bind at
 daemon startup; supervised accept loop exits the daemon rather than
 dying silently; bounded refusal drain so a flooding peer cannot pin
-a connection permit; per-connection errors kill only the connection.
-Doctor grows a role-split browser relay row."
+a connection permit, applied to the callback bridge's refusals too;
+per-connection errors kill only the connection. Doctor grows a
+role-split browser relay row."
 jj new
 ```
 
-Then `jj st` shows an empty working copy and `jj diff --git -r @-` shows exactly the files named in Tasks 1–8.
+Then `jj st` shows an empty working copy and `jj diff --git -r @-` shows exactly the files named in Tasks 1–9.
 ## Task 10 — Claim the branch with knives and establish the green baseline
 
 **Repo:** `/home/ubuntu/oh-my-pi/default` — **knives-managed and shared with other agents. Never edit that checkout directly, and never run jj or git mutations in it.** All Phase 2 work happens in the workspace knives creates.
@@ -490,9 +508,11 @@ function isWsAuthority(raw: string): boolean {
 **Verify:** `cd packages/coding-agent && bun test test/tools/browser-relay-server.test.ts` → all pass. Fully devbox-verifiable (no browser needed — the test fakes the extension over the real `/ext` websocket).
 **Depends on:** 10. **Parallel-safe with:** 12, 15.
 
-## Task 12 — Extension becomes the authoritative ACL (`protocol.ts` + `background.ts` + `chrome.d.ts` + asset rebuild)
+## Task 12 — Extension becomes the authoritative ACL (`protocol.ts` + `background.ts` + `chrome.d.ts` + race test + asset rebuild)
 
 The extension is authoritative; the bridge is defence in depth. All enforcement below lives in `packages/browser-relay/extension/background.ts`. Protocol changes land here because the extension is their first consumer; `packages/coding-agent` will not typecheck until Task 13 lands — expected and confined to this branch.
+
+**Binding invariant for this task: once a scope-change event has begun, no `send` and no debugger event for an affected tab passes until membership has been recomputed.** Scope checks that begin with an `await` cannot provide this on their own — every scope-affecting listener must take a synchronous suppression step before its first `await`.
 
 **File: `packages/coding-agent/src/tools/browser/relay/protocol.ts`**
 1. Delete the `group` RPC variant `| { op: "group"; tabIds: number[]; title: string; color: string }` and its doc comment from `RelayRpcRequest`. **`ungroup` stays** (releasing is always safe).
@@ -507,37 +527,51 @@ export type RelayToExtMessage =
 Decision (needed because enforcement lives in the extension but `--all-tabs` is a relay CLI flag): the relay tells the extension its scope with this message. The extension defaults to **scoped** on every new connection, so an old relay that never sends `config` gets the safe behavior.
 
 **File: `packages/browser-relay/extension/chrome.d.ts`** (hand-written ambient types; the new listeners will not typecheck without this)
-3. Add `interface ChromeTabGroup { id: number; windowId: number; title?: string; color?: string; collapsed?: boolean }`; retype `tabGroups.query` to return `Promise<ChromeTabGroup[]>`. Add event declarations:
+3. Add `interface ChromeTabGroup { id: number; windowId: number; title?: string; color?: string; collapsed?: boolean }`; retype `tabGroups.query` to return `Promise<ChromeTabGroup[]>`. Add `groupId?: number` to `ChromeTabChangeInfo` (the synchronous tombstone trigger reads it). Add event declarations:
    - `tabs.onMoved: ChromeEvent<(tabId: number, moveInfo: { windowId: number; fromIndex: number; toIndex: number }) => void>`
    - `tabs.onDetached: ChromeEvent<(tabId: number, detachInfo: { oldWindowId: number; oldPosition: number }) => void>`
    - `tabs.onAttached: ChromeEvent<(tabId: number, attachInfo: { newWindowId: number; newPosition: number }) => void>`
    - `tabGroups.onCreated: ChromeEvent<(group: ChromeTabGroup) => void>`, `tabGroups.onUpdated: ChromeEvent<(group: ChromeTabGroup) => void>`, `tabGroups.onRemoved: ChromeEvent<(group: ChromeTabGroup) => void>`
 
 **File: `packages/browser-relay/extension/background.ts`**
-4. Constants/state: add `const OMP_GROUP = { title: "omp", color: "cyan" } as const;` (moves the group identity here — server.ts's `DEFAULT_GROUP` dies in Task 13), `let allTabs = false;`, `const announced = new Set<number>();` (tab ids currently announced to the relay; worker-local is fine — a service-worker restart drops the socket and the next hello rebuilds it).
-5. Delete `ompGroupTitle`, the `chrome.storage.session` mirror, `groupTabs`, and `restoreGroups` entirely. In `connect()`'s `socket.onclose`, **delete `void restoreGroups();`** — the group is now the user's ACL and must survive relay restarts (today's dissolve-on-disconnect would wipe the ACL). Keep `enqueueGroupOp` (still serializes Chrome's non-atomic query→group→set-title sequence for `createTab`).
+4. Constants/state: add `const OMP_GROUP = { title: "omp", color: "cyan" } as const;` (moves the group identity here — server.ts's `DEFAULT_GROUP` dies in Task 13), `let allTabs = false;`, `const announced = new Set<number>();` (tab ids currently announced to the relay), and the tombstone: `const suspended = new Map<number, number>();` (tabId → count of pending scope recomputations) with tolerant helpers `suspend(tabId)` (increment) and `release(tabId)` (decrement, delete at ≤0, no-op for missing keys — required because `buildHello` clears the map while older recomputations may still be draining). All of this state is worker-local by design: a service-worker restart drops the websocket and the next hello rebuilds it.
+5. Delete `ompGroupTitle`, the `chrome.storage.session` mirror, `groupTabs`, and `restoreGroups` entirely. In `connect()`'s `socket.onclose`, **delete `void restoreGroups();`** — the group is now the user's ACL and must survive relay restarts (today's dissolve-on-disconnect would wipe the ACL). Rename `enqueueGroupOp` → `enqueueScopeOp` (same promise-chain body): it now serializes **all** scope work — `createTab`'s group join, every membership recomputation, `reconcileScope`, and `buildHello` — so recomputations run in order and "wait for pending recomputations" is expressible as `await enqueueScopeOp(() => Promise.resolve())`.
 6. Membership helpers — **exact title equality, never the query's pattern semantics** (`chrome.tabGroups.query({ title })` matches titles against a *pattern*, so filter the result):
    - `async function ompGroupIds(): Promise<Set<number>>` — `(await chrome.tabGroups.query({ title: OMP_GROUP.title })).filter(g => g.title === OMP_GROUP.title)` → set of ids (all windows); errors → empty set.
    - `async function tabInScope(tabId: number): Promise<boolean>` — `allTabs` → true; else `chrome.tabs.get(tabId)` + `(await ompGroupIds()).has(tab.groupId)`; missing tab → false. Color is ignored; any window counts.
-7. **Announce** — `buildHello()`: after querying tabs and targets, compute `const ids = await ompGroupIds();`; unless `allTabs`, keep only snapshots with `ids.has(snap.groupId)`; reset `announced` to exactly that set. **Re-derive attachments**: for each `chrome.debugger` target that is attached to a tab *not* in scope, `await chrome.debugger.detach({ tabId }).catch(() => {})` and exclude it from `attachedTabIds` — never trust a previously attached set across reconnects.
-8. **Scope is checked at execution time for every operation that can drive or observe a tab** — in `runRpc`:
-   - `attach`, `removeTab`, `activateTab`: guard first with `if (!(await tabInScope(msg.tabId))) throw new Error(\`tab ${msg.tabId} is not in the omp tab group\`);`.
-   - `send` (the actual drive path — every CDP command flows through it): guard with the same `tabInScope` check before `chrome.debugger.sendCommand`. On a miss, revoke rather than merely refuse: `await chrome.debugger.detach({ tabId: msg.tabId }).catch(() => {})`; `if (announced.delete(msg.tabId)) post({ t: "tabRemoved", tabId: msg.tabId });` then `throw new Error(\`tab ${msg.tabId} is not in the omp tab group\`)`. This closes the race where a stale pre-existing attachment (or a not-yet-evicted tab) could still be driven between leaving the group and the async eviction landing.
+7. **Announce** — `buildHello()` runs inside `enqueueScopeOp`: after querying tabs and targets, compute `const ids = await ompGroupIds();`; unless `allTabs`, keep only snapshots with `ids.has(snap.groupId)`; reset `announced` to exactly that set and `suspended.clear()` (the hello state is by definition freshly recomputed). **Re-derive attachments**: for each `chrome.debugger` target that is attached to a tab *not* in scope, `await chrome.debugger.detach({ tabId }).catch(() => {})` and exclude it from `attachedTabIds` — never trust a previously attached set across reconnects.
+8. **Execution-time guards in `runRpc`** — scope is checked when the operation runs, and never on tombstoned state:
+   - `attach`, `removeTab`, `activateTab`, and `send` all use the same drain-then-check prologue: `if (!allTabs) { if (suspended.has(msg.tabId)) await enqueueScopeOp(() => Promise.resolve()); if (!(await tabInScope(msg.tabId))) { /* revoke */ } }`. The revoke arm: `await chrome.debugger.detach({ tabId: msg.tabId }).catch(() => {})`; `if (announced.delete(msg.tabId)) post({ t: "tabRemoved", tabId: msg.tabId });` then `throw new Error(\`tab ${msg.tabId} is not in the omp tab group\`)`.
+   - For `send` specifically, **the `tabInScope` call is the final `await` before `chrome.debugger.sendCommand`** — nothing may sit between the fresh `chrome.tabs.get`-based check and the command, which shrinks the residual TOCTOU window to Chrome's own state-propagation gap; every change Chrome has already exposed to the extension arrives as an event whose synchronous tombstone (step 10) forces the drain path first.
    - Leave `detach` and `ungroup` unguarded — both only shrink access.
-9. **Filter `chrome.debugger.onEvent`** so events from out-of-scope or stale attachments never reach the relay: at the top of the listener, `if (!allTabs && source.tabId !== undefined && !announced.has(source.tabId)) return;` (`announced` is the extension's live scope view, kept current by hello and the eviction paths; a synchronous set check avoids reordering event delivery). Keep `chrome.debugger.onDetach` unfiltered — a detach notification only shrinks access and the bridge must always hear it.
-10. **`createTab` joins the group atomically**: `chrome.tabs.create({ url: msg.url })`; if `tab.id === undefined` throw as today; when not `allTabs`, `await enqueueGroupOp(() => joinOmpGroup(tab.id, tab.windowId))` — new helper containing today's per-window reuse-or-create + duplicate-group-healing logic from `groupTabs`, specialized to one tab, **with the same exact-title filter from step 6 applied to its per-window `tabGroups.query` result before reusing or merging groups**, ending with `chrome.tabGroups.update(groupId, OMP_GROUP)`. If grouping throws: `await chrome.tabs.remove(tab.id).catch(() => {})` then `throw new Error("created tab could not join the omp tab group")` — never leave an ungrouped-but-controllable tab. On success re-fetch (`chrome.tabs.get(tab.id)`) so the returned snapshot carries the real `groupId`, add the id to `announced`, return `{ tab: snapshot(fresh) }`.
-11. Delete the `case "group":` arm from `runRpc` (compile error until removed, since the protocol variant is gone).
-12. **Config handling** — in `handleRelayMessage`, after the `pong` early-return: `if (msg.t === "config") { const changed = allTabs !== msg.allTabs; allTabs = msg.allTabs; if (changed) void buildHello().then(hello => post(hello)); return; }`. In `connect()`'s `socket.onopen`, reset `allTabs = false` before sending hello (scoped default per connection). The re-hello on change is safe: the bridge's `#onHello` fully reconciles seen/unseen tabs.
-13. **Evict immediately** — replace the bare `tabCreated`/`tabUpdated` posts with one transition routine and wire the full listener set (same-window drags, cross-window drags, and group retitles all revoke):
-    - `async function announceTransition(tab: chrome.tabs.Tab): Promise<void>`: build `snapshot(tab)`; if null return. When `allTabs`: post `tabUpdated` if `announced.has(id)` else add + post `tabCreated`. Otherwise compute membership via `ompGroupIds()`: member+announced → post `tabUpdated`; member+new → add to `announced`, post `tabCreated` (a tab dragged *into* the group becomes drivable); non-member+announced → delete from `announced`, `await chrome.debugger.detach({ tabId }).catch(() => {})`, post `{ t: "tabRemoved", tabId }` — dragging a tab out revokes access mid-session; non-member+unknown → nothing (ungrouped tabs are never announced).
-    - `chrome.tabs.onCreated` → `void announceTransition(tab)`. `chrome.tabs.onUpdated` → `void announceTransition(tab)` (Chrome reports `groupId` changes through this event). `chrome.tabs.onMoved` → `chrome.tabs.get(tabId)` then `announceTransition` (same-window drags). `chrome.tabs.onRemoved` → `announced.delete(tabId)` + post `tabRemoved` unconditionally (bridge no-ops unknown ids).
-    - **Cross-window moves fire `onDetached`/`onAttached`, not `onMoved`**: `chrome.tabs.onDetached` → if `announced.has(tabId)`, evict conservatively (best-effort `chrome.debugger.detach({ tabId })`, `announced.delete(tabId)`, post `tabRemoved` — a tab detached from its window has left its group); `chrome.tabs.onAttached` → `chrome.tabs.get(tabId)` then `announceTransition` (re-announces it if it landed inside an omp group in the new window).
-    - `chrome.tabGroups.onUpdated`, `chrome.tabGroups.onCreated`, `chrome.tabGroups.onRemoved` → `void reconcileScope()` where `reconcileScope()` = `chrome.tabs.query({})` then `announceTransition` per tab — covers a group being retitled to/from `"omp"`, which fires no per-tab events.
+9. **Filter `chrome.debugger.onEvent` synchronously against both sets**: keep the existing `source.tabId === undefined` early return, then `if (!allTabs && (suspended.has(source.tabId) || !announced.has(source.tabId))) return;`. A tombstoned tab's events are dropped, not delayed (the listener cannot await); events lost during the few-millisecond recompute window for a tab that *stays* in scope are the accepted cost of the invariant. Keep `chrome.debugger.onDetach` unfiltered — a detach notification only shrinks access and the bridge must always hear it.
+10. **Evict immediately, tombstone synchronously** — every scope-affecting listener suspends *before its first `await`*, then queues the recompute through `enqueueScopeOp`. Central helper `queueScopeCheck(tabId: number): void` — caller has already called `suspend(tabId)`; the enqueued body re-reads `chrome.tabs.get(tabId)` (missing tab → treat as out of scope), computes membership via `ompGroupIds()`, then applies the transition matrix, with `release(tabId)` in `finally`:
+    - member + announced → post `tabUpdated`; member + new → add to `announced`, post `tabCreated` (a tab dragged *into* the group becomes drivable); non-member + announced → delete from `announced`, `await chrome.debugger.detach({ tabId }).catch(() => {})`, post `tabRemoved` — dragging a tab out revokes access mid-session; non-member + unknown → nothing (ungrouped tabs are never announced).
+    - `chrome.tabs.onUpdated(tabId, changeInfo, tab)`: **synchronous prologue** `if (!allTabs && changeInfo.groupId !== undefined) { suspend(tabId); queueScopeCheck(tabId); return; }` (Chrome reports group membership changes via `changeInfo.groupId`); all other updates (title, status, favicon noise) skip the tombstone and enqueue the plain transition for the snapshot — a driven tab must not be suppressed by load events.
+    - `chrome.tabs.onMoved(tabId)`: `if (!allTabs && announced.has(tabId)) { suspend(tabId); queueScopeCheck(tabId); }` (same-window drags; joining a group always also fires `onUpdated` with `groupId`).
+    - **Cross-window moves fire `onDetached`/`onAttached`, not `onMoved`**: `chrome.tabs.onDetached(tabId)`: `if (!allTabs && announced.has(tabId)) { suspend(tabId); queueScopeCheck(tabId); }` (a detached tab is ungrouped → the recompute evicts it). `chrome.tabs.onAttached(tabId)`: `if (!allTabs) { suspend(tabId); queueScopeCheck(tabId); }` (it may have landed inside an omp group in the new window; until recomputed, suppress).
+    - `chrome.tabs.onCreated(tab)`: no tombstone needed (a brand-new tab is neither announced nor attached); enqueue the plain transition.
+    - `chrome.tabs.onRemoved(tabId)`: fully synchronous, race-free: `announced.delete(tabId); suspended.delete(tabId); post({ t: "tabRemoved", tabId });`.
+    - `chrome.tabGroups.onCreated/onUpdated/onRemoved`: **pessimistic synchronous prologue** — `if (allTabs) return; const ids = [...announced]; for (const id of ids) suspend(id);` then enqueue one `reconcileScope()` op: `chrome.tabs.query({})` + fresh `ompGroupIds()`, run the transition matrix per tab, and in `finally` release exactly the captured `ids`. This covers a group being retitled to/from `"omp"` or dissolved, which fires no per-tab events.
+11. **`createTab` joins the group atomically**: `chrome.tabs.create({ url: msg.url })`; if `tab.id === undefined` throw as today; when not `allTabs`, `await enqueueScopeOp(() => joinOmpGroup(tab.id, tab.windowId))` — new helper containing today's per-window reuse-or-create + duplicate-group-healing logic from `groupTabs`, specialized to one tab, **with the same exact-title filter from step 6 applied to its per-window `tabGroups.query` result before reusing or merging groups**, ending with `chrome.tabGroups.update(groupId, OMP_GROUP)`. If grouping throws: `await chrome.tabs.remove(tab.id).catch(() => {})` then `throw new Error("created tab could not join the omp tab group")` — never leave an ungrouped-but-controllable tab. On success re-fetch (`chrome.tabs.get(tab.id)`) so the returned snapshot carries the real `groupId`, add the id to `announced`, return `{ tab: snapshot(fresh) }`.
+12. Delete the `case "group":` arm from `runRpc` (compile error until removed, since the protocol variant is gone).
+13. **Config handling** — in `handleRelayMessage`, after the `pong` early-return: `if (msg.t === "config") { const changed = allTabs !== msg.allTabs; allTabs = msg.allTabs; if (changed) void buildHello().then(hello => post(hello)); return; }`. In `connect()`'s `socket.onopen`, reset `allTabs = false` before sending hello (scoped default per connection). The re-hello on change is safe: the bridge's `#onHello` fully reconciles seen/unseen tabs.
 14. `manifest.json` already grants `tabGroups`; no manifest change.
+
+**New test files: `packages/browser-relay/test/chrome-fake.ts` + `packages/browser-relay/test/background-scope.test.ts`** — the race demands a behavioral lock, so the extension gets its first test harness. Same-package relative import keeps tsconfig/rootDir clean; add `"test": "bun test"` to `packages/browser-relay/package.json` scripts (check `scripts/ci-test-ts.ts`: if it enumerates packages, register browser-relay; either way Task 17 runs this suite directly).
+- `chrome-fake.ts` installs, **at module top level** (so plain static-import ordering suffices — no dynamic imports, per AGENTS.md), `globalThis.chrome` and `globalThis.WebSocket` fakes and exports their handles: mutable `tabs`/`groups` arrays backing promise-returning `tabs.query/get/create/remove/update/group/ungroup`, `tabGroups.query/update`, `windows.update`, `debugger.attach/detach/sendCommand/getTargets` (each recording its calls), `storage`, `alarms`, `action`, `runtime`; every event as `{ listeners: [], addListener, removeListener, emit(...args) }`; a `FakeWebSocket` class recording instances with a `sent: string[]` log and test-controlled `onopen/onmessage/onclose`; and **`holdNextGroupQuery(): { release(groups: ChromeTabGroup[]): void }`** — a deferred (via `Promise.withResolvers()`) gating one `tabGroups.query` call, the lever that holds a recomputation open. The test file then does `import { fake } from "./chrome-fake";` followed by `import "../extension/background";` — module execution order guarantees the fakes exist before the worker's import-time side effects run.
+- **The race test** (locks the invariant, not the steady state): failure mode = a tab observed or driven after leaving the ACL.
+  1. Arrange group `{ id: 5, title: "omp" }` and tab `{ id: 1, groupId: 5 }`; fire the captured socket's `onopen`, flush microtasks, assert the hello announced exactly tab 1; deliver `{"t":"config","allTabs":false}`.
+  2. `const gate = fake.holdNextGroupQuery();` mutate tab 1 to `groupId: -1`; emit `tabs.onUpdated(1, { groupId: -1 }, tab1)` — the synchronous prologue tombstones tab 1; the recompute is now pending on the gate.
+  3. Racing event: emit `debugger.onEvent({ tabId: 1 }, "Page.loadEventFired", {})` → assert **no `cdpEvent` was posted** since step 2, even though `announced` still contains 1.
+  4. Racing command: deliver `{"t":"rpc","id":7,"op":"send","tabId":1,"method":"Runtime.evaluate"}` via `onmessage`; flush; assert `debugger.sendCommand` was **not called** and no `rpcResult` id 7 exists yet (the guard is draining the scope chain).
+  5. `gate.release([])`; flush → assert `debugger.detach` was called for tab 1, the socket posted `{"t":"tabRemoved","tabId":1}`, and `rpcResult` id 7 arrived with `ok: false` and error `tab 1 is not in the omp tab group` — with `sendCommand` never called.
+  6. Cleanup: fire `onclose` (clears the ping interval; the pending reconnect timeout is harmless — bun's runner exits when tests finish).
+- Steady-state companions in the same file (cheap once the harness exists): `attach` for an ungrouped tab → rpc error, `debugger.attach` never called; `createTab` whose `tabs.group` throws → `tabs.remove` called and rpc error `created tab could not join the omp tab group`.
 
 **Rebuild the committed assets**: `cd packages/browser-relay && bun run build` (runs `scripts/build-extension.ts`; needs the `zip` binary) and include the regenerated `packages/coding-agent/src/tools/browser/relay/extension-assets/*.txt` in this task's commit — the CLI embeds them.
 
-**Verify (devbox):** `cd packages/browser-relay && bun run check` exits 0 (tsgo typechecks `background.ts` and the extended `chrome.d.ts` against the new protocol) and `bun run build` prints the three `built:` lines; `jj st` in the workspace shows `extension-assets/background.js.txt` modified. **Needs the laptop for behavioral proof** (real Chrome + drag gestures); devbox proxies are this typecheck/build plus Task 13's bridge-side contract tests of the same wire protocol. The end-to-end laptop checklist lands in Task 17.
+**Verify (devbox):** `cd packages/browser-relay && bun run check && bun test && bun run build` — check exits 0 (tsgo covers `background.ts`, `chrome.d.ts`, and the new tests against the new protocol), the race test and companions pass, build prints the three `built:` lines; `jj st` in the workspace shows `extension-assets/background.js.txt` modified. **Real Chrome (laptop) still validates the genuine event streams and drag gestures** — the checklist lands in Task 17 — but the revocation invariant itself is now devbox-proven through the chrome fake.
 **Depends on:** 10. **Parallel-safe with:** 11, 15.
 
 ## Task 13 — Bridge: excise grouping, send scope config, close the unknown-target and stale-cache holes, rework the tests
@@ -557,7 +591,7 @@ Decision (needed because enforcement lives in the extension but `--all-tabs` is 
    - `Target.setDiscoverTargets` (:501): always set `conn.discover = true`; when `!this.ready`, set a new `CdpConnection` field `discoverPending = true` (declare it next to `discover`/`autoAttach`, :54-55) and reply `{}` **without announcing anything**; when ready, announce as today.
    - `Target.setAutoAttach` (:512): when `!this.ready`, set `conn.autoAttach = true` and reply `{}` **without running the attach loop** — today that loop would `#retractTab` every tab whose gap-time attach fails, destroying live targets as a side effect of a probe.
    - `Target.attachToTarget` (:528): when `!this.ready`, `#replyError(conn, msg, "relay extension is not connected")` before the `#tabs` lookup.
-   - `#onHello` (:287): after the existing reconciliation (which already retracts tabs missing from the fresh hello via `#onTabRemoved` → `#retractTab`, handling "user dragged a tab out while disconnected"), flush pending discoverers: for each conn with `discoverPending`, run the same announce loop `setDiscoverTargets` uses (eligible tabs → `tab.announced = true`, emit `Target.targetCreated` for tab + page infos), then clear `discoverPending`.
+   - `#onHello` (:287): after the existing reconciliation (which already retracts tabs missing from the fresh hello via `#onTabRemoved` → `#retractTab`, handling "user dragged a tab out while disconnected"), first flush pending discoverers: for each conn with `discoverPending`, run the same announce loop `setDiscoverTargets` uses (eligible tabs → `tab.announced = true`, emit `Target.targetCreated` for tab + page infos), then clear `discoverPending`. **Then replay auto-attach**: for every conn with `conn.autoAttach`, for each eligible tab in the fresh set, `if (await this.#ensureAttached(tab)) this.#emitTabAttached(conn, tab); else this.#log(...)` and skip — **never `#retractTab` on a replay failure** (that destructive gap-time behavior is what the ready gate exists to avoid). `#emitTabAttached` already dedupes per connection (bridge.ts:858-866 returns early when the conn holds a tab session), so the replay is idempotent for connections attached before the disconnect. Without this replay, a puppeteer client that called `setAutoAttach` during the gap never receives `Target.attachedToTarget` after recovery and page materialization hangs.
    - Note for the implementer: do **not** take the alternative of clearing `#tabs`/retracting in `extClosed` — `#retractTab` (:806-828) deletes minted sessions and emits `Target.detachedFromTarget`/`targetDestroyed`, so eager teardown would kill every live agent session on each routine MV3 service-worker suspension, which the bridge's header contract ("a service-worker restart only has to re-handshake") exists to prevent.
 
 **File: `packages/coding-agent/src/tools/browser/relay/server.ts`**
@@ -570,8 +604,9 @@ Decision (needed because enforcement lives in the extension but `--all-tabs` is 
     - **unknown-target attach rejected** (defence in depth): connect with `[tab({ tabId: 1 })]`; `Target.attachToTarget` for `PAGE7` → error reply containing `No target with id PAGE7`; `ext.rpcs("attach")` stays empty.
     - **unknown-target close/activate rejected** (regression: `activateTarget` used to forward blindly): `Target.closeTarget`/`Target.activateTarget` for `PAGE7` → error replies; `ext.rpcs("removeTab")` and `ext.rpcs("activateTab")` stay empty.
     - **retraction destroys targets** (bridge half of drag-out revocation): connect `[tab({ tabId: 1 })]`, cdp connection + `Target.setDiscoverTargets`, then ext sends `{ t: "tabRemoved", tabId: 1 }` → cdp socket received `Target.targetDestroyed` for both `PAGE1` and `TAB1`, and `bridge.listTargets()` returns `[]`.
-    - **revoked tab: stale session commands fail without reaching Chrome** (the oracle's mid-session revocation contract, bridge side): connect `[tab({ tabId: 1 })]`; `attachPage(...)` to get a minted session; ext sends `{ t: "tabRemoved", tabId: 1 }` (what the extension now emits when a tab leaves the group); then a `Runtime.evaluate` through the old `sessionId` → error reply containing `Unknown session id`, **and `ext.rpcs("send")` is still empty** — `#retractTab` deleted the session, so nothing is forwarded to the extension.
+    - **revoked tab: stale session commands fail without reaching Chrome** (mid-session revocation, bridge side): connect `[tab({ tabId: 1 })]`; `attachPage(...)` to get a minted session; ext sends `{ t: "tabRemoved", tabId: 1 }` (what the extension now emits when a tab leaves the group); then a `Runtime.evaluate` through the old `sessionId` → error reply containing `Unknown session id`, **and `ext.rpcs("send")` is still empty** — `#retractTab` deleted the session, so nothing is forwarded to the extension.
     - **stale cache invisible across extension disconnect** (reconnect race): connect `[tab({ tabId: 1 })]`; `bridge.extClosed(ext)` → `bridge.listTargets()` equals `[]`; a new cdp conn sending `Target.setDiscoverTargets` gets a reply but **zero `Target.targetCreated`** emissions; `Target.attachToTarget` for `PAGE1` → error reply `relay extension is not connected`; then reconnect (`connect(bridge, ext2, [tab({ tabId: 1 })])`) → the pending discoverer now receives `Target.targetCreated` for `PAGE1` and `TAB1`, and `listTargets()` shows `PAGE1` again.
+    - **auto-attach replay after reconnect** (failure mode: page materialization hangs after an MV3 suspension): `bridge.extClosed(ext)`; a cdp conn sends `Target.setAutoAttach` → ok reply, **zero `Target.attachedToTarget`**; then `connect(bridge, ext2, [tab({ tabId: 1 })])` + `ack(bridge, ext2, "attach")` + `flush()` → the conn receives `Target.attachedToTarget` whose `targetInfo.targetId` is `TAB1`.
     - **createTarget round-trip** (reworked from the old auto-claim test, minus group assertions): `Target.createTarget` → `ack(bridge, ext, "createTab", { tab: tab({ tabId: 9, groupId: 42 }) })` → reply carries `targetId: "PAGE9"` and `bridge.listTargets()` now includes it.
 
 **Verify:** `cd packages/coding-agent && bun test test/tools/browser-relay-bridge.test.ts` → green (the test file's import graph does not include the still-broken CLI). Fully devbox-verifiable.
@@ -624,10 +659,10 @@ Per the repo's changelog rules (`## [Unreleased]` sections; never touch released
 1. `packages/coding-agent/CHANGELOG.md`, under `## [Unreleased]`:
    - `### Breaking Changes`: `omp browser-relay` now scopes agents to the `omp` Chrome tab group by default and enforces it in the extension; `--no-group` is removed, `--all-tabs` restores unscoped access.
    - `### Added`: relay browser mode reports a specific error when no tabs are in the `omp` tab group instead of the generic no-targets message.
-   - `### Fixed`: the relay's `/json/version` now derives `webSocketDebuggerUrl` from a validated request `Host` header (falling back to loopback), so remote clients reached through a port forward are told to dial back through the same channel; the relay bridge no longer lists or attaches stale targets between an extension disconnect and the next handshake.
+   - `### Fixed`: the relay's `/json/version` now derives `webSocketDebuggerUrl` from a validated request `Host` header (falling back to loopback), so remote clients reached through a port forward are told to dial back through the same channel; the relay bridge no longer lists or attaches stale targets between an extension disconnect and the next handshake, and replays pending discovery/auto-attach once the extension returns.
    - `### Removed`: the `group` RPC from the relay↔extension protocol — agents can create tabs inside the group but can never add an existing tab to it.
 2. `packages/browser-relay/CHANGELOG.md`, under `## [Unreleased]` (create the section if the file lacks one):
-   - `### Changed`: the extension now enforces the `omp` tab group as the access-control list — it announces only grouped tabs, re-derives membership on reconnect, checks scope on every attach/send/remove/activate at execution time, filters debugger events to in-scope tabs, force-detaches and retracts tabs that leave the group (including cross-window drags), and closes a created tab it fails to group; the group is no longer dissolved when the relay disconnects.
+   - `### Changed`: the extension now enforces the `omp` tab group as the access-control list — it announces only grouped tabs, re-derives membership on reconnect, checks scope on every attach/send/remove/activate at execution time, suppresses commands and debugger events while a membership change is being recomputed, force-detaches and retracts tabs that leave the group (including cross-window drags), and closes a created tab it fails to group; the group is no longer dissolved when the relay disconnects.
 
 **Verify:** read both files and confirm each entry sits under `## [Unreleased]` in the correct subsection and describes behavior delivered by Tasks 11-15 (no invented scope); `cd packages/coding-agent && bun run lint` and `cd packages/browser-relay && bun run lint` exit 0.
 **Depends on:** 11, 12, 13, 14, 15.
@@ -636,11 +671,11 @@ Per the repo's changelog rules (`## [Unreleased]` sections; never touch released
 
 All commands from the knives workspace root.
 
-1. `cd packages/browser-relay && bun run check && bun run build` — exit 0; confirm via `jj st` that the regenerated `packages/coding-agent/src/tools/browser/relay/extension-assets/*.txt` are part of the branch (Task 12 committed them; a second build must be a no-op diff).
+1. `cd packages/browser-relay && bun run check && bun test && bun run build` — exit 0; confirm via `jj st` that the regenerated `packages/coding-agent/src/tools/browser/relay/extension-assets/*.txt` are part of the branch (Task 12 committed them; a second build must be a no-op diff).
 2. `cd packages/coding-agent && bun run check` — exit 0 (biome + tsgo across the package catches any missed `group` reference).
-3. Targeted test net (not the full suite): `cd packages/coding-agent && bun test test/tools/browser-relay-bridge.test.ts test/tools/browser-relay-server.test.ts test/tools/browser-attach.test.ts test/tools/browser-relay-daemon.test.ts test/tools/browser-relay-kind.test.ts` — daemon/kind files are untouched but sit on the changed module graph; all green.
+3. Targeted test net (not the full suite): `cd packages/coding-agent && bun test test/tools/browser-relay-bridge.test.ts test/tools/browser-relay-server.test.ts test/tools/browser-attach.test.ts test/tools/browser-relay-daemon.test.ts test/tools/browser-relay-kind.test.ts` — daemon/kind files are untouched but sit on the changed module graph; all green. Then `cd packages/browser-relay && bun test` for the extension scope suite.
 4. Re-run the Task 14 CLI smoke once on the final tree (`bun src/cli.ts browser-relay --port 9333` → banner, `curl` → 503, Ctrl-C).
-5. Commit hygiene: Task 11 stands as its own commit (upstreamable); remaining work in logically separate commits via `jj describe -m` / `jj new` (extension+protocol, bridge+tests, CLI cutover+docs, failure message, changelogs is a reasonable split). Do **not** run `knives finish` and do not open a PR — the branch stays claimed for review and the cross-phase rollout; record a notch: `knives notch browser-relay-group-acl -m "Phase 2 complete: group ACL enforced in extension, Host-header fix, --all-tabs cutover; laptop verification pending" --evidence <tip-commit>`.
+5. Commit hygiene: Task 11 stands as its own commit (upstreamable); remaining work in logically separate commits via `jj describe -m` / `jj new` (extension+protocol+race test, bridge+tests, CLI cutover+docs, failure message, changelogs is a reasonable split). Do **not** run `knives finish` and do not open a PR — the branch stays claimed for review and the cross-phase rollout; record a notch: `knives notch browser-relay-group-acl -m "Phase 2 complete: group ACL enforced in extension, Host-header fix, --all-tabs cutover; laptop verification pending" --evidence <tip-commit>`.
 6. Write the **laptop verification checklist** into the branch's notch/PR description material (these cannot run on the devbox; devbox proxies were delivered in Tasks 11-15): load the rebuilt unpacked extension → badge `on`; with an empty group, a relay browser call fails with the exact `No tabs are shared with omp: …` message; drag a tab in → attach succeeds and the debugger infobar appears; drag it out mid-run → infobar drops **and a command issued immediately through the pre-existing session fails without reaching the page** (the send-guard revocation — verify the page shows no effect); repeat the drag-out with a cross-window drag into another Chrome window (the `onDetached`/`onAttached` path); agent-created tab lands inside the cyan `omp` group and is closed if grouping fails; a group retitled away from `omp` revokes its tabs; `omp browser-relay --all-tabs` restores today's every-tab behavior; relay restart leaves the group intact.
 
 **Verify:** steps 1-4 outputs as stated; `knives status` still shows the claim; `jj log` shows the standalone Host-fix commit.
