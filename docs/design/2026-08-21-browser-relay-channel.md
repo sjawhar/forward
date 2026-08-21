@@ -377,7 +377,7 @@ rather than by the network check.
 
 | Threat | Mitigation |
 |---|---|
-| Another tailnet device (phone, subnet-routed host) drives the browser | `peer::authorized` accepts one literal address; everything else refused before a byte is read |
+| Another tailnet device (phone, subnet-routed host) drives the browser | `peer::authorized` accepts one literal address; everything else is refused after the peer decision, before any payload is inspected or forwarded and before the upstream is dialled. Refusal delivery uses the bounded drain. |
 | A web page reaches the relay | `/cdp` rejects `Origin`-bearing upgrades; the laptop's own source address is not the peer, so the tailnet port refuses it too |
 | A laptop process impersonates the relay to the extension | `/ext` is loopback-only; the counterparty is local by construction |
 | An agent widens its scope to one of your tabs | `group` RPC removed; agents can create new tabs in the group but can never add an existing one |
