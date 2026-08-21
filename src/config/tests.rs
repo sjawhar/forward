@@ -29,6 +29,7 @@ fn parses_full_config() {
 mode = "auto"
 opener = ["firefox"]
 allow = ["localhost", "*.awsapps.com"]
+relay_port = 12803
 "#,
     )
     .unwrap();
@@ -93,7 +94,13 @@ fn parses_transport_fields() {
     assert_eq!(cfg.listen_ip().unwrap().to_string(), "100.64.0.1");
     assert_eq!(cfg.peer_ip().unwrap().unwrap().to_string(), "100.64.0.2");
     assert_eq!(cfg.bridge_port, 12_345);
+    assert_eq!(cfg.relay_port, 12_803);
     assert!(cfg.validate().is_ok());
+
+    for (contents, expected) in [("relay_port = 12811\n", 12_811), ("relay_port = 0\n", 0)] {
+        std::fs::write(&f, contents).unwrap();
+        assert_eq!(load(f.path()).unwrap().relay_port, expected);
+    }
 }
 
 #[test]
@@ -186,7 +193,7 @@ fn test_constructor_matches_file_defaults() {
     // exercises the same fail-closed configuration a real install gets.
     assert_eq!(cfg.listen, "127.0.0.1");
     assert!(cfg.peer.is_empty());
-    assert_eq!(cfg.bridge_port, 12_801);
+    assert_eq!((cfg.bridge_port, cfg.relay_port), (12_801, 12_803));
     assert_eq!(cfg.forward_ttl_secs, 300);
     assert!(cfg.validate().is_ok());
 }

@@ -19,6 +19,9 @@ pub struct Config {
     pub peer: String,
     #[serde(default = "default_bridge_port")]
     pub bridge_port: u16,
+    /// Port for the browser relay channel on the laptop's tailnet address.
+    #[serde(default = "default_relay_port")]
+    pub relay_port: u16,
     #[serde(default)]
     pub allow: Vec<String>,
 }
@@ -136,6 +139,7 @@ impl Config {
             listen: default_listen(),
             peer: String::new(),
             bridge_port: default_bridge_port(),
+            relay_port: default_relay_port(),
             allow: Vec::new(),
         }
     }
@@ -159,6 +163,10 @@ fn default_listen() -> String {
 
 fn default_bridge_port() -> u16 {
     12_801
+}
+
+pub(crate) fn default_relay_port() -> u16 {
+    12_803
 }
 
 fn parse_ip(field: &'static str, value: &str) -> Result<std::net::IpAddr, ConfigError> {

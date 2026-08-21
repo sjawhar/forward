@@ -1,4 +1,5 @@
 pub mod bridge;
+pub mod browser;
 pub mod callback;
 pub mod config;
 pub mod doctor;
@@ -6,6 +7,7 @@ pub mod localhost;
 pub mod peer;
 pub mod pipe;
 pub mod policy;
+pub(crate) mod refusal;
 mod render;
 pub mod send;
 pub mod serve;

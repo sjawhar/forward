@@ -1,6 +1,6 @@
 mod armed;
 mod arming;
-mod limit;
+pub(crate) mod limit;
 mod listener;
 mod port_policy;
 mod ports;

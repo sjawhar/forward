@@ -1,7 +1,11 @@
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Child, Command, Stdio};
-use std::time::Duration;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
+use std::time::{Duration, Instant};
 
 fn cfg(bridge_port: u16) -> forward::config::Config {
     let mut cfg = forward::config::Config::default_values_for_test();
@@ -149,4 +153,54 @@ fn actual_listener_port_is_refused_even_when_config_port_differs() {
 
     // Then: the actual listener port, not the stale Config value, stops the loop.
     assert_refused(&mut client, "REFUSED DENIED\n");
+}
+
+#[test]
+fn a_flooding_client_still_gets_its_refusal_and_frees_its_slot() {
+    // Given: an unarmed bridge and a client continually writing after its request.
+    let bridge_port = super::spawn_bridge(forward::bridge::Armed::new());
+    let client = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
+    let mut reader = client.try_clone().unwrap();
+    reader
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer_stop = Arc::clone(&stop);
+    let writer = std::thread::spawn(move || {
+        let _ = (&client).write_all(b"CONNECT 12799\n");
+        while !writer_stop.load(Ordering::Relaxed) {
+            let _ = (&client).write_all(&[0_u8; 4096]);
+        }
+    });
+
+    // When: the bounded drain handles the continuous write stream.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut reply = Vec::new();
+    let result = loop {
+        let mut chunk = [0_u8; 32];
+        match reader.read(&mut chunk) {
+            Ok(0) => break Err("bridge closed before sending its refusal"),
+            Ok(count) => {
+                reply.extend_from_slice(&chunk[..count]);
+                if reply.ends_with(b"REFUSED DENIED\n") {
+                    break Ok(reply);
+                }
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) && Instant::now() < deadline =>
+            {
+                continue;
+            }
+            Err(_) => break Err("bridge did not send its refusal within five seconds"),
+        }
+    };
+    stop.store(true, Ordering::Relaxed);
+    writer.join().unwrap();
+
+    // Then: delivery proves the drain returned. `refuse` is the DENIED arm's tail
+    // call, so this handler returned too and RAII released its ConnectionPermit.
+    assert_eq!(result.unwrap(), b"REFUSED DENIED\n");
 }

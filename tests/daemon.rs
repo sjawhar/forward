@@ -1,5 +1,7 @@
 #[path = "daemon/boundary.rs"]
 mod boundary;
+#[path = "daemon/browser.rs"]
+mod browser;
 #[path = "daemon/builtin_notifier.rs"]
 mod builtin_notifier;
 #[path = "daemon/custom_notifier.rs"]
