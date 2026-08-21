@@ -23,6 +23,9 @@ pub const PCSC_PORT: u16 = 12_799;
 pub const CHANNEL_PORT: u16 = 12_800;
 /// File-preview port, named by the `forward.service` user unit.
 pub const FILES_PORT: u16 = 12_802;
+/// Laptop-loopback port where `omp browser-relay` listens; the browser
+/// channel's constant upstream (the relay's own default).
+pub const RELAY_TARGET_PORT: u16 = 9_224;
 const STATIC_TUNNEL_PORTS: [u16; 3] = [PCSC_PORT, CHANNEL_PORT, FILES_PORT];
 
 /// Ports carried by the SSH tunnel or served by forward itself, never leased.

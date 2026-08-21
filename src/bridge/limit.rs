@@ -4,15 +4,15 @@ use std::sync::Arc;
 const MAX_CONCURRENT_CONNECTIONS: usize = 32;
 
 #[derive(Clone)]
-pub(super) struct ConnectionLimit {
+pub(crate) struct ConnectionLimit {
     active: Arc<Mutex<usize>>,
     capacity: usize,
 }
 
-pub(super) struct ConnectionPermit(Arc<Mutex<usize>>);
+pub(crate) struct ConnectionPermit(Arc<Mutex<usize>>);
 
 impl ConnectionLimit {
-    pub(super) fn standard() -> Self {
+    pub(crate) fn standard() -> Self {
         Self::new(MAX_CONCURRENT_CONNECTIONS)
     }
 
@@ -23,7 +23,7 @@ impl ConnectionLimit {
         }
     }
 
-    pub(super) fn acquire(&self) -> Option<ConnectionPermit> {
+    pub(crate) fn acquire(&self) -> Option<ConnectionPermit> {
         let mut active = self.active.lock();
         if *active == self.capacity {
             return None;
