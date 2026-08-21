@@ -94,8 +94,9 @@ pub fn run(cfg: &Config, channel_port: u16, files_port: u16) -> bool {
             probe: probe_bridge,
         },
     );
+    let relay = browser::report(cfg);
     report_pcsc();
-    url && preview && bridge
+    url && preview && bridge && relay
 }
 
 fn report(cfg: &Config, hosts: &[String], channel: ChannelProbe) -> bool {
@@ -207,6 +208,8 @@ fn report_pcsc() {
 fn print_line(message: impl Display) {
     let _ = writeln!(std::io::stdout(), "{message}");
 }
+
+mod browser;
 
 #[cfg(test)]
 mod tests;
