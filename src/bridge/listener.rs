@@ -4,7 +4,8 @@ use super::port_policy::denied_port;
 use crate::config::Config;
 use crate::peer::authorized;
 use crate::pipe::bidirectional;
-use std::io::{Read, Write};
+use crate::refusal::refuse;
+use std::io::Read;
 use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -150,13 +151,6 @@ fn handle(cfg: &Config, armed: &Armed, listener_port: u16, mut stream: TcpStream
     }
 }
 
-fn refuse(stream: &mut TcpStream, response: &[u8]) {
-    let _ = stream.set_nonblocking(true);
-    let mut pending = [0_u8; 512];
-    while matches!(stream.read(&mut pending), Ok(count) if count > 0) {}
-    let _ = stream.set_nonblocking(false);
-    let _ = stream.write_all(response);
-}
 
 /// Read `CONNECT <port>\n` one byte at a time from the piped stream.
 ///
@@ -199,6 +193,7 @@ fn read_port_with_timeout(stream: &mut TcpStream, timeout: Duration) -> Option<u
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
 
     #[test]
     fn request_line_deadline_is_cumulative() {
