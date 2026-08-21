@@ -128,7 +128,7 @@ The relay's unauthenticated `/cdp` never leaves laptop loopback. The only way in
 
 ## Phase 1 — Transport (`forward`)
 
-### New module `src/relay.rs`
+### New module `src/browser.rs`
 
 The callback bridge reads a `CONNECT <port>` request line and consults the armed set because
 its destination is dynamic per login. The browser channel's destination is constant, so it
@@ -138,9 +138,15 @@ drops the request line, the port policy, and the arming check, keeping the rest 
 1. `cfg.validate()`, resolve `cfg.listen_ip()`, bind `(ip, cfg.relay_port)`.
 2. Per connection: acquire a `ConnectionLimit` permit; refuse with `REFUSED BUSY\n` when the
    limit is reached.
-3. `crate::peer::authorized(&cfg, remote_ip)`; refuse with `REFUSED PEER\n` before reading a
-   byte. Loopback is allowed (this is what lets `forward doctor` probe the channel); every
-   other address must equal `cfg.peer_ip()` exactly.
+3. `crate::peer::authorized(&cfg, remote_ip)`; refuse with `REFUSED PEER\n` before any payload
+   byte is inspected or forwarded, and without ever dialling the upstream. Loopback is allowed
+   (this is what lets `forward doctor` probe the channel); every other address must equal
+   `cfg.peer_ip()` exactly. The refusal drains the socket before closing, so the reply is not
+   lost to a TCP RST — but that drain is **bounded** by a fixed read budget, after which the
+   refusal is written and the connection closed regardless. An unbounded drain would let a
+   peer that never stops writing hold its `ConnectionLimit` permit indefinitely; enough such
+   connections would exhaust the limit and lock out both real sessions and the doctor probe
+   the drain exists to serve.
 4. `TcpStream::connect(("127.0.0.1", RELAY_TARGET_PORT))`, then
    `crate::pipe::bidirectional(inbound, upstream)`.
 
@@ -175,7 +181,7 @@ devbox's `config-serve.toml`) do not bind it.
 
 `forward daemon` spawns the relay accept loop on a thread and continues serving the URL
 channel. `src/daemon.rs` is 194 lines against a hard 250-line limit
-(`scripts/check-source-line-limit.sh`), so the logic lives in `src/relay.rs` and the daemon
+(`scripts/check-source-line-limit.sh`), so the logic lives in `src/browser.rs` and the daemon
 gains only the spawn.
 
 Failure handling splits deliberately:
