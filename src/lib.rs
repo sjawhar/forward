@@ -1,5 +1,5 @@
-pub mod browser;
 pub mod bridge;
+pub mod browser;
 pub mod callback;
 pub mod config;
 pub mod doctor;
