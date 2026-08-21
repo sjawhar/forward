@@ -3,6 +3,9 @@ use crate::config::Config;
 use crate::target::url_host;
 use std::io::{Read, Write};
 
+type Request =
+    dyn for<'host, 'path> FnMut(&'host str, u16, &'path str) -> Result<Vec<u8>, String>;
+
 pub(super) fn report(cfg: &Config) -> bool {
     let (healthy, line) = evaluate(cfg, crate::config::default_relay_port());
     super::print_line(line);
@@ -10,28 +13,52 @@ pub(super) fn report(cfg: &Config) -> bool {
 }
 
 pub(super) fn evaluate(cfg: &Config, well_known_port: u16) -> (bool, String) {
+    let mut send_request = |host: &str, port: u16, path: &str| request(host, port, path);
+    evaluate_with(
+        cfg,
+        well_known_port,
+        RELAY_TARGET_PORT,
+        &mut send_request,
+    )
+}
+
+/// Test seam: evaluate the role split with injected relay request results.
+pub(super) fn evaluate_with(
+    cfg: &Config,
+    well_known_port: u16,
+    relay_target_port: u16,
+    request: &mut Request,
+) -> (bool, String) {
     if cfg.relay_port == 0 && cfg.peer.is_empty() {
         return (true, "browser relay: disabled (relay_port = 0)".to_owned());
     }
 
     if cfg.relay_port == 0 {
         return report_probe(
-            probe(&cfg.peer, well_known_port, "/json/version"),
+            probe(request, &cfg.peer, well_known_port, "/json/version"),
             &cfg.peer,
             well_known_port,
             &cfg.peer,
             well_known_port,
+            request,
         );
     }
 
-    let result = probe(&cfg.listen, cfg.relay_port, "/json/version");
+    let result = probe(request, &cfg.listen, cfg.relay_port, "/json/version");
     if matches!(result, Ok(RelayEvidence::PeerRefused))
         && matches!(cfg.listen_ip(), Ok(address) if !address.is_loopback())
     {
         return report_laptop_upstream(
-            probe("127.0.0.1", RELAY_TARGET_PORT, "/json/version"),
+            probe(
+                request,
+                "127.0.0.1",
+                relay_target_port,
+                "/json/version",
+            ),
             &cfg.listen,
             cfg.relay_port,
+            relay_target_port,
+            request,
         );
     }
     report_probe(
@@ -40,13 +67,16 @@ pub(super) fn evaluate(cfg: &Config, well_known_port: u16) -> (bool, String) {
         cfg.relay_port,
         &cfg.listen,
         cfg.relay_port,
+        request,
     )
 }
 
-pub(super) fn report_laptop_upstream(
+fn report_laptop_upstream(
     result: Result<RelayEvidence, String>,
     host: &str,
     port: u16,
+    relay_target_port: u16,
+    request: &mut Request,
 ) -> (bool, String) {
     match result {
         Err(_) | Ok(RelayEvidence::UpstreamDown) => (
@@ -55,7 +85,14 @@ pub(super) fn report_laptop_upstream(
                 "browser relay: FAIL — relay process down — start omp-browser-relay (via {host}:{port})"
             ),
         ),
-        result => report_probe(result, host, port, "127.0.0.1", RELAY_TARGET_PORT),
+        result => report_probe(
+            result,
+            host,
+            port,
+            "127.0.0.1",
+            relay_target_port,
+            request,
+        ),
     }
 }
 
@@ -65,6 +102,7 @@ fn report_probe(
     port: u16,
     probe_host: &str,
     probe_port: u16,
+    request: &mut Request,
 ) -> (bool, String) {
     match result {
         Err(error) => (
@@ -111,7 +149,12 @@ fn report_probe(
     }
 }
 
-fn probe(host: &str, port: u16, path: &str) -> Result<RelayEvidence, String> {
+fn probe(
+    request: &mut Request,
+    host: &str,
+    port: u16,
+    path: &str,
+) -> Result<RelayEvidence, String> {
     request(host, port, path).and_then(|body| classify(&body))
 }
 

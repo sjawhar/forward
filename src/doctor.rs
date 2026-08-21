@@ -212,4 +212,7 @@ fn print_line(message: impl Display) {
 mod browser;
 
 #[cfg(test)]
+mod browser_tests;
+
+#[cfg(test)]
 mod tests;

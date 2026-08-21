@@ -223,17 +223,3 @@ fn browser_relay_accepts_a_loopback_laptop_probe_end_to_end() {
     assert!(line.contains("browser relay: healthy"), "got {line}");
 }
 
-#[test]
-fn browser_relay_reports_a_missing_local_upstream_as_relay_down() {
-    let (healthy, line) = super::browser::report_laptop_upstream(
-        Err("Connection refused".to_owned()),
-        "100.64.0.1",
-        12_803,
-    );
-
-    assert!(!healthy, "got {line}");
-    assert!(
-        line.contains("relay process down — start omp-browser-relay"),
-        "got {line}"
-    );
-}
