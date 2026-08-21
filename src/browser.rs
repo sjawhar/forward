@@ -91,7 +91,9 @@ fn accept_loop(cfg: Config, listener: TcpListener, upstream: SocketAddr) {
         match connection {
             Ok(mut stream) => {
                 let Some(permit) = limit.acquire() else {
-                    eprintln!("forward: browser relay refused connection: concurrency limit reached");
+                    eprintln!(
+                        "forward: browser relay refused connection: concurrency limit reached"
+                    );
                     refuse(&mut stream, BUSY_REFUSAL);
                     continue;
                 };

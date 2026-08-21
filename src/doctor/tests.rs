@@ -1,8 +1,8 @@
+use super::browser::{RelayEvidence, classify};
 use super::*;
 use crate::bridge::denied_port;
 use crate::callback::PCSC_PORT;
 use crate::config::Config;
-use super::browser::{RelayEvidence, classify};
 use std::net::TcpListener;
 use std::thread;
 
@@ -75,10 +75,7 @@ fn routable_self_refusals_are_positive_evidence() {
 
 #[test]
 fn classifies_browser_relay_responses() {
-    assert_eq!(
-        classify(b"REFUSED PEER\n"),
-        Ok(RelayEvidence::PeerRefused)
-    );
+    assert_eq!(classify(b"REFUSED PEER\n"), Ok(RelayEvidence::PeerRefused));
     assert_eq!(classify(b"REFUSED\n"), Ok(RelayEvidence::UpstreamDown));
     assert_eq!(classify(b"REFUSED BUSY\n"), Ok(RelayEvidence::Busy));
     assert_eq!(
@@ -222,4 +219,3 @@ fn browser_relay_accepts_a_loopback_laptop_probe_end_to_end() {
     assert!(healthy, "got {line}");
     assert!(line.contains("browser relay: healthy"), "got {line}");
 }
-

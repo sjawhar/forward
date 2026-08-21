@@ -3,8 +3,7 @@ use crate::config::Config;
 use crate::target::url_host;
 use std::io::{Read, Write};
 
-type Request =
-    dyn for<'host, 'path> FnMut(&'host str, u16, &'path str) -> Result<Vec<u8>, String>;
+type Request = dyn for<'host, 'path> FnMut(&'host str, u16, &'path str) -> Result<Vec<u8>, String>;
 
 pub(super) fn report(cfg: &Config) -> bool {
     let (healthy, line) = evaluate(cfg, crate::config::default_relay_port());
@@ -14,12 +13,7 @@ pub(super) fn report(cfg: &Config) -> bool {
 
 pub(super) fn evaluate(cfg: &Config, well_known_port: u16) -> (bool, String) {
     let mut send_request = |host: &str, port: u16, path: &str| request(host, port, path);
-    evaluate_with(
-        cfg,
-        well_known_port,
-        RELAY_TARGET_PORT,
-        &mut send_request,
-    )
+    evaluate_with(cfg, well_known_port, RELAY_TARGET_PORT, &mut send_request)
 }
 
 /// Test seam: evaluate the role split with injected relay request results.
@@ -49,12 +43,7 @@ pub(super) fn evaluate_with(
         && matches!(cfg.listen_ip(), Ok(address) if !address.is_loopback())
     {
         return report_laptop_upstream(
-            probe(
-                request,
-                "127.0.0.1",
-                relay_target_port,
-                "/json/version",
-            ),
+            probe(request, "127.0.0.1", relay_target_port, "/json/version"),
             &cfg.listen,
             cfg.relay_port,
             relay_target_port,
@@ -85,14 +74,7 @@ fn report_laptop_upstream(
                 "browser relay: FAIL — relay process down — start omp-browser-relay (via {host}:{port})"
             ),
         ),
-        result => report_probe(
-            result,
-            host,
-            port,
-            "127.0.0.1",
-            relay_target_port,
-            request,
-        ),
+        result => report_probe(result, host, port, "127.0.0.1", relay_target_port, request),
     }
 }
 

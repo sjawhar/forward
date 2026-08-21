@@ -151,7 +151,6 @@ fn handle(cfg: &Config, armed: &Armed, listener_port: u16, mut stream: TcpStream
     }
 }
 
-
 /// Read `CONNECT <port>\n` one byte at a time from the piped stream.
 ///
 /// Bounded, byte-at-a-time reading is structural: a buffered reader can consume

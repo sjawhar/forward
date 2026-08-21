@@ -1,7 +1,7 @@
 use super::browser::evaluate_with;
 use crate::config::Config;
-use std::net::TcpListener;
 use std::cell::RefCell;
+use std::net::TcpListener;
 use std::rc::Rc;
 
 fn ephemeral_port() -> u16 {
@@ -25,7 +25,12 @@ fn laptop_peer_refusal_proves_the_listener_then_checks_the_direct_relay() {
     };
     let responses = Rc::new(RefCell::new(
         [
-            (LISTEN, relay_port, "/json/version", b"REFUSED PEER\n".as_slice()),
+            (
+                LISTEN,
+                relay_port,
+                "/json/version",
+                b"REFUSED PEER\n".as_slice(),
+            ),
             (
                 "127.0.0.1",
                 upstream_port,
@@ -47,7 +52,10 @@ fn laptop_peer_refusal_proves_the_listener_then_checks_the_direct_relay() {
             .borrow_mut()
             .next()
             .expect("unexpected relay probe");
-        assert_eq!((host, port, path), (expected_host, expected_port, expected_path));
+        assert_eq!(
+            (host, port, path),
+            (expected_host, expected_port, expected_path)
+        );
         Ok(response.to_vec())
     };
 

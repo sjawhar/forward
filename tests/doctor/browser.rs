@@ -85,7 +85,10 @@ fn laptop_role_reports_relay_channel_down_when_nothing_is_bound() {
 
 #[test]
 fn loopback_listen_answers_end_to_end_on_the_listen_leg() {
-    let output = run_doctor_with(healthy_ports(), &format!("relay_port = {}\n", spawn_relay()));
+    let output = run_doctor_with(
+        healthy_ports(),
+        &format!("relay_port = {}\n", spawn_relay()),
+    );
     let text = super::output_text(&output);
 
     assert!(output.status.success(), "got {text}");

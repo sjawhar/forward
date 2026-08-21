@@ -1,6 +1,10 @@
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}, mpsc};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -97,7 +101,9 @@ fn a_flooding_unauthorized_peer_still_gets_the_refusal_and_frees_its_slot() {
     // Given: a foreign peer that never stops flooding its socket.
     let (client, server) = socket_pair();
     let mut reader = client.try_clone().unwrap();
-    reader.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    reader
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let writer_stop = Arc::clone(&stop);
@@ -210,10 +216,15 @@ fn half_close_propagates_in_each_direction() {
     client.shutdown(Shutdown::Write).unwrap();
 
     // Then: the upstream sees EOF and can still return a final reply and EOF.
-    client.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let mut reply = String::new();
     client.read_to_string(&mut reply).unwrap();
-    assert_eq!(receiver.recv_timeout(Duration::from_secs(5)).unwrap(), "data");
+    assert_eq!(
+        receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
+        "data"
+    );
     assert_eq!(reply, "gone");
 }
 

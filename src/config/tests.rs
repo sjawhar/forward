@@ -97,10 +97,7 @@ fn parses_transport_fields() {
     assert_eq!(cfg.relay_port, 12_803);
     assert!(cfg.validate().is_ok());
 
-    for (contents, expected) in [
-        ("relay_port = 12811\n", 12_811),
-        ("relay_port = 0\n", 0),
-    ] {
+    for (contents, expected) in [("relay_port = 12811\n", 12_811), ("relay_port = 0\n", 0)] {
         std::fs::write(&f, contents).unwrap();
         assert_eq!(load(f.path()).unwrap().relay_port, expected);
     }

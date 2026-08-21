@@ -161,7 +161,9 @@ fn a_flooding_client_still_gets_its_refusal_and_frees_its_slot() {
     let bridge_port = super::spawn_bridge(forward::bridge::Armed::new());
     let client = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
     let mut reader = client.try_clone().unwrap();
-    reader.set_read_timeout(Some(Duration::from_secs(1))).unwrap();
+    reader
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let writer_stop = Arc::clone(&stop);
     let writer = std::thread::spawn(move || {
