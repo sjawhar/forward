@@ -16,7 +16,7 @@ pub(crate) use forward::callback::FILES_PORT;
 #[command(
     name = "forward",
     version,
-    about = "Open devbox URLs and files in the laptop browser"
+    about = "Open devbox URLs and files in the laptop browser, and let the devbox reach it"
 )]
 struct Cli {
     #[command(subcommand)]
@@ -46,7 +46,9 @@ enum Command {
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },
-    /// Receive URLs from the devbox and open them (laptop side)
+    /// Receive URLs from the devbox and open them, and front the browser relay
+    /// channel on :12803 so devbox agents can drive this machine's Chrome
+    /// (laptop side)
     Daemon {
         #[arg(long, default_value_t = CHANNEL_PORT)]
         port: u16,
