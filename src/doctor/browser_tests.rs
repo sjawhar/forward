@@ -42,7 +42,7 @@ fn laptop_peer_refusal_proves_the_listener_then_checks_the_direct_relay() {
                 "127.0.0.1",
                 upstream_port,
                 "/json/list",
-                b"HTTP/1.0 200 OK\r\n\r\n[{\"webSocketDebuggerUrl\":\"ws://relay\"}]".as_slice(),
+                b"HTTP/1.0 200 OK\r\n\r\n[{\"id\":\"relay-1\",\"title\":\"Example\",\"type\":\"page\",\"url\":\"https://example.test/\"}]".as_slice(),
             ),
         ]
         .into_iter(),
@@ -104,7 +104,7 @@ fn devbox_config_without_relay_port_probes_the_laptop_peer() {
                 relay_port,
                 "/json/list",
                 Ok(
-                    b"HTTP/1.0 200 OK\r\n\r\n[{\"webSocketDebuggerUrl\":\"ws://relay\"}]"
+                    b"HTTP/1.0 200 OK\r\n\r\n[{\"id\":\"relay-1\",\"title\":\"Example\",\"type\":\"page\",\"url\":\"https://example.test/\"}]"
                         .as_slice(),
                 ),
             ),

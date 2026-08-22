@@ -44,7 +44,7 @@ fn spawn_relay() -> u16 {
     std::thread::spawn(move || {
         for response in [
             b"HTTP/1.0 200 OK\r\n\r\n{}".as_slice(),
-            b"HTTP/1.0 200 OK\r\n\r\n[{\"webSocketDebuggerUrl\":\"ws://relay\"}]".as_slice(),
+            b"HTTP/1.0 200 OK\r\n\r\n[{\"id\":\"relay-1\",\"title\":\"Example\",\"type\":\"page\",\"url\":\"https://example.test/\"}]".as_slice(),
         ] {
             let (mut stream, _) = listener.accept().unwrap();
             let mut request = [0_u8; 512];

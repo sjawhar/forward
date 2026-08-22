@@ -187,8 +187,8 @@ fn request(host: &str, port: u16, path: &str) -> Result<Vec<u8>, String> {
 }
 
 fn count_targets(body: &[u8]) -> usize {
-    body.windows(b"webSocketDebuggerUrl".len())
-        .filter(|window| *window == b"webSocketDebuggerUrl")
+    body.windows(b"\"id\":".len())
+        .filter(|window| *window == b"\"id\":")
         .count()
 }
 
@@ -220,4 +220,16 @@ pub(super) fn classify(body: &[u8]) -> Result<RelayEvidence, String> {
         return Ok(RelayEvidence::ExtensionDisconnected);
     }
     Err(format!("unexpected {}-byte response {body:?}", body.len()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::count_targets;
+
+    #[test]
+    fn count_targets_handles_relay_entries_without_websocket_urls() {
+        let relay_list = br#"[{"id":"3DDE3F56ABCD1234","title":"Example","type":"page","url":"https://example.com/"},{"id":"5BAE4F23DCBA4321","title":"Search","type":"page","url":"https://search.example/"},{"id":"6C3E8D12A4B5F678","title":"Inbox","type":"page","url":"https://mail.example/"}]"#;
+
+        assert_eq!(count_targets(relay_list), 3);
+    }
 }
