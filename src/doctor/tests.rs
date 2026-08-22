@@ -129,7 +129,7 @@ fn browser_relay_probes_the_devbox_peer_end_to_end() {
     cfg.peer = "127.0.0.1".to_owned();
     let port = spawn_relay(&[
         b"HTTP/1.0 200 OK\r\n\r\n{}",
-        b"HTTP/1.0 200 OK\r\n\r\n[{\"webSocketDebuggerUrl\":\"ws://relay\"}]",
+        b"HTTP/1.0 200 OK\r\n\r\n[{\"id\":\"relay-1\",\"title\":\"Example\",\"type\":\"page\",\"url\":\"https://example.test/\"}]",
     ]);
 
     let (healthy, line) = super::browser::evaluate(&cfg, port);
@@ -207,7 +207,7 @@ fn browser_relay_reports_an_unbound_laptop_listener() {
 fn browser_relay_accepts_a_loopback_laptop_probe_end_to_end() {
     let port = spawn_relay(&[
         b"HTTP/1.0 200 OK\r\n\r\n{}",
-        b"HTTP/1.0 200 OK\r\n\r\n[{\"webSocketDebuggerUrl\":\"ws://relay\"}]",
+        b"HTTP/1.0 200 OK\r\n\r\n[{\"id\":\"relay-1\",\"title\":\"Example\",\"type\":\"page\",\"url\":\"https://example.test/\"}]",
     ]);
     let cfg = Config {
         relay_port: port,
