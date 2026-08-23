@@ -9,7 +9,7 @@ pub(super) fn report() {
 fn line(status: GrantStatus) -> String {
     match status {
         GrantStatus::Unreachable => {
-            "browser grant: info — no request socket answered; forward serve is not running here (grants are devbox-side)"
+            "browser grant: info — grant status unavailable; no valid STATUS reply from the local request socket"
                 .to_owned()
         }
         GrantStatus::None => {
@@ -31,7 +31,10 @@ mod tests {
 
     #[test]
     fn each_grant_state_renders_its_own_row() {
-        assert!(line(GrantStatus::Unreachable).contains("forward serve is not running"));
+        assert_eq!(
+            line(GrantStatus::Unreachable),
+            "browser grant: info — grant status unavailable; no valid STATUS reply from the local request socket"
+        );
         let none = line(GrantStatus::None);
         assert!(none.contains("none for this session"));
         assert!(none.contains("forward browser grant --ttl 30m"));

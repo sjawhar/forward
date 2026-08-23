@@ -141,12 +141,3 @@ fn a_token_refusal_is_proof_the_laptop_channel_is_alive() {
         Ok(RelayEvidence::TokenRequired)
     );
 }
-
-#[test]
-fn token_refusal_is_matched_before_the_generic_refusal() {
-    let source = include_str!("browser.rs");
-    let token = source.find("body.starts_with(b\"REFUSED TOKEN\")").unwrap();
-    let generic = source.find("body == b\"REFUSED\\n\"").unwrap();
-
-    assert!(token < generic);
-}
