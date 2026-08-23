@@ -84,6 +84,8 @@ enum BrowserCommand {
         /// Grant lifetime, for example 45s, 30m, or 2h
         #[arg(long, default_value = "30m")]
         ttl: String,
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
     },
 }
 
@@ -153,7 +155,8 @@ fn main() -> anyhow::Result<()> {
                 writeln!(stdout, "{value}")?;
                 Ok(())
             }
-            BrowserCommand::Grant { ttl } => {
+            BrowserCommand::Grant { ttl, config } => {
+                let _ = load_config(config)?;
                 let Ok(token) = std::env::var("FORWARD_BROWSER_GRANT") else {
                     eprintln!("forward: FORWARD_BROWSER_GRANT is not set; run");
                     eprintln!("  secrets FORWARD_BROWSER_GRANT -- forward browser grant --ttl 30m");
