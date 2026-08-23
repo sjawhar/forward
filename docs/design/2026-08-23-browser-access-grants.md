@@ -103,9 +103,11 @@ deadline}`, and prints the endpoint URL for the agent to pass as `app.cdp_url`.
 The default TTL is 30 minutes: long enough not to interrupt a working session,
 short enough that walking away from the desk closes the door.
 
-On expiry the listener closes and that grant's copy of the token is zeroed, so
-once no grant is live the daemon holds no token at all. The value itself is
-shared by every grant, so expiring one never invalidates another.
+On expiry a reaper closes the listener and zeroes the registry's copy of the
+token, without waiting for a connection to notice. The value itself is shared by
+every grant, so expiring one never invalidates another. A connection handler
+already running holds its own copy for the life of that connection, so "the
+daemon holds no token" is true once no grant is live *and* no session is open.
 **Established connections are not killed** — the deadline governs when sessions
 may start, so a lapsing window never guillotines an agent mid-workflow. There is
 no revoke verb; expiry is the whole lifecycle until a need for one appears.
@@ -132,9 +134,12 @@ New refusals join the existing `REFUSED PEER` / `REFUSED BUSY` vocabulary:
 
 ## Token provisioning
 
-The laptop holds the expected value in a `0600` file whose path is the new
-`relay_token_file` config key. It cannot live in `config.toml`, which is
-committed to dotfiles and symlinked into place.
+The laptop holds the expected value in a `0600` file at
+`$XDG_CONFIG_HOME/forward/relay.token`, falling back to
+`$HOME/.config/forward/relay.token`, with an optional `relay_token_file`
+override for anyone who wants it elsewhere. The path is derived rather than
+configured because `config.toml` is committed to dotfiles and symlinked into
+place: it can hold neither the secret nor a machine-specific absolute path.
 
 The devbox holds the same value as a human-tier secretsd secret, so reading it
 requires the touch and the grant is scoped to the requesting session for that
@@ -172,14 +177,20 @@ eliminate PID-reuse risk. Failure to resolve is refused, never allowed.
 
 ## Configuration and health checks
 
-The laptop gains `relay_token_file`. The devbox gains nothing.
+Neither machine gains a required config key: the laptop derives its token path,
+and `relay_token_file` exists only as an override.
 
 `forward doctor` reports the relay row without holding any secret: it connects
 to the laptop channel and treats `REFUSED TOKEN` as proof of life, because a
 refusal proves the listener is alive, peer-authorised, and enforcing. A
 connection failure and a refusal are therefore distinguishable, and neither
-requires a touch. A devbox row reports whether this session holds a live grant,
-so "why can't the agent see my browser" answers itself.
+requires a touch.
+
+The devbox row reports whether the invoking session holds a live grant. It
+cannot read the registry directly — `forward doctor` is a separate process from
+the `forward serve` daemon that owns it — so it asks over the grant socket with
+a `STATUS` verb, credentialed by the same `SO_PEERCRED` path as `GRANT`. A row
+that guessed instead of asking would be a row that lies.
 
 ## Consumer cutover
 
