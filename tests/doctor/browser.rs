@@ -55,6 +55,18 @@ fn spawn_relay() -> u16 {
     port
 }
 
+fn spawn_token_refusal_relay() -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 512];
+        let _ = stream.read(&mut request);
+        stream.write_all(b"REFUSED TOKEN\n").unwrap();
+    });
+    port
+}
+
 #[test]
 fn the_disabled_row_reports_and_never_fails() {
     let output = super::run_doctor(healthy_ports());
@@ -94,4 +106,18 @@ fn loopback_listen_answers_end_to_end_on_the_listen_leg() {
     assert!(output.status.success(), "got {text}");
     assert!(text.contains("browser relay: healthy"), "got {text}");
     assert!(text.contains("(1 targets)"), "got {text}");
+}
+
+#[test]
+fn a_token_refusal_reports_locked_but_healthy() {
+    let output = run_doctor_with(
+        healthy_ports(),
+        &format!("relay_port = {}\n", spawn_token_refusal_relay()),
+    );
+    let text = super::output_text(&output);
+
+    assert!(output.status.success(), "got {text}");
+    assert!(text.contains("browser relay: locked"), "got {text}");
+    assert!(text.contains("(no grant)"), "got {text}");
+    assert!(text.contains("browser grant:"), "got {text}");
 }

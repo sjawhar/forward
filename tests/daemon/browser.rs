@@ -1,5 +1,5 @@
 use super::daemon_support::{connect, start, start_expecting_failure, test_port};
-use std::io::Read as _;
+use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 
 #[test]
@@ -46,11 +46,20 @@ fn the_daemon_serves_the_channel_it_announces() {
     // this dials only the daemon's ephemeral listener and never binds 9224.
     let dir = tempfile::tempdir().unwrap();
     let relay_port = test_port();
+    let token_path = dir.path().join("relay.token");
+    std::fs::write(&token_path, "daemon-relay-token\n").unwrap();
 
-    // When: the daemon announces the channel and it is dialed locally.
-    let (daemon, port) = start(dir.path(), &format!("relay_port = {relay_port}\n"));
+    // When: the daemon announces the channel and a tokened client dials it locally.
+    let (daemon, port) = start(
+        dir.path(),
+        &format!(
+            "relay_port = {relay_port}\nrelay_token_file = \"{}\"\n",
+            token_path.display()
+        ),
+    );
     daemon.wait_for_log(&format!("browser relay channel on 127.0.0.1:{relay_port}"));
     let mut relay = connect(relay_port);
+    relay.write_all(b"RELAY daemon-relay-token\n").unwrap();
     let mut response = Vec::new();
     relay.read_to_end(&mut response).unwrap();
 

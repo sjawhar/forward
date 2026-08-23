@@ -1,4 +1,4 @@
-use super::browser::evaluate_with;
+use super::browser::{RelayEvidence, classify, evaluate_with};
 use crate::config::Config;
 use crate::config::{default_relay_port, load};
 use std::cell::RefCell;
@@ -131,5 +131,38 @@ fn devbox_config_without_relay_port_probes_the_laptop_peer() {
     assert!(
         responses.borrow_mut().next().is_none(),
         "relay probe was incomplete"
+    );
+}
+
+#[test]
+fn a_token_refusal_is_proof_the_laptop_channel_is_alive() {
+    assert_eq!(
+        classify(b"REFUSED TOKEN\n"),
+        Ok(RelayEvidence::TokenRequired)
+    );
+}
+
+#[test]
+fn a_missing_laptop_token_file_fails_with_its_remedy() {
+    let cfg = Config {
+        relay_port: 12_803,
+        ..Config::default_values_for_test()
+    };
+    let mut request = |_: &str, _: u16, _: &str| Ok(b"REFUSED TOKEN FILE\n".to_vec());
+
+    let (healthy, line) = evaluate_with(&cfg, 12_803, 9_224, &mut request);
+
+    assert!(!healthy, "got {line}");
+    assert_eq!(
+        line,
+        "browser relay: FAIL — laptop token file missing — run forward browser init-token (at 127.0.0.1:12803)"
+    );
+}
+
+#[test]
+fn an_untokened_probe_reports_an_disconnected_extension() {
+    assert_eq!(
+        classify(b"REFUSED TOKEN UPSTREAM 503\n"),
+        Ok(RelayEvidence::ExtensionDisconnected)
     );
 }

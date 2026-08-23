@@ -95,6 +95,7 @@ pub fn run(cfg: &Config, channel_port: u16, files_port: u16) -> bool {
         },
     );
     let relay = browser::report(cfg);
+    grant::report();
     report_pcsc();
     url && preview && bridge && relay
 }
@@ -210,6 +211,7 @@ fn print_line(message: impl Display) {
 }
 
 mod browser;
+mod grant;
 
 #[cfg(test)]
 mod browser_tests;

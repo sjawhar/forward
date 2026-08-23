@@ -457,6 +457,10 @@ what it could not check rather than passing silently:
   anything.
 - PC/SC: report the bridge socket's presence and say explicitly that end-to-end
   token health belongs to the secrets broker.
+- Browser relay: connect without a token and classify `REFUSED TOKEN` as healthy;
+  it proves the listener, peer check, and token gate without presenting a
+  credential. A grant row queries the devbox request socket and reports whether
+  the invoking session has a live loopback grant.
 
 This replaces the health-checking that motivated the retired `forward tunnel`
 subcommand, for the channels `forward` still owns.

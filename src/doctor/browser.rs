@@ -1,3 +1,7 @@
+mod evidence;
+
+pub(super) use evidence::{RelayEvidence, classify};
+
 use crate::callback::RELAY_TARGET_PORT;
 use crate::config::Config;
 use crate::target::url_host;
@@ -129,6 +133,16 @@ fn report_probe(
                 "browser relay: FAIL — {host}:{port}: not the configured peer — check peer on the laptop"
             ),
         ),
+        Ok(RelayEvidence::TokenFileMissing) => (
+            false,
+            format!(
+                "browser relay: FAIL — laptop token file missing — run forward browser init-token (at {host}:{port})"
+            ),
+        ),
+        Ok(RelayEvidence::TokenRequired) => (
+            true,
+            format!("browser relay: locked at {host}:{port} (no grant)"),
+        ),
         Ok(RelayEvidence::UpstreamDown) => (
             false,
             format!(
@@ -190,36 +204,6 @@ fn count_targets(body: &[u8]) -> usize {
     body.windows(b"\"id\":".len())
         .filter(|window| *window == b"\"id\":")
         .count()
-}
-
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum RelayEvidence {
-    PeerRefused,
-    UpstreamDown,
-    Busy,
-    ExtensionDisconnected,
-    Healthy,
-}
-
-pub(super) fn classify(body: &[u8]) -> Result<RelayEvidence, String> {
-    if body.starts_with(b"REFUSED PEER") {
-        return Ok(RelayEvidence::PeerRefused);
-    }
-    if body == b"REFUSED\n" {
-        return Ok(RelayEvidence::UpstreamDown);
-    }
-    if body.starts_with(b"REFUSED BUSY") {
-        return Ok(RelayEvidence::Busy);
-    }
-
-    let status = body.split(|byte| *byte == b'\n').next().unwrap_or_default();
-    if status.windows(4).any(|window| window == b" 200") {
-        return Ok(RelayEvidence::Healthy);
-    }
-    if status.windows(4).any(|window| window == b" 503") {
-        return Ok(RelayEvidence::ExtensionDisconnected);
-    }
-    Err(format!("unexpected {}-byte response {body:?}", body.len()))
 }
 
 #[cfg(test)]
