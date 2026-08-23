@@ -3,6 +3,8 @@ use forward::browser::request::{
     GrantStatus, parse, parse_status, parse_ttl, request, serve_with_resolver, status,
 };
 use parking_lot::Mutex;
+use std::io::{Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::sync::{Arc, mpsc};
@@ -89,22 +91,58 @@ fn a_status_reply_parses() {
 
 const CHILD_SOCKET_ENV: &str = "FORWARD_TEST_GRANT_SOCKET";
 const CHILD_PORT_PATH_ENV: &str = "FORWARD_TEST_GRANT_PORT_PATH";
+const CHILD_ROLE_ENV: &str = "FORWARD_TEST_GRANT_ROLE";
 
 #[test]
-fn the_request_socket_attributes_the_caller_through_peer_credentials() {
-    if let (Some(socket), Some(port_path)) = (
+fn sibling_children_of_a_session_can_use_its_grant() {
+    if let (Some(socket), Some(port_path), Some(role)) = (
         std::env::var_os(CHILD_SOCKET_ENV),
         std::env::var_os(CHILD_PORT_PATH_ENV),
+        std::env::var_os(CHILD_ROLE_ENV),
     ) {
-        let port = request(&std::path::PathBuf::from(socket), 60, b"correct-horse")
-            .expect("the child grant request must succeed");
-        std::fs::write(port_path, port.to_string()).unwrap();
+        let path = std::path::PathBuf::from(socket);
+        if role == "grant" {
+            let port =
+                request(&path, 60, b"correct-horse").expect("the child grant request must succeed");
+            std::fs::write(port_path, port.to_string()).unwrap();
+            return;
+        }
+
+        let port = std::fs::read_to_string(port_path).unwrap().parse().unwrap();
+        assert!(matches!(
+            status(&path),
+            GrantStatus::Live {
+                port: live_port,
+                ..
+            } if live_port == port
+        ));
+        let mut browser = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        browser.write_all(b"browser-payload").unwrap();
+        let mut reply = [0_u8; 4];
+        browser.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"pong");
         return;
     }
 
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("grant.sock");
     let child_port_path = directory.path().join("child-port");
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream_port = upstream.local_addr().unwrap().port();
+    let upstream_task = thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let mut line = Vec::new();
+        let mut byte = [0_u8; 1];
+        while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+            line.push(byte[0]);
+        }
+        assert_eq!(line, b"RELAY correct-horse");
+        let mut payload = [0_u8; 15];
+        stream.read_exact(&mut payload).unwrap();
+        assert_eq!(&payload, b"browser-payload");
+        stream.write_all(b"pong").unwrap();
+    });
+
     let grants = forward::browser::grant::Grants::new();
     let (sender, receiver) = mpsc::channel();
     let sender = Mutex::new(sender);
@@ -113,33 +151,37 @@ fn the_request_socket_attributes_the_caller_through_peer_credentials() {
         sender.lock().send((pid, start_time)).unwrap();
         Some("session-a".to_owned())
     });
-    spawn_server(grants.clone(), path.clone(), resolver);
+    let mut cfg = forward::config::Config::default_values_for_test();
+    cfg.peer = "127.0.0.1".to_owned();
+    cfg.relay_port = upstream_port;
+    let server_path = path.clone();
+    thread::spawn(move || serve_with_resolver(grants, cfg, server_path, resolver));
     await_socket(&path);
 
-    let mut child = Command::new(std::env::current_exe().unwrap())
+    let current_exe = std::env::current_exe().unwrap();
+    let mut grant_child = Command::new(&current_exe)
         .arg("--exact")
-        .arg("the_request_socket_attributes_the_caller_through_peer_credentials")
+        .arg("sibling_children_of_a_session_can_use_its_grant")
         .env(CHILD_SOCKET_ENV, &path)
         .env(CHILD_PORT_PATH_ENV, &child_port_path)
+        .env(CHILD_ROLE_ENV, "grant")
         .spawn()
         .unwrap();
-    let child_pid = child.id();
-    assert!(child.wait().unwrap().success());
-    let port = std::fs::read_to_string(child_port_path)
-        .unwrap()
-        .parse()
-        .unwrap();
+    let grant_pid = grant_child.id();
+    assert!(grant_child.wait().unwrap().success());
+    let seen_pids: Vec<(u32, u64)> = receiver.try_iter().collect();
+    assert!(seen_pids.iter().any(|(pid, _)| *pid == grant_pid));
 
-    let grant = grants.live(port).expect("the grant must be recorded");
-    let pids: Vec<(u32, u64)> = receiver.try_iter().collect();
-    let (_, child_start_time) = pids
-        .iter()
-        .copied()
-        .find(|(pid, _)| *pid == child_pid)
-        .expect("SO_PEERCRED must report the child process");
-    assert_eq!(grant.session, "session-a");
-    assert_eq!(grant.anchor.pid, child_pid);
-    assert_eq!(grant.anchor.start_time, child_start_time);
+    let mut user_child = Command::new(current_exe)
+        .arg("--exact")
+        .arg("sibling_children_of_a_session_can_use_its_grant")
+        .env(CHILD_SOCKET_ENV, &path)
+        .env(CHILD_PORT_PATH_ENV, &child_port_path)
+        .env(CHILD_ROLE_ENV, "use")
+        .spawn()
+        .unwrap();
+    assert!(user_child.wait().unwrap().success());
+    upstream_task.join().unwrap();
 }
 
 #[test]

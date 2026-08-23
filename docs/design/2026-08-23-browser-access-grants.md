@@ -27,8 +27,8 @@ What is enforced:
   dialling `100.100.92.97:12803` directly is refused, which is what makes the
   grant system non-optional rather than advisory.
 - **Only the granted session may use a grant's endpoint.** Every accepted
-  loopback connection is attributed to a PID, the PID to an omp session, and a
-  mismatch is refused and logged.
+  loopback connection is attributed to a PID whose ancestry must reach the
+  grant's kernel-identified session anchor; a mismatch is refused and logged.
 - **A grant cannot be requested for another session.** The request arrives over
   a unix socket, so the caller's PID comes from `SO_PEERCRED` — exact, with no
   lookup and no race. There is no `--session` argument to forge.
@@ -98,9 +98,12 @@ The key blinks; a touch authorises, ignoring it denies. `secrets` injects the
 token into the short-lived CLI's environment; the CLI hands it to the daemon
 over the unix socket, and the daemon holds it only in memory. On success the
 daemon binds an ephemeral loopback port and records `{session, anchor, port,
-token, deadline}`. The anchor pairs the owner's PID with its kernel start time;
-the session id is retained for display and logging, not authorization. The
-daemon prints the endpoint URL for the agent to pass as `app.cdp_url`.
+token, deadline}`. It anchors the grant to the nearest `omp --resume <uuid>`
+ancestor of the request CLI's `SO_PEERCRED` PID, falling back to that CLI's
+immediate parent when no session ancestor exists. The anchor pairs that
+process's PID with its kernel start time; the session id is retained for display
+and logging, not authorization. The daemon prints the endpoint URL for the
+agent to pass as `app.cdp_url`.
 
 The default TTL is 30 minutes: long enough not to interrupt a working session,
 short enough that walking away from the desk closes the door.
@@ -164,17 +167,21 @@ reaches shared or committed storage.
 
 ## Peer attribution
 
-Resolving a loopback TCP connection to a session is two hops:
+Grant authorization and proxy authorization both rely on the kernel-maintained
+process tree:
 
-1. **Connection → PID.** Match the client's address pair in `/proc/net/tcp` to
-   get the socket inode, then find the process holding `socket:[inode]` under
-   `/proc/*/fd`. Measured at 44 ms on this machine, once per CDP connection,
-   never per byte.
-2. **PID → session.** Each agent session is its own process, `omp --resume
-   <uuid>`, so the session id comes from the process's own argv. A subagent's
-   worker process resolves by walking `PPID` until that process is found.
+1. **Grant request → anchor.** `SO_PEERCRED` identifies the grant CLI exactly.
+   The daemon walks its parents to the nearest `omp --resume <uuid>` process;
+   when none exists, it uses the CLI's immediate parent. Process arguments only
+   select an existing parent-chain link, so they cannot extend authority outside
+   the requester's real subtree.
+2. **Loopback connection → authorization.** The proxy matches the client's
+   address pair in `/proc/net/tcp` to get its socket inode, then finds the
+   owning PID under `/proc/*/fd`. It authorizes that PID only when its ancestry
+   reaches the grant's exact PID-and-start-time anchor. `STATUS` applies the
+   same rule to its Unix-socket caller.
 
-Resolution happens at accept while the socket is live, which bounds but does not
+Resolution happens while each socket is live, which bounds but does not
 eliminate PID-reuse risk. Failure to resolve is refused, never allowed.
 
 ## Configuration and health checks

@@ -293,6 +293,7 @@ dependencies = [
  "toml",
  "ureq",
  "url",
+ "zeroize",
 ]
 
 [[package]]

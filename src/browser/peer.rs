@@ -5,7 +5,7 @@ mod socket;
 pub use process::{
     Process, ancestry_contains, ancestry_contains_with, process_start, process_start_with,
 };
-pub use session::{session_for_pid, session_for_pid_with};
+pub use session::{grant_anchor_for_pid, session_for_pid, session_for_pid_with};
 pub use socket::pid_for_connection;
 
 #[cfg(test)]

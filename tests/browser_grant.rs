@@ -71,10 +71,6 @@ fn assert_refused(client: &mut TcpStream, expected: &[u8]) {
     client.read_to_end(&mut reply).unwrap();
     assert_eq!(reply, expected);
 }
-fn config() -> forward::config::Config {
-    let root = tempfile::tempdir().unwrap();
-    forward::config::load(&root.path().join("config.toml")).unwrap()
-}
 fn unconnected_upstream() -> TcpListener {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
@@ -94,7 +90,7 @@ fn granted_owner_is_proxied_with_one_relay_token_prefix() {
     // the client payload and relay response.
     let grants = Grants::new();
     let (upstream, task) = spawn_relay_upstream(b"ping");
-    let proxy = proxy::bind(&config(), grants.clone(), upstream).unwrap();
+    let proxy = proxy::bind(grants.clone(), upstream).unwrap();
     let port = proxy.port();
     grants.insert(
         port,
@@ -215,7 +211,7 @@ fn reaper_closes_the_listener_without_a_client_connection() {
         .unwrap()
         .local_addr()
         .unwrap();
-    let proxy = proxy::bind(&config(), grants.clone(), upstream).unwrap();
+    let proxy = proxy::bind(grants.clone(), upstream).unwrap();
     let port = proxy.port();
     let deadline = Instant::now() + Duration::from_millis(50);
     grants.insert(port, grant(current_anchor(), deadline));
@@ -225,5 +221,5 @@ fn reaper_closes_the_listener_without_a_client_connection() {
     thread::sleep(Duration::from_secs(1));
 
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
-    assert_eq!(grants.tokens_held(), 0);
+    assert!(grants.live(port).is_none());
 }

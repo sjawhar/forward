@@ -9,6 +9,44 @@ pub fn session_for_pid(pid: u32) -> Option<String> {
     session_for_pid_with_executable(pid, &mut read_process, &mut is_omp_executable)
 }
 
+/// The process anchor a grant should record for a caller.
+///
+/// A grant CLI is short lived, so authority belongs to its nearest enclosing
+/// `omp --resume <uuid>` ancestor. Without one, the immediate parent is still
+/// the narrowest real process subtree that can use the grant.
+pub fn grant_anchor_for_pid(pid: u32) -> Option<(u32, u64)> {
+    grant_anchor_for_pid_with(pid, &mut read_process)
+}
+
+fn grant_anchor_for_pid_with(
+    pid: u32,
+    lookup: &mut dyn FnMut(u32) -> Option<Process>,
+) -> Option<(u32, u64)> {
+    let parent = lookup(pid)?.parent;
+    if parent <= 1 || parent == pid {
+        return None;
+    }
+    let mut current = parent;
+    let mut fallback = None;
+    for _ in 0..MAX_ANCESTRY_HOPS {
+        let process = match lookup(current) {
+            Some(process) => process,
+            None => break,
+        };
+        if current == parent {
+            fallback = Some((current, process.start));
+        }
+        if session_of(&process).is_some() {
+            return Some((current, process.start));
+        }
+        if process.parent <= 1 || process.parent == current {
+            break;
+        }
+        current = process.parent;
+    }
+    fallback
+}
+
 /// Test seam: resolve against a caller-supplied process table.
 #[doc(hidden)]
 pub fn session_for_pid_with(
@@ -71,4 +109,45 @@ fn is_session_id(value: &str) -> bool {
             part.len() == *width && part.bytes().all(|byte| byte.is_ascii_hexdigit())
         })
     }) && parts.next().is_none()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    const SESSION: &str = "01a0223b-94d1-7000-bd0e-5038df7750b0";
+
+    fn process(argv: &[&str], parent: u32, start: u64) -> Process {
+        Process {
+            argv: argv.iter().map(|value| (*value).to_owned()).collect(),
+            parent,
+            start,
+        }
+    }
+
+    fn table(entries: Vec<(u32, Process)>) -> impl FnMut(u32) -> Option<Process> {
+        let entries: HashMap<u32, Process> = entries.into_iter().collect();
+        move |pid| entries.get(&pid).cloned()
+    }
+
+    #[test]
+    fn grant_anchor_selects_the_nearest_omp_session_ancestor() {
+        let mut lookup = table(vec![
+            (13, process(&["forward", "browser", "grant"], 12, 10)),
+            (12, process(&["sh", "-c", "forward"], 11, 20)),
+            (11, process(&["omp", "--resume", SESSION], 10, 30)),
+            (10, process(&["omp", "--resume", SESSION], 1, 40)),
+        ]);
+        assert_eq!(grant_anchor_for_pid_with(13, &mut lookup), Some((11, 30)));
+    }
+
+    #[test]
+    fn grant_anchor_falls_back_to_the_callers_immediate_parent() {
+        let mut lookup = table(vec![
+            (12, process(&["forward", "browser", "grant"], 11, 10)),
+            (11, process(&["sh", "-c", "forward"], 1, 20)),
+        ]);
+        assert_eq!(grant_anchor_for_pid_with(12, &mut lookup), Some((11, 20)));
+    }
 }

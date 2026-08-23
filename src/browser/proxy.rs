@@ -1,6 +1,5 @@
 use crate::bridge::limit::ConnectionLimit;
 use crate::browser::grant::{Grant, Grants, ProcessAnchor};
-use crate::config::Config;
 use crate::pipe::bidirectional;
 use crate::refusal::refuse;
 use std::io::Write as _;
@@ -56,11 +55,7 @@ impl BoundProxy {
 }
 
 /// Bind a fresh loopback endpoint without accepting a connection yet.
-///
-/// The Task 6 request handler has the configuration at its callsite and derives
-/// the laptop relay address before calling this function. The endpoint is always
-/// loopback, so no configuration value changes this bind.
-pub fn bind(_cfg: &Config, grants: Grants, upstream: SocketAddr) -> Result<BoundProxy, ProxyError> {
+pub fn bind(grants: Grants, upstream: SocketAddr) -> Result<BoundProxy, ProxyError> {
     let listener =
         TcpListener::bind("127.0.0.1:0").map_err(|source| ProxyError::Bind { source })?;
     let port = listener
