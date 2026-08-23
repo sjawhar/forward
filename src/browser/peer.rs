@@ -1,98 +1,29 @@
+mod process;
+mod session;
 mod socket;
 
+pub use process::{
+    Process, ancestry_contains, ancestry_contains_with, process_start, process_start_with,
+};
+pub use session::{session_for_pid, session_for_pid_with};
 pub use socket::pid_for_connection;
-
-/// Longest ancestry walk before giving up. A worker nested deeper than this is
-/// not a session's child in any arrangement we run, and the cap makes a `PPID`
-/// cycle terminate.
-const MAX_ANCESTRY_HOPS: usize = 12;
-
-/// One process as attribution needs it.
-#[derive(Clone, Debug)]
-pub struct Process {
-    pub argv: Vec<String>,
-    pub parent: u32,
-}
-
-/// The omp session `pid` belongs to, walking ancestry for worker processes.
-pub fn session_for_pid(pid: u32) -> Option<String> {
-    session_for_pid_with(pid, &mut read_process)
-}
-
-/// Test seam: resolve against a caller-supplied process table.
-#[doc(hidden)]
-pub fn session_for_pid_with(
-    pid: u32,
-    lookup: &mut dyn FnMut(u32) -> Option<Process>,
-) -> Option<String> {
-    let mut current = pid;
-    for _ in 0..MAX_ANCESTRY_HOPS {
-        let process = lookup(current)?;
-        if let Some(session) = session_of(&process) {
-            return Some(session);
-        }
-        if process.parent <= 1 || process.parent == current {
-            return None;
-        }
-        current = process.parent;
-    }
-    None
-}
-
-/// `omp --resume <uuid>` and nothing else. Another program taking `--resume`
-/// must not be mistaken for a session.
-fn session_of(process: &Process) -> Option<String> {
-    let command = process.argv.first()?;
-    if command != "omp" && !command.ends_with("/omp") {
-        return None;
-    }
-    let mut arguments = process.argv.iter();
-    while let Some(argument) = arguments.next() {
-        if argument == "--resume" {
-            return arguments
-                .next()
-                .filter(|value| is_session_id(value))
-                .cloned();
-        }
-    }
-    None
-}
-
-fn is_session_id(value: &str) -> bool {
-    let groups = [8, 4, 4, 4, 12];
-    let mut parts = value.split('-');
-    groups.iter().all(|width| {
-        parts.next().is_some_and(|part| {
-            part.len() == *width && part.bytes().all(|byte| byte.is_ascii_hexdigit())
-        })
-    }) && parts.next().is_none()
-}
-
-fn read_process(pid: u32) -> Option<Process> {
-    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
-    let argv = raw
-        .split(|byte| *byte == 0)
-        .filter(|part| !part.is_empty())
-        .map(|part| String::from_utf8_lossy(part).into_owned())
-        .collect();
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // comm can contain spaces and parentheses, so PPID is located from the last
-    // ')' rather than by splitting the whole line.
-    let tail = stat.get(stat.rfind(')')? + 2..)?;
-    let parent = tail.split_whitespace().nth(1)?.parse().ok()?;
-    Some(Process { argv, parent })
-}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::net::{TcpListener, TcpStream};
+    use std::process::Command;
 
     fn process(argv: &[&str], parent: u32) -> Process {
+        process_with_start(argv, parent, 1)
+    }
+
+    fn process_with_start(argv: &[&str], parent: u32, start: u64) -> Process {
         Process {
             argv: argv.iter().map(|value| (*value).to_owned()).collect(),
             parent,
+            start,
         }
     }
 
@@ -192,6 +123,91 @@ mod tests {
         );
         let mut lookup = table(&entries);
         assert_eq!(session_for_pid_with(13, &mut lookup), None);
+    }
+
+    #[test]
+    fn process_start_reads_an_injectable_process_table() {
+        let mut lookup = table(&[(10, process_with_start(&["worker"], 1, 42))]);
+        assert_eq!(process_start_with(10, &mut lookup), Some(42));
+    }
+
+    #[test]
+    fn a_live_child_process_resolves_as_a_descendant_of_this_process() {
+        let parent = std::process::id();
+        let parent_start = process_start(parent).unwrap();
+        let mut child = Command::new("sleep").arg("30").spawn().unwrap();
+        let contains_parent = ancestry_contains(child.id(), parent, parent_start);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        assert!(contains_parent);
+    }
+
+    #[test]
+    fn a_non_descendant_is_not_an_authorized_ancestor() {
+        let mut lookup = table(&[
+            (10, process_with_start(&["worker"], 1, 50)),
+            (20, process_with_start(&["other"], 1, 60)),
+        ]);
+        assert!(!ancestry_contains_with(10, 20, 60, &mut lookup));
+    }
+
+    #[test]
+    fn a_matching_pid_with_a_mismatched_start_time_is_not_authorized() {
+        let mut lookup = table(&[
+            (12, process_with_start(&["worker"], 10, 50)),
+            (10, process_with_start(&["omp"], 1, 60)),
+        ]);
+        assert!(!ancestry_contains_with(12, 10, 61, &mut lookup));
+    }
+
+    #[test]
+    fn an_unreadable_process_mid_walk_is_not_authorized() {
+        let mut lookup = table(&[(12, process_with_start(&["worker"], 11, 50))]);
+        assert!(!ancestry_contains_with(12, 10, 60, &mut lookup));
+    }
+
+    #[test]
+    fn an_ancestry_cycle_is_not_authorized() {
+        let mut lookup = table(&[
+            (10, process_with_start(&["a"], 11, 50)),
+            (11, process_with_start(&["b"], 10, 60)),
+        ]);
+        assert!(!ancestry_contains_with(10, 12, 70, &mut lookup));
+    }
+
+    #[test]
+    fn over_deep_ancestry_is_not_authorized() {
+        let mut entries = (1..=13)
+            .map(|pid| (pid, process_with_start(&["worker"], pid - 1, pid as u64)))
+            .collect::<Vec<_>>();
+        entries[0] = (1, process_with_start(&["ancestor"], 0, 77));
+        let mut lookup = table(&entries);
+        assert!(!ancestry_contains_with(13, 1, 77, &mut lookup));
+    }
+
+    #[test]
+    fn display_resolution_checks_the_session_candidate_executable() {
+        let mut lookup = table(&[
+            (12, process(&["worker"], 10)),
+            (
+                10,
+                process(
+                    &["omp", "--resume", "01a0223b-94d1-7000-bd0e-5038df7750b0"],
+                    1,
+                ),
+            ),
+        ]);
+        let mut is_omp = |pid| pid == 10;
+        assert_eq!(
+            super::session::session_for_pid_with_executable(12, &mut lookup, &mut is_omp)
+                .as_deref(),
+            Some("01a0223b-94d1-7000-bd0e-5038df7750b0")
+        );
+        let mut not_omp = |_| false;
+        assert_eq!(
+            super::session::session_for_pid_with_executable(12, &mut lookup, &mut not_omp),
+            None
+        );
     }
 
     #[test]
