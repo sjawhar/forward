@@ -33,7 +33,7 @@ impl Grants {
     }
 
     pub fn insert(&self, port: u16, grant: Grant) {
-        drop(self.ports.lock().insert(port, grant));
+        drop(replace(&mut self.ports.lock(), port, grant));
     }
 
     /// The grant for `port` if it has not expired.
@@ -70,6 +70,14 @@ impl Grants {
     pub fn tokens_held(&self) -> usize {
         self.ports.lock().len()
     }
+}
+
+/// Scrub a predecessor before replacing it, retaining the scrubbed buffer only
+/// so the test can prove that the very allocation the registry held was zeroed.
+fn replace(ports: &mut HashMap<u16, Grant>, port: u16, grant: Grant) -> Option<Vec<u8>> {
+    let scrubbed = scrub(ports, port);
+    drop(ports.insert(port, grant));
+    scrubbed
 }
 
 /// Remove `port`'s grant, overwriting its token before the buffer is released,
@@ -136,6 +144,28 @@ mod tests {
         let clone = grants.clone();
         grants.insert(12811, grant("session-a", Duration::from_secs(60)));
         assert!(clone.live(12811).is_some());
+    }
+
+    #[test]
+    fn replacing_a_grant_scrubs_its_predecessor() {
+        let grants = Grants::new();
+        grants.insert(12811, grant("session-a", Duration::from_secs(60)));
+
+        // `replace` is the path `insert` uses; moving its returned Vec out
+        // keeps the predecessor's original registry allocation observable.
+        let scrubbed = {
+            let mut ports = grants.ports.lock();
+            replace(
+                &mut ports,
+                12811,
+                grant("session-b", Duration::from_secs(60)),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(scrubbed.len(), b"correct-horse".len());
+        assert!(scrubbed.iter().all(|byte| *byte == 0));
+        assert_eq!(grants.live(12811).unwrap().session, "session-b");
     }
 
     #[test]
