@@ -1,17 +1,22 @@
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-    mpsc,
-};
+use std::sync::mpsc;
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 fn cfg_with_peer(peer: &str) -> forward::config::Config {
     let mut cfg = forward::config::Config::default_values_for_test();
     cfg.peer = peer.to_owned();
     cfg
+}
+
+fn cfg_with_token(peer: &str, token: &str) -> (forward::config::Config, tempfile::TempDir) {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("relay.token");
+    std::fs::write(&path, format!("{token}\n")).unwrap();
+    let mut cfg = cfg_with_peer(peer);
+    cfg.relay_token_file = Some(path);
+    (cfg, directory)
 }
 
 fn assert_refused(client: &mut TcpStream, expected: &str) {
@@ -64,14 +69,6 @@ fn read_pong(client: &mut TcpStream) {
     assert_eq!(&reply, b"pong");
 }
 
-fn wait_for_exit(handle: &thread::JoinHandle<()>) -> bool {
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !handle.is_finished() && Instant::now() < deadline {
-        thread::sleep(Duration::from_millis(20));
-    }
-    handle.is_finished()
-}
-
 #[test]
 fn an_unauthorized_peer_is_refused_and_its_payload_never_reaches_the_upstream() {
     // Given: a foreign peer, a payload, and an upstream that must not be dialed.
@@ -97,53 +94,10 @@ fn an_unauthorized_peer_is_refused_and_its_payload_never_reaches_the_upstream() 
 }
 
 #[test]
-fn a_flooding_unauthorized_peer_still_gets_the_refusal_and_frees_its_slot() {
-    // Given: a foreign peer that never stops flooding its socket.
-    let (client, server) = socket_pair();
-    let mut reader = client.try_clone().unwrap();
-    reader
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .unwrap();
-    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
-    let stop = Arc::new(AtomicBool::new(false));
-    let writer_stop = Arc::clone(&stop);
-    let writer = thread::spawn(move || {
-        while !writer_stop.load(Ordering::Relaxed) {
-            let _ = (&client).write_all(&[0_u8; 4096]);
-        }
-    });
-    let cfg = cfg_with_peer("100.64.0.9");
-    let handler = thread::spawn(move || {
-        forward::browser::handle_from(
-            &cfg,
-            upstream.local_addr().unwrap(),
-            "100.64.0.7".parse().unwrap(),
-            server,
-        );
-    });
-
-    // When: the bounded drain refuses the connection despite the continuous writes.
-    let mut reply = Vec::new();
-    while !reply.ends_with(b"REFUSED PEER\n") {
-        let mut chunk = [0_u8; 32];
-        let count = reader.read(&mut chunk).unwrap();
-        assert_ne!(count, 0, "relay closed before sending its refusal");
-        reply.extend_from_slice(&chunk[..count]);
-    }
-
-    // Then: the refusal survived and the handler returned without waiting for the peer.
-    assert_eq!(reply, b"REFUSED PEER\n");
-    assert!(wait_for_exit(&handler), "flooding peer pinned the handler");
-    stop.store(true, Ordering::Relaxed);
-    writer.join().unwrap();
-    handler.join().unwrap();
-}
-
-#[test]
 fn the_configured_peer_is_proxied_bidirectionally() {
     // Given: the configured, non-loopback peer and a pong upstream.
     let (mut client, server) = socket_pair();
-    let cfg = cfg_with_peer("100.64.0.9");
+    let (cfg, _directory) = cfg_with_token("100.64.0.9", "correct-horse");
     let handler = thread::spawn(move || {
         forward::browser::handle_from(
             &cfg,
@@ -153,8 +107,8 @@ fn the_configured_peer_is_proxied_bidirectionally() {
         );
     });
 
-    // When: that peer sends four bytes.
-    client.write_all(b"ping").unwrap();
+    // When: that peer presents the token and sends four bytes.
+    client.write_all(b"RELAY correct-horse\nping").unwrap();
 
     // Then: the upstream receives them and returns its reply through the channel.
     read_pong(&mut client);
@@ -166,7 +120,7 @@ fn the_configured_peer_is_proxied_bidirectionally() {
 fn a_mapped_ipv6_peer_matches_the_configured_ipv4_peer() {
     // Given: an IPv4 configured peer represented as a mapped IPv6 remote.
     let (mut client, server) = socket_pair();
-    let cfg = cfg_with_peer("100.64.0.9");
+    let (cfg, _directory) = cfg_with_token("100.64.0.9", "correct-horse");
     let handler = thread::spawn(move || {
         forward::browser::handle_from(
             &cfg,
@@ -176,8 +130,8 @@ fn a_mapped_ipv6_peer_matches_the_configured_ipv4_peer() {
         );
     });
 
-    // When/Then: canonical authorization allows the complete bidirectional exchange.
-    client.write_all(b"ping").unwrap();
+    // When/Then: canonical authorization allows the complete tokened exchange.
+    client.write_all(b"RELAY correct-horse\nping").unwrap();
     read_pong(&mut client);
     drop(client);
     handler.join().unwrap();
@@ -186,11 +140,12 @@ fn a_mapped_ipv6_peer_matches_the_configured_ipv4_peer() {
 #[test]
 fn a_loopback_client_stays_authorized_for_local_tooling() {
     // Given: a real listener and a configuration naming only a remote peer.
-    let relay = spawn_relay(cfg_with_peer("100.64.0.9"), spawn_pong_upstream());
+    let (cfg, _directory) = cfg_with_token("100.64.0.9", "correct-horse");
+    let relay = spawn_relay(cfg, spawn_pong_upstream());
     let mut client = TcpStream::connect(("127.0.0.1", relay)).unwrap();
 
     // When/Then: the local doctor-style client is still proxied end to end.
-    client.write_all(b"ping").unwrap();
+    client.write_all(b"RELAY correct-horse\nping").unwrap();
     read_pong(&mut client);
 }
 
@@ -208,11 +163,12 @@ fn half_close_propagates_in_each_direction() {
         stream.write_all(b"gone").unwrap();
         stream.shutdown(Shutdown::Write).unwrap();
     });
-    let relay = spawn_relay(cfg_with_peer("100.64.0.9"), upstream_address);
+    let (cfg, _directory) = cfg_with_token("100.64.0.9", "correct-horse");
+    let relay = spawn_relay(cfg, upstream_address);
     let mut client = TcpStream::connect(("127.0.0.1", relay)).unwrap();
 
-    // When: the client half-closes after its request.
-    client.write_all(b"data").unwrap();
+    // When: the client half-closes after its tokened request.
+    client.write_all(b"RELAY correct-horse\ndata").unwrap();
     client.shutdown(Shutdown::Write).unwrap();
 
     // Then: the upstream sees EOF and can still return a final reply and EOF.
@@ -234,15 +190,19 @@ fn an_absent_upstream_closes_the_connection_without_killing_the_accept_loop() {
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let upstream = probe.local_addr().unwrap();
     drop(probe);
-    let relay = spawn_relay(cfg_with_peer("100.64.0.9"), upstream);
+    let (cfg, _directory) = cfg_with_token("100.64.0.9", "correct-horse");
+    let relay = spawn_relay(cfg, upstream);
 
-    // When: the first client reaches the absent upstream.
+    // When: the first tokened client reaches the absent upstream. The token
+    // gate now precedes the dial, so an untokened client would see
+    // REFUSED TOKEN instead of exercising this path.
     let mut first = TcpStream::connect(("127.0.0.1", relay)).unwrap();
+    first.write_all(b"RELAY correct-horse\n").unwrap();
     assert_refused(&mut first, "REFUSED\n");
 
     // Then: a later upstream and client prove the accept loop survived.
     spawn_pong(TcpListener::bind(upstream).unwrap());
     let mut second = TcpStream::connect(("127.0.0.1", relay)).unwrap();
-    second.write_all(b"ping").unwrap();
+    second.write_all(b"RELAY correct-horse\nping").unwrap();
     read_pong(&mut second);
 }

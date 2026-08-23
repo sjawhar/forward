@@ -1,3 +1,5 @@
+mod token;
+
 use crate::bridge::limit::ConnectionLimit;
 use crate::callback::RELAY_TARGET_PORT;
 use crate::config::Config;
@@ -5,9 +7,10 @@ use crate::peer::authorized;
 use crate::pipe::bidirectional;
 use crate::refusal::refuse;
 use std::io;
+use std::io::Read;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// The maximum idle read or blocked-write interval for a proxied CDP session.
 /// The relay sends websocket keepalives every 30s, so this only reaps dead peers.
@@ -17,6 +20,11 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 const GENERIC_REFUSAL: &[u8] = b"REFUSED\n";
 const PEER_REFUSAL: &[u8] = b"REFUSED PEER\n";
 const BUSY_REFUSAL: &[u8] = b"REFUSED BUSY\n";
+const TOKEN_REFUSAL: &[u8] = b"REFUSED TOKEN\n";
+/// How long a connection may take to send its request line.
+const REQUEST_LINE_READ_TIMEOUT: Duration = Duration::from_secs(10);
+/// `RELAY ` plus a base64 32-byte token is 50 bytes; 128 is generous.
+const MAX_REQUEST_LINE: usize = 128;
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserError {
@@ -131,6 +139,18 @@ pub fn handle_from(cfg: &Config, upstream: SocketAddr, remote: IpAddr, mut strea
         return;
     }
 
+    let expected = cfg.relay_token_path().and_then(|path| token::load(&path));
+    let presented = read_relay_token(&mut stream, REQUEST_LINE_READ_TIMEOUT);
+    let accepted = match (expected, presented) {
+        (Some(expected), Some(presented)) => token::constant_time_eq(&expected, &presented),
+        _ => false,
+    };
+    if !accepted {
+        eprintln!("forward: browser relay refused an untokened connection from {remote}");
+        refuse(&mut stream, TOKEN_REFUSAL);
+        return;
+    }
+
     let upstream_stream = match TcpStream::connect(upstream) {
         Ok(stream) => stream,
         Err(error) => {
@@ -146,6 +166,32 @@ pub fn handle_from(cfg: &Config, upstream: SocketAddr, remote: IpAddr, mut strea
     if let Err(error) = bidirectional(stream, upstream_stream) {
         eprintln!("forward: browser relay session for {remote} ended: {error}");
     }
+}
+
+/// Read `RELAY <token>\n` one byte at a time from the piped stream.
+fn read_relay_token(stream: &mut TcpStream, timeout: Duration) -> Option<Vec<u8>> {
+    let deadline = Instant::now().checked_add(timeout)?;
+    let mut line = Vec::with_capacity(MAX_REQUEST_LINE);
+    let mut byte = [0_u8; 1];
+
+    while line.len() < MAX_REQUEST_LINE {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            return None;
+        }
+        match stream.read(&mut byte) {
+            Ok(1) => {}
+            Ok(_) => return None,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+        let [received] = byte;
+        if received == b'\n' {
+            return line.strip_prefix(b"RELAY ".as_slice()).map(<[u8]>::to_vec);
+        }
+        line.push(received);
+    }
+    None
 }
 
 fn configure_pipe_timeouts(
