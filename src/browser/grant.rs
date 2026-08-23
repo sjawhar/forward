@@ -3,6 +3,16 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
+/// A process instance that owns a grant.
+///
+/// Linux may reuse a PID after its process exits. Pairing the PID with the
+/// kernel start time prevents a new process from inheriting that authority.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProcessAnchor {
+    pub pid: u32,
+    pub start_time: u64,
+}
+
 /// One session's authorisation to reach the laptop's browser.
 ///
 /// `Clone` on purpose: `Grants::live` hands the proxy a copy whose token lives
@@ -10,8 +20,10 @@ use std::time::Instant;
 /// registry's copy — established connections are never guillotined.
 #[derive(Clone)]
 pub struct Grant {
-    /// The omp session id every connection on this port must resolve to.
+    /// The omp session id is retained for display and logging only.
     pub session: String,
+    /// The unforgeable process instance allowed to use this port.
+    pub anchor: ProcessAnchor,
     /// The relay token, held only while the grant is live.
     pub token: Vec<u8>,
     pub deadline: Instant,
@@ -100,6 +112,10 @@ mod tests {
     fn grant(session: &str, ttl: Duration) -> Grant {
         Grant {
             session: session.to_owned(),
+            anchor: ProcessAnchor {
+                pid: 1,
+                start_time: 1,
+            },
             token: b"correct-horse".to_vec(),
             deadline: Instant::now() + ttl,
         }

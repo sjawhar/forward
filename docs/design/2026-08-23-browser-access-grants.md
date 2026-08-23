@@ -62,7 +62,7 @@ agent session
   ▼
 devbox forward serve
   │  · accept on the grant's loopback port
-  │  · resolve peer PID → omp session; refuse on mismatch
+  │  · resolve peer PID and verify its ancestry reaches the grant anchor
   │  · prefix "RELAY <token>"
   ▼  tailnet
 laptop forward daemon :12803
@@ -97,8 +97,10 @@ secrets FORWARD_BROWSER_GRANT -- forward browser grant --ttl 30m
 The key blinks; a touch authorises, ignoring it denies. `secrets` injects the
 token into the short-lived CLI's environment; the CLI hands it to the daemon
 over the unix socket, and the daemon holds it only in memory. On success the
-daemon binds an ephemeral loopback port, records `{session, port, token,
-deadline}`, and prints the endpoint URL for the agent to pass as `app.cdp_url`.
+daemon binds an ephemeral loopback port and records `{session, anchor, port,
+token, deadline}`. The anchor pairs the owner's PID with its kernel start time;
+the session id is retained for display and logging, not authorization. The
+daemon prints the endpoint URL for the agent to pass as `app.cdp_url`.
 
 The default TTL is 30 minutes: long enough not to interrupt a working session,
 short enough that walking away from the desk closes the door.
@@ -113,8 +115,8 @@ may start, so a lapsing window never guillotines an agent mid-workflow. There is
 no revoke verb; expiry is the whole lifecycle until a need for one appears.
 
 The callback bridge's `Armed` set is deliberately not reused. It keys on port
-with a port-safety policy, and a grant keys on session with an endpoint of its
-own; sharing the type would blur two different units of authority.
+with a port-safety policy, and a grant binds one endpoint to one process anchor;
+sharing the type would blur two different units of authority.
 
 ## Wire protocol
 
@@ -211,9 +213,9 @@ side becomes a directory:
 
 | File | Responsibility |
 | --- | --- |
-| `browser/grant.rs` | grant registry: session, port, token, deadline |
-| `browser/proxy.rs` | per-grant loopback listener and refusals |
-| `browser/peer.rs` | connection → PID → session resolution |
+| `browser/grant.rs` | grant registry: session, process anchor, port, token, deadline |
+| `browser/proxy.rs` | per-grant loopback listener and process-anchor refusals |
+| `browser/peer.rs` | connection → PID → process ancestry resolution |
 | `browser.rs` | laptop-side channel, now with the token check |
 
 ## Failure modes
