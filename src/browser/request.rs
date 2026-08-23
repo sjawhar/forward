@@ -95,20 +95,20 @@ fn handle(
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
-    let session = resolver(pid);
     let anchor = process_start(pid).map(|start_time| ProcessAnchor { pid, start_time });
     let Some(line) = read_line(&stream) else {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
     if line == b"STATUS" {
-        answer_status(grants, session, stream);
+        answer_status(grants, anchor, stream);
         return;
     }
     let Some((ttl, token)) = parse(&line) else {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
+    let session = resolver(pid);
     let Some(session) = session else {
         eprintln!("forward: grant refused: pid {pid} is not inside an omp session");
         let _ = stream.write_all(b"REFUSED\n");
@@ -160,9 +160,9 @@ fn read_line(stream: &UnixStream) -> Option<Vec<u8>> {
     Some(line)
 }
 
-fn answer_status(grants: &Grants, session: Option<String>, mut stream: UnixStream) {
-    let reply = session
-        .and_then(|session| grants.live_for_session(&session))
+fn answer_status(grants: &Grants, caller: Option<ProcessAnchor>, mut stream: UnixStream) {
+    let reply = caller
+        .and_then(|caller| grants.live_for_descendant(caller))
         .map(|(port, grant)| {
             let remaining_secs = grant
                 .deadline

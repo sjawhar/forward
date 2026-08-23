@@ -65,16 +65,27 @@ impl Grants {
         ports.get(&port).cloned()
     }
 
-    /// The port and grant `session` holds right now, if any.
+    /// The live grant an authenticated process may use, if any.
     ///
-    /// A session with several grants gets an arbitrary live one. STATUS uses
-    /// this for display only; proxy authorization always checks the anchor.
-    pub fn live_for_session(&self, session: &str) -> Option<(u16, Grant)> {
+    /// The caller anchor comes from `SO_PEERCRED` and `/proc`, not asserted
+    /// process arguments. A descendant of the grant's anchor may query its
+    /// status, matching the proxy's authorization rule.
+    pub fn live_for_descendant(&self, caller: ProcessAnchor) -> Option<(u16, Grant)> {
+        if crate::browser::peer::process_start(caller.pid) != Some(caller.start_time) {
+            return None;
+        }
         let now = Instant::now();
         self.ports
             .lock()
             .iter()
-            .find(|(_, grant)| grant.session == session && grant.deadline > now)
+            .find(|(_, grant)| {
+                grant.deadline > now
+                    && crate::browser::peer::ancestry_contains(
+                        caller.pid,
+                        grant.anchor.pid,
+                        grant.anchor.start_time,
+                    )
+            })
             .map(|(port, grant)| (*port, grant.clone()))
     }
 
@@ -218,12 +229,18 @@ mod tests {
     }
 
     #[test]
-    fn a_sessions_own_live_grant_is_found_by_session() {
+    fn a_live_grant_is_found_for_its_process_anchor() {
+        let caller = ProcessAnchor {
+            pid: std::process::id(),
+            start_time: crate::browser::peer::process_start(std::process::id()).unwrap(),
+        };
         let grants = Grants::new();
-        grants.insert(12811, grant("session-a", Duration::from_secs(60)));
+        let mut owned = grant("session-a", Duration::from_secs(60));
+        owned.anchor = caller;
+        grants.insert(12811, owned);
         grants.insert(12812, grant("session-b", Duration::from_secs(60)));
-        let (port, found) = grants.live_for_session("session-b").unwrap();
-        assert_eq!((port, found.session.as_str()), (12812, "session-b"));
-        assert!(grants.live_for_session("session-c").is_none());
+
+        let (port, found) = grants.live_for_descendant(caller).unwrap();
+        assert_eq!((port, found.session.as_str()), (12811, "session-a"));
     }
 }

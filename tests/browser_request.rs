@@ -1,8 +1,10 @@
+use forward::browser::grant::{Grant, ProcessAnchor};
 use forward::browser::request::{
     GrantStatus, parse, parse_status, parse_ttl, request, serve_with_resolver, status,
 };
 use parking_lot::Mutex;
 use std::os::unix::net::UnixStream;
+use std::process::Command;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -85,32 +87,59 @@ fn a_status_reply_parses() {
     assert_eq!(parse_status("LIVE nonsense"), GrantStatus::Unreachable);
 }
 
+const CHILD_SOCKET_ENV: &str = "FORWARD_TEST_GRANT_SOCKET";
+const CHILD_PORT_PATH_ENV: &str = "FORWARD_TEST_GRANT_PORT_PATH";
+
 #[test]
 fn the_request_socket_attributes_the_caller_through_peer_credentials() {
+    if let (Some(socket), Some(port_path)) = (
+        std::env::var_os(CHILD_SOCKET_ENV),
+        std::env::var_os(CHILD_PORT_PATH_ENV),
+    ) {
+        let port = request(&std::path::PathBuf::from(socket), 60, b"correct-horse")
+            .expect("the child grant request must succeed");
+        std::fs::write(port_path, port.to_string()).unwrap();
+        return;
+    }
+
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("grant.sock");
+    let child_port_path = directory.path().join("child-port");
     let grants = forward::browser::grant::Grants::new();
     let (sender, receiver) = mpsc::channel();
     let sender = Mutex::new(sender);
     let resolver: forward::browser::request::SessionResolver = Arc::new(move |pid| {
-        sender.lock().send(pid).unwrap();
+        let start_time = forward::browser::peer::process_start(pid).unwrap();
+        sender.lock().send((pid, start_time)).unwrap();
         Some("session-a".to_owned())
     });
     spawn_server(grants.clone(), path.clone(), resolver);
     await_socket(&path);
 
-    let port = request(&path, 60, b"correct-horse").expect("the grant request must succeed");
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .arg("--exact")
+        .arg("the_request_socket_attributes_the_caller_through_peer_credentials")
+        .env(CHILD_SOCKET_ENV, &path)
+        .env(CHILD_PORT_PATH_ENV, &child_port_path)
+        .spawn()
+        .unwrap();
+    let child_pid = child.id();
+    assert!(child.wait().unwrap().success());
+    let port = std::fs::read_to_string(child_port_path)
+        .unwrap()
+        .parse()
+        .unwrap();
 
     let grant = grants.live(port).expect("the grant must be recorded");
+    let pids: Vec<(u32, u64)> = receiver.try_iter().collect();
+    let (_, child_start_time) = pids
+        .iter()
+        .copied()
+        .find(|(pid, _)| *pid == child_pid)
+        .expect("SO_PEERCRED must report the child process");
     assert_eq!(grant.session, "session-a");
-    assert_eq!(grant.anchor.pid, std::process::id());
-    assert_eq!(
-        grant.anchor.start_time,
-        forward::browser::peer::process_start(std::process::id()).unwrap()
-    );
-    let pids: Vec<u32> = receiver.try_iter().collect();
-    assert!(!pids.is_empty());
-    assert!(pids.iter().all(|pid| *pid == std::process::id()));
+    assert_eq!(grant.anchor.pid, child_pid);
+    assert_eq!(grant.anchor.start_time, child_start_time);
 }
 
 #[test]
@@ -137,4 +166,29 @@ fn status_reports_the_calling_sessions_grant_over_the_socket() {
         }
         other => panic!("expected a live grant, got {other:?}"),
     }
+}
+
+#[test]
+fn status_does_not_disclose_a_grant_for_a_forged_session_string() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("grant.sock");
+    let grants = forward::browser::grant::Grants::new();
+    grants.insert(
+        12811,
+        Grant {
+            session: "target-session".to_owned(),
+            anchor: ProcessAnchor {
+                pid: u32::MAX,
+                start_time: 0,
+            },
+            token: b"test-only".to_vec(),
+            deadline: Instant::now() + Duration::from_secs(60),
+        },
+    );
+    let resolver: forward::browser::request::SessionResolver =
+        Arc::new(|_pid| Some("target-session".to_owned()));
+    spawn_server(grants, path.clone(), resolver);
+    await_socket(&path);
+
+    assert_eq!(status(&path), GrantStatus::None);
 }
