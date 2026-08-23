@@ -39,12 +39,12 @@ pub fn ancestry_contains_with(
     lookup: &mut dyn FnMut(u32) -> Option<Process>,
 ) -> bool {
     let mut current = pid;
-    let mut visited = [0_u32; MAX_ANCESTRY_HOPS];
-    for hop in 0..MAX_ANCESTRY_HOPS {
-        if visited[..hop].contains(&current) {
+    let mut visited = Vec::with_capacity(MAX_ANCESTRY_HOPS);
+    for _ in 0..MAX_ANCESTRY_HOPS {
+        if visited.contains(&current) {
             return false;
         }
-        visited[hop] = current;
+        visited.push(current);
         let Some(process) = lookup(current) else {
             return false;
         };
