@@ -1,4 +1,4 @@
-use super::browser::evaluate_with;
+use super::browser::{RelayEvidence, classify, evaluate_with};
 use crate::config::Config;
 use crate::config::{default_relay_port, load};
 use std::cell::RefCell;
@@ -132,4 +132,21 @@ fn devbox_config_without_relay_port_probes_the_laptop_peer() {
         responses.borrow_mut().next().is_none(),
         "relay probe was incomplete"
     );
+}
+
+#[test]
+fn a_token_refusal_is_proof_the_laptop_channel_is_alive() {
+    assert_eq!(
+        classify(b"REFUSED TOKEN\n"),
+        Ok(RelayEvidence::TokenRequired)
+    );
+}
+
+#[test]
+fn token_refusal_is_matched_before_the_generic_refusal() {
+    let source = include_str!("browser.rs");
+    let token = source.find("body.starts_with(b\"REFUSED TOKEN\")").unwrap();
+    let generic = source.find("body == b\"REFUSED\\n\"").unwrap();
+
+    assert!(token < generic);
 }

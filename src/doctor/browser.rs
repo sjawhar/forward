@@ -129,6 +129,10 @@ fn report_probe(
                 "browser relay: FAIL — {host}:{port}: not the configured peer — check peer on the laptop"
             ),
         ),
+        Ok(RelayEvidence::TokenRequired) => (
+            true,
+            format!("browser relay: locked at {host}:{port} (no grant)"),
+        ),
         Ok(RelayEvidence::UpstreamDown) => (
             false,
             format!(
@@ -195,6 +199,7 @@ fn count_targets(body: &[u8]) -> usize {
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum RelayEvidence {
     PeerRefused,
+    TokenRequired,
     UpstreamDown,
     Busy,
     ExtensionDisconnected,
@@ -204,6 +209,9 @@ pub(super) enum RelayEvidence {
 pub(super) fn classify(body: &[u8]) -> Result<RelayEvidence, String> {
     if body.starts_with(b"REFUSED PEER") {
         return Ok(RelayEvidence::PeerRefused);
+    }
+    if body.starts_with(b"REFUSED TOKEN") {
+        return Ok(RelayEvidence::TokenRequired);
     }
     if body == b"REFUSED\n" {
         return Ok(RelayEvidence::UpstreamDown);
