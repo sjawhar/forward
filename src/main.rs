@@ -64,6 +64,20 @@ enum Command {
         #[arg(long, default_value_t = FILES_PORT)]
         files_port: u16,
     },
+    /// Manage browser access (laptop: init-token)
+    Browser {
+        #[command(subcommand)]
+        action: BrowserCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum BrowserCommand {
+    /// Generate the relay token, store it, and print it once (laptop side)
+    InitToken {
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -110,6 +124,20 @@ fn main() -> anyhow::Result<()> {
             daemon::run(cfg, &config_path, port).unwrap_or_else(|error| exit_with_error(error));
             Ok(())
         }
+        Command::Browser { action } => match action {
+            BrowserCommand::InitToken { config } => {
+                let (cfg, _) = load_config(config)?;
+                let path = cfg.relay_token_path().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "forward: cannot resolve the relay token path: relay_token_file is unset and neither XDG_CONFIG_HOME nor HOME is an absolute path"
+                    )
+                })?;
+                let value = forward::browser::init::write_token(&path)?;
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "{value}")?;
+                Ok(())
+            }
+        },
         Command::Doctor {
             config,
             channel_port,
