@@ -78,6 +78,13 @@ enum BrowserCommand {
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },
+
+    /// Request browser access for this session (devbox side)
+    Grant {
+        /// Grant lifetime, for example 45s, 30m, or 2h
+        #[arg(long, default_value = "30m")]
+        ttl: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -110,6 +117,15 @@ fn main() -> anyhow::Result<()> {
             let (cfg, _) = load_config(config)?;
             let armed = bridge::Armed::new();
             bridge::serve_arming(armed.clone(), bridge::arm_socket_path());
+            let grants = forward::browser::grant::Grants::new();
+            let grant_cfg = cfg.clone();
+            drop(std::thread::spawn(move || {
+                forward::browser::request::serve(
+                    grants,
+                    grant_cfg,
+                    forward::browser::request::socket_path(),
+                );
+            }));
             let bridge_cfg = cfg.clone();
             drop(std::thread::spawn(move || {
                 if let Err(error) = bridge::serve(bridge_cfg, armed) {
@@ -135,6 +151,30 @@ fn main() -> anyhow::Result<()> {
                 let value = forward::browser::init::write_token(&path)?;
                 let mut stdout = std::io::stdout().lock();
                 writeln!(stdout, "{value}")?;
+                Ok(())
+            }
+            BrowserCommand::Grant { ttl } => {
+                let Ok(token) = std::env::var("FORWARD_BROWSER_GRANT") else {
+                    eprintln!("forward: FORWARD_BROWSER_GRANT is not set; run");
+                    eprintln!("  secrets FORWARD_BROWSER_GRANT -- forward browser grant --ttl 30m");
+                    std::process::exit(1);
+                };
+                let Some(ttl_secs) = forward::browser::request::parse_ttl(&ttl) else {
+                    eprintln!("forward: invalid --ttl {ttl:?}; use 45s, 30m, or 2h");
+                    std::process::exit(1);
+                };
+                let socket = forward::browser::request::socket_path();
+                let Some(port) =
+                    forward::browser::request::request(&socket, ttl_secs, token.as_bytes())
+                else {
+                    eprintln!(
+                        "forward: grant refused, or no forward serve at {}",
+                        socket.display()
+                    );
+                    std::process::exit(1);
+                };
+                let mut stdout = std::io::stdout().lock();
+                writeln!(stdout, "http://127.0.0.1:{port}")?;
                 Ok(())
             }
         },

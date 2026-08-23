@@ -65,6 +65,19 @@ impl Grants {
         ports.get(&port).cloned()
     }
 
+    /// The port and grant `session` holds right now, if any.
+    ///
+    /// A session with several grants gets an arbitrary live one. STATUS uses
+    /// this for display only; proxy authorization always checks the anchor.
+    pub fn live_for_session(&self, session: &str) -> Option<(u16, Grant)> {
+        let now = Instant::now();
+        self.ports
+            .lock()
+            .iter()
+            .find(|(_, grant)| grant.session == session && grant.deadline > now)
+            .map(|(port, grant)| (*port, grant.clone()))
+    }
+
     /// Drop `port`'s grant now, zeroing the registry's token copy in place.
     pub fn expire(&self, port: u16) {
         drop(self.take_scrubbed(port));
@@ -202,5 +215,15 @@ mod tests {
         assert!(scrubbed.iter().all(|byte| *byte == 0));
         assert_eq!(grants.tokens_held(), 0);
         assert!(grants.live(12811).is_none());
+    }
+
+    #[test]
+    fn a_sessions_own_live_grant_is_found_by_session() {
+        let grants = Grants::new();
+        grants.insert(12811, grant("session-a", Duration::from_secs(60)));
+        grants.insert(12812, grant("session-b", Duration::from_secs(60)));
+        let (port, found) = grants.live_for_session("session-b").unwrap();
+        assert_eq!((port, found.session.as_str()), (12812, "session-b"));
+        assert!(grants.live_for_session("session-c").is_none());
     }
 }

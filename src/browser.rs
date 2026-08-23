@@ -2,6 +2,7 @@ pub mod grant;
 pub mod init;
 pub mod peer;
 pub mod proxy;
+pub mod request;
 
 mod token;
 
