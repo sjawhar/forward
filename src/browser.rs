@@ -12,8 +12,7 @@ use crate::config::Config;
 use crate::peer::authorized;
 use crate::pipe::bidirectional;
 use crate::refusal::refuse;
-use std::io;
-use std::io::Read;
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,7 +25,9 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 const GENERIC_REFUSAL: &[u8] = b"REFUSED\n";
 const PEER_REFUSAL: &[u8] = b"REFUSED PEER\n";
 const BUSY_REFUSAL: &[u8] = b"REFUSED BUSY\n";
-const TOKEN_REFUSAL: &[u8] = b"REFUSED TOKEN\n";
+const TOKEN_FILE_REFUSAL: &[u8] = b"REFUSED TOKEN FILE\n";
+const TOKEN_UPSTREAM_HEALTHY_REFUSAL: &[u8] = b"REFUSED TOKEN UPSTREAM 200\n";
+const TOKEN_UPSTREAM_DOWN_REFUSAL: &[u8] = b"REFUSED TOKEN UPSTREAM 503\n";
 /// How long a connection may take to send its request line.
 const REQUEST_LINE_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// `RELAY ` plus a base64 32-byte token is 50 bytes; 128 is generous.
@@ -145,15 +146,18 @@ pub fn handle_from(cfg: &Config, upstream: SocketAddr, remote: IpAddr, mut strea
         return;
     }
 
-    let expected = cfg.relay_token_path().and_then(|path| token::load(&path));
-    let presented = read_relay_token(&mut stream, REQUEST_LINE_READ_TIMEOUT);
-    let accepted = match (expected, presented) {
-        (Some(expected), Some(presented)) => token::constant_time_eq(&expected, &presented),
-        _ => false,
+    let Some(expected) = cfg.relay_token_path().and_then(|path| token::load(&path)) else {
+        eprintln!("forward: browser relay local token is unavailable");
+        refuse(&mut stream, TOKEN_FILE_REFUSAL);
+        return;
     };
+    let presented = read_relay_token(&mut stream, REQUEST_LINE_READ_TIMEOUT);
+    let accepted = presented
+        .as_deref()
+        .is_some_and(|presented| token::constant_time_eq(&expected, presented));
     if !accepted {
         eprintln!("forward: browser relay refused an untokened connection from {remote}");
-        refuse(&mut stream, TOKEN_REFUSAL);
+        refuse(&mut stream, token_refusal(upstream));
         return;
     }
 
@@ -174,6 +178,31 @@ pub fn handle_from(cfg: &Config, upstream: SocketAddr, remote: IpAddr, mut strea
     }
 }
 
+/// Report only whether the extension's status endpoint is healthy to an
+/// already-authorized peer whose token did not match.
+fn token_refusal(upstream: SocketAddr) -> &'static [u8] {
+    let Ok(mut stream) = TcpStream::connect_timeout(&upstream, REQUEST_LINE_READ_TIMEOUT) else {
+        return TOKEN_UPSTREAM_DOWN_REFUSAL;
+    };
+    if stream
+        .set_read_timeout(Some(REQUEST_LINE_READ_TIMEOUT))
+        .and_then(|()| stream.set_write_timeout(Some(REQUEST_LINE_READ_TIMEOUT)))
+        .and_then(|()| stream.write_all(b"GET /json/version HTTP/1.0\r\nHost: localhost\r\n\r\n"))
+        .is_err()
+    {
+        return TOKEN_UPSTREAM_DOWN_REFUSAL;
+    }
+
+    let mut status = Vec::new();
+    if BufReader::new(stream)
+        .read_until(b'\n', &mut status)
+        .is_ok_and(|_| status.windows(4).any(|window| window == b" 200"))
+    {
+        TOKEN_UPSTREAM_HEALTHY_REFUSAL
+    } else {
+        TOKEN_UPSTREAM_DOWN_REFUSAL
+    }
+}
 /// Read `RELAY <token>\n` one byte at a time from the piped stream.
 fn read_relay_token(stream: &mut TcpStream, timeout: Duration) -> Option<Vec<u8>> {
     let deadline = Instant::now().checked_add(timeout)?;

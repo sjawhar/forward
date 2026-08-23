@@ -1,5 +1,6 @@
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -37,6 +38,22 @@ fn assert_never_dialed(upstream: &TcpListener) {
     ));
 }
 
+fn spawn_status(
+    listener: TcpListener,
+    response: &'static [u8],
+) -> (SocketAddr, mpsc::Receiver<Vec<u8>>) {
+    let address = listener.local_addr().unwrap();
+    let (sender, receiver) = mpsc::sync_channel(1);
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut request = [0_u8; 256];
+        let received = stream.read(&mut request).unwrap();
+        sender.send(request[..received].to_vec()).unwrap();
+        stream.write_all(response).unwrap();
+    });
+    (address, receiver)
+}
+
 fn spawn_pong(listener: TcpListener) -> SocketAddr {
     let address = listener.local_addr().unwrap();
     thread::spawn(move || {
@@ -70,10 +87,11 @@ fn read_pong(client: &mut TcpStream) {
 }
 
 #[test]
-fn a_connection_without_a_relay_token_is_refused_and_never_reaches_the_upstream() {
-    // Given: a relay whose upstream must never be dialed.
+fn a_connection_without_a_relay_token_reports_the_healthy_upstream_state() {
+    // Given: a relay whose client bytes must not reach the upstream.
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
-    let upstream_address = upstream.local_addr().unwrap();
+    let (upstream_address, request) =
+        spawn_status(upstream, b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n");
     let (cfg, _directory) = cfg_with_token("127.0.0.1", "correct-horse");
     let port = spawn_relay(cfg, upstream_address);
 
@@ -83,25 +101,33 @@ fn a_connection_without_a_relay_token_is_refused_and_never_reaches_the_upstream(
         .write_all(b"GET /json/list HTTP/1.1\r\n\r\n")
         .unwrap();
 
-    // Then: it is refused, and the upstream saw no connection.
-    assert_refused(&mut client, "REFUSED TOKEN\n");
-    assert_never_dialed(&upstream);
+    // Then: it is refused with the upstream state, after only a fixed probe.
+    assert_refused(&mut client, "REFUSED TOKEN UPSTREAM 200\n");
+    assert_eq!(
+        request.recv_timeout(Duration::from_secs(5)).unwrap(),
+        b"GET /json/version HTTP/1.0\r\nHost: localhost\r\n\r\n"
+    );
 }
 
 #[test]
-fn a_connection_with_the_wrong_relay_token_is_refused_and_never_reaches_the_upstream() {
-    // Given: a relay expecting one token, and an upstream that must stay silent.
+fn a_connection_with_the_wrong_relay_token_is_refused_after_a_status_probe() {
+    // Given: a relay expecting one token and an upstream that answers its probe.
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let (upstream_address, request) =
+        spawn_status(upstream, b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n");
     let (cfg, _directory) = cfg_with_token("127.0.0.1", "correct-horse");
-    let port = spawn_relay(cfg, upstream.local_addr().unwrap());
+    let port = spawn_relay(cfg, upstream_address);
 
     // When: a client presents a different token.
     let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
     client.write_all(b"RELAY battery-staple\nping").unwrap();
 
-    // Then: it is refused before the upstream is ever dialed.
-    assert_refused(&mut client, "REFUSED TOKEN\n");
-    assert_never_dialed(&upstream);
+    // Then: it receives the state without forwarding the token or payload.
+    assert_refused(&mut client, "REFUSED TOKEN UPSTREAM 200\n");
+    assert_eq!(
+        request.recv_timeout(Duration::from_secs(5)).unwrap(),
+        b"GET /json/version HTTP/1.0\r\nHost: localhost\r\n\r\n"
+    );
 }
 
 #[test]
@@ -134,6 +160,6 @@ fn a_relay_whose_token_file_is_missing_refuses_without_dialing_the_upstream() {
     client.write_all(b"RELAY correct-horse\nping").unwrap();
 
     // Then: it fails closed rather than open, and the upstream stays silent.
-    assert_refused(&mut client, "REFUSED TOKEN\n");
+    assert_refused(&mut client, "REFUSED TOKEN FILE\n");
     assert_never_dialed(&upstream);
 }

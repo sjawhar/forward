@@ -47,7 +47,7 @@ impl Grants {
 
     pub fn insert(&self, port: u16, grant: Grant) {
         let mut ports = self.ports.lock();
-        scrub(&mut ports, port);
+        drop(scrub(&mut ports, port));
         ports.insert(port, grant);
     }
 
@@ -62,7 +62,7 @@ impl Grants {
             .get(&port)
             .is_some_and(|grant| grant.deadline <= Instant::now());
         if expired {
-            scrub(&mut ports, port);
+            drop(scrub(&mut ports, port));
             return None;
         }
         ports.get(&port).cloned()
@@ -94,16 +94,16 @@ impl Grants {
 
     /// Drop `port`'s grant now, zeroing the registry's token copy in place.
     pub fn expire(&self, port: u16) {
-        scrub(&mut self.ports.lock(), port);
+        drop(scrub(&mut self.ports.lock(), port));
     }
 }
 
 /// Remove `port`'s grant, overwriting its token before the buffer is released,
 /// so an expired grant leaves no copy in the allocator's free memory.
-fn scrub(ports: &mut HashMap<u16, Grant>, port: u16) {
-    if let Some(mut grant) = ports.remove(&port) {
-        grant.token.zeroize();
-    }
+fn scrub(ports: &mut HashMap<u16, Grant>, port: u16) -> Option<Grant> {
+    let mut grant = ports.remove(&port)?;
+    grant.token.zeroize();
+    Some(grant)
 }
 
 #[cfg(test)]
@@ -177,6 +177,26 @@ mod tests {
         grants.insert(12811, grant("session-a", Duration::from_secs(60)));
         grants.expire(12811);
         assert!(grants.live(12811).is_none());
+    }
+
+    #[test]
+    fn expiring_a_grant_overwrites_its_removed_token() {
+        let mut ports = HashMap::new();
+        let original = grant("session-a", Duration::from_secs(60));
+        let token_len = original.token.len();
+        ports.insert(12811, original);
+
+        let expired = scrub(&mut ports, 12811).expect("the grant is removed");
+
+        assert!(ports.is_empty());
+        // SAFETY: `zeroize` clears the Vec length but keeps its allocation;
+        // `token_len` bytes are initialized and within that allocation.
+        let wiped = unsafe { std::slice::from_raw_parts(expired.token.as_ptr(), token_len) };
+        assert!(
+            wiped.iter().all(|byte| *byte == 0),
+            "removed token buffer was not overwritten"
+        );
+        assert!(expired.token.is_empty());
     }
 
     #[test]

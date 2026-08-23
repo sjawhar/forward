@@ -80,10 +80,12 @@ The devbox already knows the laptop's address as `peer`, and the relay port as
 Puppeteer bootstraps from `GET /json/version` and then dials the
 `webSocketDebuggerUrl` it is given. Because the relay derives that URL from the
 request `Host`, a client reaching the relay through a devbox loopback port is
-told `ws://127.0.0.1:<port>/cdp` and stays on that port. Verified against the
-live browser: dialling the laptop directly returns
-`ws://100.100.92.97:12803/cdp`, while the same relay reached through a devbox
-loopback forwarder returns `ws://127.0.0.1:12811/cdp` and lists 9 targets.
+told `ws://127.0.0.1:<port>/cdp` and stays on that port. Measured before the
+token gate existed, when the laptop could still be dialled directly: a direct
+dial then returned `ws://100.100.92.97:12803/cdp`, while the same relay reached
+through a devbox loopback forwarder returned `ws://127.0.0.1:12811/cdp` and
+listed 9 targets. That direct dial is now refused, which is the point — but the
+`Host`-derived behaviour it demonstrated is what makes a per-grant endpoint hold.
 
 Without that behaviour a per-grant endpoint would be cosmetic, because every
 client would be redirected onto the shared laptop address on its second request.
@@ -99,8 +101,11 @@ token into the short-lived CLI's environment; the CLI hands it to the daemon
 over the unix socket, and the daemon holds it only in memory. On success the
 daemon binds an ephemeral loopback port and records `{session, anchor, port,
 token, deadline}`. It anchors the grant to the nearest `omp --resume <uuid>`
-ancestor of the request CLI's `SO_PEERCRED` PID, falling back to that CLI's
-immediate parent when no session ancestor exists. The anchor pairs that
+ancestor of the request CLI's `SO_PEERCRED` PID. A grant therefore requires an
+enclosing agent session: a request from a plain shell is refused rather than
+anchored to the shell, because a transient wrapper is not a stable owner and
+anchoring to one would recreate the dead-anchor failure this design exists to
+avoid. The anchor pairs that
 process's PID with its kernel start time; the session id is retained for display
 and logging, not authorization. The daemon prints the endpoint URL for the
 agent to pass as `app.cdp_url`.
@@ -129,11 +134,13 @@ under a deadline against a length cap. No byte-replay machinery is needed,
 because the line is written by our own proxy rather than sniffed out of a
 client's stream.
 
-New refusals join the existing `REFUSED PEER` / `REFUSED BUSY` vocabulary:
+The refusal vocabulary is:
 
 | Refusal | Meaning |
 | --- | --- |
-| `REFUSED TOKEN` | laptop: absent or non-matching token |
+| `REFUSED TOKEN FILE` | laptop: local token missing, unreadable, or empty; emitted only after the peer check |
+| `REFUSED TOKEN UPSTREAM 200` | laptop: token absent or non-matching; its fixed status probe found the extension healthy |
+| `REFUSED TOKEN UPSTREAM 503` | laptop: token absent or non-matching; its fixed status probe found the extension unavailable |
 | `REFUSED UNGRANTED` | devbox: no live grant for this endpoint |
 | `REFUSED SESSION` | devbox: connection did not come from the granted session |
 
@@ -171,10 +178,11 @@ Grant authorization and proxy authorization both rely on the kernel-maintained
 process tree:
 
 1. **Grant request → anchor.** `SO_PEERCRED` identifies the grant CLI exactly.
-   The daemon walks its parents to the nearest `omp --resume <uuid>` process;
-   when none exists, it uses the CLI's immediate parent. Process arguments only
-   select an existing parent-chain link, so they cannot extend authority outside
-   the requester's real subtree.
+   The daemon walks its parents to the nearest `omp --resume <uuid>` process and
+   refuses the grant when there is none. Process arguments only select an
+   existing parent-chain link, so they cannot extend authority outside the
+   requester's real subtree. The immediate-parent fallback in the resolver
+   serves `STATUS` and test harnesses, never a production grant.
 2. **Loopback connection → authorization.** The proxy matches the client's
    address pair in `/proc/net/tcp` to get its socket inode, then finds the
    owning PID under `/proc/*/fd`. It authorizes that PID only when its ancestry
@@ -189,11 +197,14 @@ eliminate PID-reuse risk. Failure to resolve is refused, never allowed.
 Neither machine gains a required config key: the laptop derives its token path,
 and `relay_token_file` exists only as an override.
 
-`forward doctor` reports the relay row without holding any secret: it connects
-to the laptop channel and treats `REFUSED TOKEN` as proof of life, because a
-refusal proves the listener is alive, peer-authorised, and enforcing. A
-connection failure and a refusal are therefore distinguishable, and neither
-requires a touch.
+`forward doctor` reports the relay row without holding any secret. An
+authorized untokened probe receives only a refusal and the result of the
+laptop's fixed `/json/version` status probe: `REFUSED TOKEN UPSTREAM 200`
+means locked but healthy, while `REFUSED TOKEN UPSTREAM 503` reports a
+disconnected extension. `REFUSED TOKEN FILE` is a failure that names
+`forward browser init-token` as the laptop remedy. A connection failure remains
+distinct from all three refusals, and none requires a touch or exposes targets,
+URLs, titles, or counts.
 
 The devbox row reports whether the invoking session holds a live grant. It
 cannot read the registry directly — `forward doctor` is a separate process from
@@ -230,10 +241,10 @@ side becomes a directory:
 | Condition | Behaviour |
 | --- | --- |
 | secretsd down, or YubiKey absent | no new grants; existing grants keep working |
-| laptop token file missing | every connection refused; doctor names it |
+| laptop token file missing | every connection refused; doctor names it and tells the laptop operator to run `forward browser init-token` |
 | grant expires mid-session | new connections refused, established ones survive |
 | peer PID unresolvable | refused and logged, never allowed |
-| relay extension disconnected | unchanged: relay answers 503, doctor reports it |
+| relay extension disconnected | tokened traffic receives the relay's 503; doctor reports the disconnected extension from its restricted untokened status probe |
 | grant proxy down | no browser access at all; there is no direct fallback |
 
 That last row is the real cost of this design: `forward` becomes the mandatory
