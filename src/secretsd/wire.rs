@@ -4,7 +4,7 @@ mod frame;
 mod reply;
 
 pub use frame::authorize_frame;
-pub(super) use frame::{caller_tty, process_uid, session_token};
+pub(super) use frame::{caller_tty, process_uid, session_token, valid_field};
 pub(super) use reply::{Verb, authorized_receipt, call, hello, redeemed_cap, valid_receipt_bytes};
 
 #[cfg(test)]

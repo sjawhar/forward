@@ -66,6 +66,6 @@ pub fn authorize_frame(
     Ok(format!("AUTHORIZE\tcap={cap}\t{scope_name}={scope}\n"))
 }
 
-fn valid_field(value: &str) -> bool {
+pub(crate) fn valid_field(value: &str) -> bool {
     !value.is_empty() && value.is_ascii() && !value.bytes().any(|byte| byte.is_ascii_control())
 }

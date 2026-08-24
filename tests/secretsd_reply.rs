@@ -30,7 +30,7 @@ impl FakeBroker {
                     "HELLO\tversion=3\n".to_owned(),
                     Reply::Bytes(HELLO_OK.to_vec()),
                 ),
-                (format!("REDEEM\treceipt={RECEIPT}\n"), reply),
+                (format!("REDEEM\treceipt={RECEIPT}\tcap=browser\n"), reply),
             ] {
                 let (stream, _) = listener.accept().unwrap();
                 let mut frame = String::new();

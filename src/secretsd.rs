@@ -92,11 +92,18 @@ pub fn redeem(path: &Path, receipt: &[u8], cap: &str) -> Result<(), BrokerError>
             "receipt is not lowercase ASCII hex".to_owned(),
         ));
     }
+    if !wire::valid_field(cap) {
+        return Err(BrokerError::Protocol(
+            "redeem request contains an invalid capability".to_owned(),
+        ));
+    }
     let mut frame = Zeroizing::new(Vec::with_capacity(
-        b"REDEEM\treceipt=\n".len() + receipt.len(),
+        b"REDEEM\treceipt=\tcap=\n".len() + receipt.len() + cap.len(),
     ));
     frame.extend_from_slice(b"REDEEM\treceipt=");
     frame.extend_from_slice(receipt);
+    frame.extend_from_slice(b"\tcap=");
+    frame.extend_from_slice(cap.as_bytes());
     frame.push(b'\n');
     wire::hello(path, CONTROL_TIMEOUT)?;
     let fields = wire::call(path, &frame, CONTROL_TIMEOUT, wire::Verb::Redeem)?;

@@ -62,7 +62,7 @@ fn hello() -> Step {
 }
 
 fn redeem() -> String {
-    format!("REDEEM\treceipt={RECEIPT}\n")
+    format!("REDEEM\treceipt={RECEIPT}\tcap=browser\n")
 }
 
 #[test]
