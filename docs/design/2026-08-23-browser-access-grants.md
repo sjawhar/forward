@@ -10,18 +10,22 @@ rather than offering a direct connection.
 
 The session runs `forward browser grant --ttl 30m`. The command performs
 capability authorization before it contacts the devbox daemon. On success the
-daemon prints `http://127.0.0.1:<port>`, an ephemeral listener that the session
-passes as `app.cdp_url`. The command accepts seconds, minutes, or hours; its
-default is 30 minutes, and the daemon rejects a requested lifetime above
-12 hours.
+daemon returns a numeric ephemeral-listener port over its request socket, and
+the CLI prints `http://127.0.0.1:<port>` for the session to pass as
+`app.cdp_url`. The command accepts seconds, minutes, or hours; its default is
+30 minutes, and the daemon rejects a requested lifetime above 12 hours.
 
-Each grant identifies an `omp --resume` session and anchors it to the kernel
-PID plus process start time of the requesting process. The grant proxy resolves
-each loopback client's owning process and requires that it descend from that
-anchor. The session identifier is for reporting; the PID-and-start-time anchor
-is the authorization value. An expiry reaper removes the grant and wakes its
-listener. A connection already being proxied retains its cloned grant state and
-is not killed solely because the deadline passes.
+Each grant identifies an `omp --resume` session and anchors it to that session
+root's kernel PID plus process start time. The short-lived grant CLI is not the
+anchor: it exits immediately, so making it the boundary would refuse every
+later browser connection. The grant proxy resolves each loopback client's owning
+process and requires that it descend from the enclosing session root. Every
+descendant of that root, including a sibling process in the same agent session,
+may use the endpoint; a process outside that tree may not. The session
+identifier is for reporting, while the PID-and-start-time anchor is the
+authorization value. An expiry reaper removes the grant and wakes its listener.
+A connection already being proxied retains its cloned grant state and is not
+killed solely because the deadline passes.
 
 ## Capability ceremony and receipt
 
@@ -34,10 +38,9 @@ not a secret-fetch interface.
 
 `forward` implements the client side of secretsd protocol v3. It opens a
 separate `HELLO` connection that requires protocol version 3 before each
-operation. The
-session-resident CLI sends `AUTHORIZE` with `cap=browser` and either the
-session token or its terminal path as scope. It validates request fields and
-caps that frame at 4096 bytes. A successful reply must contain exactly
+operation. The session-resident CLI sends `AUTHORIZE` with `cap=browser` and
+either the session token or its terminal path as scope. It validates request
+fields and caps that frame at 4096 bytes. A successful reply must contain exactly
 `status=authorized` and a 64-character lowercase-hex `receipt`; replies are
 bounded to 256 bytes and checked for their expected schema.
 
@@ -68,13 +71,13 @@ The laptop daemon dials `peer:grant_port` and holds one persistent feed
 connection. The devbox feed listener accepts only an authorized peer whose
 first line is `FEED`. A successful attachment replaces any earlier feed
 connection and replays each live devbox grant. For a new grant, the devbox
-mints 32 bytes from `/dev/urandom`, encodes them as a 43-byte unpadded-base64
 relay token, sends `TOKEN <token> <ttl>`, and waits up to five seconds for
-`OK`.
+the exact three-byte acknowledgement `OK\n`.
 
 The laptop parses a bounded feed line, registers the token until its supplied
-TTL, and replies `OK`. Its registry uses `CLOCK_BOOTTIME`, so time spent
-suspended counts toward expiry. A timerfd reaper removes expired entries, and
+TTL, and replies with the exact acknowledgement `OK\n`. Its registry uses
+`CLOCK_BOOTTIME`, so time spent suspended counts toward expiry.
+A timerfd reaper removes expired entries, and
 entry removal overwrites the registry's token bytes. The registry keeps at
 most 64 entries, evicting the oldest before inserting another. A relay request
 is accepted only when its bounded `RELAY <token>` prefix matches a live entry;
@@ -125,7 +128,7 @@ capability until the supervised service recovers.
 | The request socket receives a malformed receipt | The daemon returns `REFUSED`; it does not mint a token, bind a usable grant, or start a proxy. |
 | secretsd rejects a well-formed receipt during redemption | The daemon returns `REFUSED RECEIPT`; it does not mint a token, bind a usable grant, or start a proxy. |
 | No laptop feed is attached | A new grant is refused with `REFUSED LAPTOP`. Live laptop tokens remain usable until their own `CLOCK_BOOTTIME` deadlines, but no new token can be delivered. |
-| Feed transport or protocol errors persist | The laptop feed worker, or the devbox feed listener on persistent accept errors, exits after a 30-second unhealthy budget so its service manager can restart the owning `forward` process. |
+| A feed connection fails, or closes or becomes malformed before it proves useful | The laptop worker keeps one 30-second unhealthy budget. A parsed token or an otherwise idle feed that stays attached for the full budget resets it; a greeting-and-close flapper does not, so the worker exits for systemd after the budget. The devbox listener likewise exits only after 30 seconds of persistent accept errors. |
 | A grant expires | The devbox registry removes the grant and stops its listener. New connections are refused; a handler already piping a connection continues until its I/O ends or reaches its 15-minute pipe timeout. |
 | The local browser relay is unavailable | A tokened request cannot reach its upstream and is refused. An untokened status probe reports the unavailable upstream without exposing browser targets. |
 | A required `forward` daemon, feed, or PC/SC socket is down | The affected browser or smartcard route is unavailable. The implementation has no direct fallback path. |

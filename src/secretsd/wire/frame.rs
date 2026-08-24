@@ -56,7 +56,8 @@ pub fn authorize_frame(
             "authorization request contains an invalid field".to_owned(),
         ));
     }
-    let frame_len = "AUTHORIZE\tcap=".len() + cap.len() + 1 + scope_name.len() + 1 + scope.len();
+    let frame_len =
+        "AUTHORIZE\tcap=".len() + cap.len() + 1 + scope_name.len() + 1 + scope.len() + 1;
     if frame_len > MAX_FRAME_BYTES {
         return Err(BrokerError::Protocol(
             "authorization request exceeds the broker frame limit".to_owned(),

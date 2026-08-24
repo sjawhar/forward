@@ -27,10 +27,10 @@ fn authorize_frame_rejects_a_frame_larger_than_the_broker_limit() {
 }
 
 #[test]
-fn authorize_frame_allows_the_exact_broker_limit_before_its_newline() {
-    let cap_len = 4_096 - "AUTHORIZE\tcap=".len() - "\ttoken=".len() - 1;
+fn authorize_frame_allows_the_exact_broker_limit() {
+    let cap_len = 4_096 - "AUTHORIZE\tcap=".len() - "\ttoken=".len() - "t".len() - "\n".len();
     let cap = "a".repeat(cap_len);
 
     let frame = authorize_frame(&cap, Some("t".to_owned()), None);
-    assert!(frame.as_ref().is_ok_and(|frame| frame.len() == 4_097));
+    assert!(frame.as_ref().is_ok_and(|frame| frame.len() == 4_096));
 }

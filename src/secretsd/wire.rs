@@ -41,6 +41,20 @@ mod tests {
     }
 
     #[test]
+    fn authorize_frame_limit_includes_the_trailing_newline() {
+        let prefix = "AUTHORIZE\tcap=browser\ttoken=";
+        let at_limit = "a".repeat(4_096 - prefix.len() - 1);
+        let frame = authorize_frame("browser", Some(at_limit), None).unwrap();
+        assert_eq!(frame.len(), 4_096);
+
+        let over_limit = "a".repeat(4_096 - prefix.len());
+        assert!(matches!(
+            authorize_frame("browser", Some(over_limit), None),
+            Err(BrokerError::Protocol(_))
+        ));
+    }
+
+    #[test]
     fn broker_errors_map_per_verb() {
         let denied = "ERR\tDENIED\tdeclined";
         assert!(matches!(

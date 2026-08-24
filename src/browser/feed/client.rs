@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 pub(super) const MAX_UNHEALTHY_FEED: Duration = Duration::from_secs(30);
 const MAX_FEED_LINE: u64 = 128;
+/// A feed that stays attached for a full outage window is useful even without
+/// a grant. Shorter greeting-and-close loops must not erase the outage budget.
+const MIN_USEFUL_FEED_LIFETIME: Duration = MAX_UNHEALTHY_FEED;
 
 #[derive(Default)]
 pub(super) struct ReconnectBudget {
@@ -23,6 +26,12 @@ impl ReconnectBudget {
 
     pub(super) fn restored(&mut self) {
         self.unhealthy_since = None;
+    }
+
+    fn restored_if_long_lived(&mut self, connected_at: Instant) {
+        if connected_at.elapsed() >= MIN_USEFUL_FEED_LIFETIME {
+            self.restored();
+        }
     }
 }
 
@@ -86,22 +95,31 @@ fn run_once(
     let mut stream = TcpStream::connect_timeout(&address, crate::pcsc::CONNECT_TIMEOUT)?;
     keepalive(&stream)?;
     stream.write_all(b"FEED\n")?;
-    failures.restored();
+    let connected_at = Instant::now();
     tokens.set_connected(true);
     let mut reader = BufReader::new(stream.try_clone()?);
     loop {
         let mut line = String::new();
-        let bytes = reader.by_ref().take(MAX_FEED_LINE).read_line(&mut line)?;
+        let bytes = match reader.by_ref().take(MAX_FEED_LINE).read_line(&mut line) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                failures.restored_if_long_lived(connected_at);
+                return Err(error);
+            }
+        };
         if bytes == 0 {
+            failures.restored_if_long_lived(connected_at);
             return Ok(());
         }
         let Some((token, ttl)) = parse_token_line(line.trim_end_matches(['\r', '\n'])) else {
+            failures.restored_if_long_lived(connected_at);
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "malformed feed line",
             ));
         };
         tokens.insert(token, Duration::from_secs(ttl));
+        failures.restored();
         stream.write_all(b"OK\n")?;
     }
 }
@@ -122,7 +140,35 @@ mod tests {
     use std::net::TcpListener;
 
     #[test]
-    fn a_successful_feed_handshake_resets_a_prior_outage() {
+    fn a_parsed_feed_token_resets_a_prior_outage() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut greeting = String::new();
+            BufReader::new(stream.try_clone().unwrap())
+                .read_line(&mut greeting)
+                .unwrap();
+            assert_eq!(greeting, "FEED\n");
+            stream.write_all(b"TOKEN relay-token 30\n").unwrap();
+            let mut ack = [0_u8; 3];
+            stream.read_exact(&mut ack).unwrap();
+            assert_eq!(ack, *b"OK\n");
+        });
+        let tokens = RelayTokens::new();
+        let now = Instant::now();
+        let mut failures = ReconnectBudget {
+            unhealthy_since: Some(now - MAX_UNHEALTHY_FEED),
+        };
+
+        run_once(address, &tokens, &mut failures).unwrap();
+        server.join().unwrap();
+
+        assert!(!failures.failed_at(Instant::now()));
+    }
+
+    #[test]
+    fn greet_then_close_preserves_an_exhausted_outage_budget() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -139,6 +185,21 @@ mod tests {
 
         run_once(address, &tokens, &mut failures).unwrap();
         server.join().unwrap();
+
+        assert!(
+            failures.failed_at(Instant::now()),
+            "a greeting followed by close must not reset the outage budget"
+        );
+    }
+
+    #[test]
+    fn a_long_lived_idle_feed_resets_a_prior_outage() {
+        let now = Instant::now();
+        let mut failures = ReconnectBudget {
+            unhealthy_since: Some(now - MAX_UNHEALTHY_FEED),
+        };
+
+        failures.restored_if_long_lived(now - MIN_USEFUL_FEED_LIFETIME);
 
         assert!(!failures.failed_at(Instant::now()));
     }

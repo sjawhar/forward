@@ -107,7 +107,7 @@ isolated to smartcard traffic.
 | --- | --- |
 | `pcsc_port` is zero, or the devbox has no peer | The corresponding PC/SC endpoint is not served. No alternate transport is started. |
 | A live process owns `~/.pcscd/pcscd.comm` | The devbox refuses to replace it. It does not unlink a socket that accepted a connection. |
-| A stale socket is found | The devbox rechecks that it is still an unserved socket before unlinking it. It never unlinks a live socket or a non-socket path. |
+| A stale socket is found | The devbox rechecks that it is still an unserved socket before unlinking it, which refuses a live socket or non-socket path observed by that check. The recheck narrows but cannot eliminate the final race before `remove_file`. |
 | The laptop is unreachable | A new devbox-side client sees its stream close after the five-second dial timeout; existing TCP sessions rely on keepalive or their client timeout. |
 | Laptop `pcscd` is unavailable | The laptop closes the authorized TCP stream without writing a protocol response. |
 | The PC/SC listener cannot bind persistently | The relevant `forward` process exits for systemd to restart. On the laptop, the bounded restart policy eventually stops the whole daemon and its other channels. |
