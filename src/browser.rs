@@ -2,6 +2,7 @@ pub mod feed;
 pub mod grant;
 pub mod peer;
 pub mod proxy;
+pub mod push;
 pub mod request;
 use crate::bridge::limit::ConnectionLimit;
 use crate::callback::RELAY_TARGET_PORT;

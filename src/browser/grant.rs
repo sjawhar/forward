@@ -17,8 +17,7 @@ pub struct ProcessAnchor {
 /// One session's authorisation to reach the laptop's browser.
 ///
 /// `Clone` on purpose: `Grants::live` hands the proxy a copy whose token lives
-/// as long as the connection handler that took it. Expiry zeroes only the
-/// registry's copy — established connections are never guillotined.
+/// as long as its handler; expiry zeroes only the registry's copy.
 #[derive(Clone)]
 pub struct Grant {
     /// The omp session id is retained for display and logging only.
@@ -68,6 +67,27 @@ impl Grants {
         ports.get(&port).cloned()
     }
 
+    /// Live tokens with their remaining lifetimes for feed re-push after the
+    /// laptop reconnects. Expired grants are excluded; the reaper owns removal.
+    pub fn snapshot_live(&self) -> Vec<(Vec<u8>, u64)> {
+        let now = Instant::now();
+        self.ports
+            .lock()
+            .values()
+            .filter(|grant| grant.deadline > now)
+            .map(|grant| {
+                (
+                    grant.token.clone(),
+                    grant
+                        .deadline
+                        .saturating_duration_since(now)
+                        .as_secs()
+                        .max(1),
+                )
+            })
+            .collect()
+    }
+
     /// The live grant an authenticated process may use, if any.
     ///
     /// The caller anchor comes from `SO_PEERCRED` and `/proc`, not asserted
@@ -98,8 +118,7 @@ impl Grants {
     }
 }
 
-/// Remove `port`'s grant, overwriting its token before the buffer is released,
-/// so an expired grant leaves no copy in the allocator's free memory.
+/// Remove `port`'s grant, overwriting its token before releasing the buffer.
 fn scrub(ports: &mut HashMap<u16, Grant>, port: u16) -> Option<Grant> {
     let mut grant = ports.remove(&port)?;
     grant.token.zeroize();
@@ -213,5 +232,18 @@ mod tests {
 
         let (port, found) = grants.live_for_descendant(caller).unwrap();
         assert_eq!((port, found.session.as_str()), (12811, "session-a"));
+    }
+    #[test]
+    fn snapshot_live_excludes_expired_grants_and_preserves_a_positive_ttl() {
+        let grants = Grants::new();
+        grants.insert(12811, grant("live", Duration::from_secs(60)));
+        grants.insert(12812, grant("expired", Duration::from_millis(1)));
+        std::thread::sleep(Duration::from_millis(5));
+
+        let snapshot = grants.snapshot_live();
+
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot[0].0.as_slice() == b"correct-horse");
+        assert!(snapshot[0].1 > 0);
     }
 }

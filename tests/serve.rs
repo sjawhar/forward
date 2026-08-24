@@ -29,7 +29,7 @@ fn spawn_serve_with_config(
     config_body: &str,
 ) -> (std::process::Child, u16) {
     let config = config_root.join(".forward-config.toml");
-    std::fs::write(&config, config_body).unwrap();
+    std::fs::write(&config, format!("{config_body}grant_port = 0\n")).unwrap();
     let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
         .args(["serve", "--port", "0", "--config"])
         .arg(&config)

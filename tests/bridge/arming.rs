@@ -121,7 +121,11 @@ fn a_slow_arming_client_does_not_block_other_clients() {
     drop(bridge_probe);
     let runtime_dir = tempfile::tempdir().unwrap();
     let config = runtime_dir.path().join("config.toml");
-    std::fs::write(&config, format!("bridge_port = {bridge_port}\n")).unwrap();
+    std::fs::write(
+        &config,
+        format!("bridge_port = {bridge_port}\ngrant_port = 0\n"),
+    )
+    .unwrap();
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
         .args(["serve", "--port", "0"])
         .arg("--config")
@@ -165,7 +169,11 @@ fn serve_shares_one_armed_set_between_the_socket_and_the_bridge() {
     drop(probe);
     let dir = tempfile::tempdir().unwrap();
     let config = dir.path().join("config.toml");
-    std::fs::write(&config, format!("bridge_port = {bridge_port}\n")).unwrap();
+    std::fs::write(
+        &config,
+        format!("bridge_port = {bridge_port}\ngrant_port = 0\n"),
+    )
+    .unwrap();
     let child = std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
         .args(["serve", "--port", "0"])
         .arg("--config")

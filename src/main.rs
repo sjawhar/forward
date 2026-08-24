@@ -117,12 +117,18 @@ fn main() -> anyhow::Result<()> {
             let armed = bridge::Armed::new(cfg.clone());
             bridge::serve_arming(armed.clone(), bridge::arm_socket_path());
             let grants = forward::browser::grant::Grants::new();
+            let slot = forward::browser::push::FeedSlot::new();
+            forward::browser::push::spawn_listener(&cfg, slot.clone(), grants.clone())
+                .unwrap_or_else(|error| exit_with_error(error));
             let grant_cfg = cfg.clone();
+            let grant_slot = slot.clone();
+            let grant_grants = grants.clone();
             drop(std::thread::spawn(move || {
                 forward::browser::request::serve(
-                    grants,
+                    grant_grants,
                     grant_cfg,
                     forward::browser::request::socket_path(),
+                    grant_slot,
                 );
             }));
             let bridge_cfg = cfg.clone();
@@ -142,18 +148,16 @@ fn main() -> anyhow::Result<()> {
         Command::Browser { action } => match action {
             BrowserCommand::Grant { ttl, config } => {
                 let _ = load_config(config)?;
-                let Ok(token) = std::env::var("FORWARD_BROWSER_GRANT") else {
-                    eprintln!("forward: FORWARD_BROWSER_GRANT is not set; run");
-                    eprintln!("  secrets FORWARD_BROWSER_GRANT -- forward browser grant --ttl 30m");
-                    std::process::exit(1);
-                };
                 let Some(ttl_secs) = forward::browser::request::parse_ttl(&ttl) else {
                     eprintln!("forward: invalid --ttl {ttl:?}; use 45s, 30m, or 2h");
                     std::process::exit(1);
                 };
+                // The broker runs the YubiKey ceremony; this blocks through
+                // the touch window and prints nothing until it resolves.
+                let receipt = forward::secretsd::authorize(forward::secretsd::CAP_BROWSER)
+                    .unwrap_or_else(|error| exit_with_error(error));
                 let socket = forward::browser::request::socket_path();
-                let Some(port) =
-                    forward::browser::request::request(&socket, ttl_secs, token.as_bytes())
+                let Some(port) = forward::browser::request::request(&socket, ttl_secs, &receipt)
                 else {
                     eprintln!(
                         "forward: grant refused, or no forward serve at {}",

@@ -1,7 +1,9 @@
 use forward::browser::feed::RelayTokens;
+use forward::browser::grant::Grants;
+use forward::browser::push::{FeedSlot, spawn_listener};
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::TcpListener;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[test]
 fn tokens_are_accepted_until_their_deadline_and_never_after() {
@@ -46,4 +48,30 @@ fn the_feed_client_registers_pushed_tokens_and_acknowledges() {
     assert_eq!(ack, "OK\n");
     assert!(tokens.accepts(b"fresh-relay-token"));
     assert!(tokens.is_connected());
+}
+
+#[test]
+fn the_devbox_feed_slot_pushes_a_token_to_the_laptop_feed_client() {
+    // This fails if the daemon feed listener does not attach the laptop client
+    // or if FeedSlot does not wait for the laptop acknowledgement.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut cfg = forward::config::Config::default_values_for_test();
+    cfg.listen = "127.0.0.1".to_owned();
+    cfg.peer = "127.0.0.1".to_owned();
+    cfg.grant_port = port;
+    let slot = FeedSlot::new();
+    let laptop_tokens = RelayTokens::new();
+
+    spawn_listener(&cfg, slot.clone(), Grants::new()).unwrap();
+    forward::browser::feed::spawn_client(&cfg, laptop_tokens.clone()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !laptop_tokens.is_connected() {
+        assert!(Instant::now() < deadline, "laptop feed did not attach");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    assert!(slot.push(b"fresh-relay-token", 60));
+    assert!(laptop_tokens.accepts(b"fresh-relay-token"));
 }

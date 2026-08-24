@@ -1,15 +1,21 @@
-use forward::browser::grant::{Grant, ProcessAnchor};
+use forward::browser::push::FeedSlot;
 use forward::browser::request::{
-    GrantStatus, parse, parse_status, parse_ttl, request, serve_with_resolver, status,
+    GrantStatus, Redeemer, SessionResolver, parse, parse_status, parse_ttl, request, serve_with,
 };
-use parking_lot::Mutex;
-use std::io::{Read as _, Write as _};
+use forward::secretsd::BrokerError;
+use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
-use std::process::Command;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+
+#[path = "browser_request/failures.rs"]
+mod failures;
+#[path = "browser_request/session.rs"]
+mod session;
+
+const RECEIPT: &[u8] = b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn await_socket(path: &std::path::Path) {
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -19,50 +25,127 @@ fn await_socket(path: &std::path::Path) {
     }
 }
 
-fn spawn_server(
-    grants: forward::browser::grant::Grants,
-    path: std::path::PathBuf,
-    resolver: forward::browser::request::SessionResolver,
-) {
+fn accepting_redeemer() -> Redeemer {
+    Arc::new(|_receipt: &[u8]| Ok(()))
+}
+
+fn rejecting_redeemer() -> Redeemer {
+    Arc::new(|_receipt: &[u8]| Err(BrokerError::ReceiptRejected))
+}
+
+/// A laptop-side feed acceptor: accepts one feed attachment and ACKs every
+/// TOKEN line, recording tokens so tests can assert what was pushed.
+fn feed_acceptor() -> (FeedSlot, mpsc::Receiver<Vec<u8>>) {
+    let slot = FeedSlot::new();
+    let (sender, receiver) = mpsc::channel();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let acceptor_slot = slot.clone();
+    thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut stream = stream;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                return;
+            }
+            let token = line
+                .trim_end()
+                .strip_prefix("TOKEN ")
+                .and_then(|rest| rest.split_once(' '))
+                .map(|(token, _)| token.as_bytes().to_vec())
+                .unwrap();
+            sender.send(token).unwrap();
+            stream.write_all(b"OK\n").unwrap();
+        }
+    });
+    acceptor_slot.attach(TcpStream::connect(address).unwrap());
+    (slot, receiver)
+}
+
+fn grant_config() -> forward::config::Config {
     let mut cfg = forward::config::Config::default_values_for_test();
     cfg.peer = "127.0.0.1".to_owned();
-    thread::spawn(move || serve_with_resolver(grants, cfg, path, resolver));
+    cfg
+}
+
+fn spawn_server(
+    grants: forward::browser::grant::Grants,
+    cfg: forward::config::Config,
+    path: std::path::PathBuf,
+    slot: FeedSlot,
+    resolver: SessionResolver,
+    redeemer: Redeemer,
+) {
+    thread::spawn(move || serve_with(grants, cfg, path, slot, resolver, redeemer));
+}
+
+fn request_reply(path: &std::path::Path, ttl_secs: u64, receipt: &[u8]) -> String {
+    let mut stream = UnixStream::connect(path).unwrap();
+    stream.write_all(b"GRANT ").unwrap();
+    stream.write_all(ttl_secs.to_string().as_bytes()).unwrap();
+    stream.write_all(b" ").unwrap();
+    stream.write_all(receipt).unwrap();
+    stream.write_all(b"\n").unwrap();
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).unwrap();
+    reply
 }
 
 #[test]
 fn a_well_formed_request_parses() {
-    assert_eq!(
-        parse(b"GRANT 1800 correct-horse"),
-        Some((1800, b"correct-horse".to_vec()))
-    );
+    assert!(matches!(
+        parse(b"GRANT 1800 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        Some((1800, receipt)) if receipt.len() == RECEIPT.len()
+    ));
 }
 
 #[test]
 fn a_request_without_the_verb_is_rejected() {
-    assert_eq!(parse(b"1800 correct-horse"), None);
-    assert_eq!(parse(b"STATUS"), None);
+    assert!(
+        parse(b"1800 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_none()
+    );
+    assert!(parse(b"STATUS").is_none());
 }
 
 #[test]
 fn a_non_numeric_ttl_is_rejected() {
-    assert_eq!(parse(b"GRANT soon correct-horse"), None);
+    assert!(
+        parse(b"GRANT soon aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .is_none()
+    );
 }
 
 #[test]
-fn a_missing_token_is_rejected() {
-    assert_eq!(parse(b"GRANT 1800"), None);
-    assert_eq!(parse(b"GRANT 1800 "), None);
+fn a_missing_receipt_is_rejected() {
+    assert!(parse(b"GRANT 1800").is_none());
+    assert!(parse(b"GRANT 1800 ").is_none());
 }
 
 #[test]
-fn a_token_containing_a_space_is_rejected() {
-    assert_eq!(parse(b"GRANT 1800 correct horse"), None);
+fn a_malformed_receipt_is_rejected() {
+    assert!(parse(b"GRANT 1800 correct-horse").is_none());
+    assert!(
+        parse(b"GRANT 1800 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+            .is_none()
+    );
+    assert!(
+        parse(b"GRANT 1800 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ")
+            .is_none()
+    );
 }
 
 #[test]
 fn a_zero_or_overlong_ttl_is_rejected() {
-    assert_eq!(parse(b"GRANT 0 correct-horse"), None);
-    assert_eq!(parse(b"GRANT 43201 correct-horse"), None);
+    assert!(
+        parse(b"GRANT 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .is_none()
+    );
+    assert!(
+        parse(b"GRANT 43201 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+            .is_none()
+    );
 }
 
 #[test]
@@ -89,148 +172,74 @@ fn a_status_reply_parses() {
     assert_eq!(parse_status("LIVE nonsense"), GrantStatus::Unreachable);
 }
 
-const CHILD_SOCKET_ENV: &str = "FORWARD_TEST_GRANT_SOCKET";
-const CHILD_PORT_PATH_ENV: &str = "FORWARD_TEST_GRANT_PORT_PATH";
-const CHILD_ROLE_ENV: &str = "FORWARD_TEST_GRANT_ROLE";
-
 #[test]
-fn sibling_children_of_a_session_can_use_its_grant() {
-    if let (Some(socket), Some(port_path), Some(role)) = (
-        std::env::var_os(CHILD_SOCKET_ENV),
-        std::env::var_os(CHILD_PORT_PATH_ENV),
-        std::env::var_os(CHILD_ROLE_ENV),
-    ) {
-        let path = std::path::PathBuf::from(socket);
-        if role == "grant" {
-            let port =
-                request(&path, 60, b"correct-horse").expect("the child grant request must succeed");
-            std::fs::write(port_path, port.to_string()).unwrap();
-            return;
-        }
-
-        let port = std::fs::read_to_string(port_path).unwrap().parse().unwrap();
-        assert!(matches!(
-            status(&path),
-            GrantStatus::Live {
-                port: live_port,
-                ..
-            } if live_port == port
-        ));
-        let mut browser = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        browser.write_all(b"browser-payload").unwrap();
-        let mut reply = [0_u8; 4];
-        browser.read_exact(&mut reply).unwrap();
-        assert_eq!(&reply, b"pong");
-        return;
-    }
-
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("grant.sock");
-    let child_port_path = directory.path().join("child-port");
-    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
-    let upstream_port = upstream.local_addr().unwrap().port();
-    let upstream_task = thread::spawn(move || {
-        let (mut stream, _) = upstream.accept().unwrap();
-        let mut line = Vec::new();
-        let mut byte = [0_u8; 1];
-        while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
-            line.push(byte[0]);
-        }
-        assert_eq!(line, b"RELAY correct-horse");
-        let mut payload = [0_u8; 15];
-        stream.read_exact(&mut payload).unwrap();
-        assert_eq!(&payload, b"browser-payload");
-        stream.write_all(b"pong").unwrap();
-    });
-
-    let grants = forward::browser::grant::Grants::new();
-    let (sender, receiver) = mpsc::channel();
-    let sender = Mutex::new(sender);
-    let resolver: forward::browser::request::SessionResolver = Arc::new(move |pid| {
-        let start_time = forward::browser::peer::process_start(pid).unwrap();
-        sender.lock().send((pid, start_time)).unwrap();
-        Some("session-a".to_owned())
-    });
-    let mut cfg = forward::config::Config::default_values_for_test();
-    cfg.peer = "127.0.0.1".to_owned();
-    cfg.relay_port = upstream_port;
-    let server_path = path.clone();
-    thread::spawn(move || serve_with_resolver(grants, cfg, server_path, resolver));
-    await_socket(&path);
-
-    let current_exe = std::env::current_exe().unwrap();
-    let mut grant_child = Command::new(&current_exe)
-        .arg("--exact")
-        .arg("sibling_children_of_a_session_can_use_its_grant")
-        .env(CHILD_SOCKET_ENV, &path)
-        .env(CHILD_PORT_PATH_ENV, &child_port_path)
-        .env(CHILD_ROLE_ENV, "grant")
-        .spawn()
-        .unwrap();
-    let grant_pid = grant_child.id();
-    assert!(grant_child.wait().unwrap().success());
-    let seen_pids: Vec<(u32, u64)> = receiver.try_iter().collect();
-    assert!(seen_pids.iter().any(|(pid, _)| *pid == grant_pid));
-
-    let mut user_child = Command::new(current_exe)
-        .arg("--exact")
-        .arg("sibling_children_of_a_session_can_use_its_grant")
-        .env(CHILD_SOCKET_ENV, &path)
-        .env(CHILD_PORT_PATH_ENV, &child_port_path)
-        .env(CHILD_ROLE_ENV, "use")
-        .spawn()
-        .unwrap();
-    assert!(user_child.wait().unwrap().success());
-    upstream_task.join().unwrap();
-}
-
-#[test]
-fn status_reports_the_calling_sessions_grant_over_the_socket() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("grant.sock");
-    assert_eq!(status(&path), GrantStatus::Unreachable);
-
-    let grants = forward::browser::grant::Grants::new();
-    let resolver: forward::browser::request::SessionResolver =
-        Arc::new(|_pid| Some("session-a".to_owned()));
-    spawn_server(grants, path.clone(), resolver);
-    await_socket(&path);
-
-    assert_eq!(status(&path), GrantStatus::None);
-    let port = request(&path, 60, b"correct-horse").expect("the grant request must succeed");
-    match status(&path) {
-        GrantStatus::Live {
-            port: live_port,
-            remaining_secs,
-        } => {
-            assert_eq!(live_port, port);
-            assert!(remaining_secs <= 60);
-        }
-        other => panic!("expected a live grant, got {other:?}"),
-    }
-}
-
-#[test]
-fn status_does_not_disclose_a_grant_for_a_forged_session_string() {
+fn a_redeemed_receipt_grants_a_port_and_pushes_a_fresh_token() {
+    // This fails if the receipt is not verified, the token is not minted
+    // server-side, or the laptop is not told before the port is returned.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("grant.sock");
     let grants = forward::browser::grant::Grants::new();
-    grants.insert(
-        12811,
-        Grant {
-            session: "target-session".to_owned(),
-            anchor: ProcessAnchor {
-                pid: u32::MAX,
-                start_time: 0,
-            },
-            token: b"test-only".to_vec(),
-            deadline: Instant::now() + Duration::from_secs(60),
-        },
+    let (slot, receiver) = feed_acceptor();
+    spawn_server(
+        grants.clone(),
+        grant_config(),
+        path.clone(),
+        slot,
+        Arc::new(|_pid| Some("session-a".to_owned())),
+        accepting_redeemer(),
     );
-    let resolver: forward::browser::request::SessionResolver =
-        Arc::new(|_pid| Some("target-session".to_owned()));
-    spawn_server(grants, path.clone(), resolver);
     await_socket(&path);
 
-    assert_eq!(status(&path), GrantStatus::None);
+    let port = request(&path, 60, RECEIPT).expect("the grant request must succeed");
+    let token = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+
+    assert_eq!(token.len(), 43);
+    assert!(
+        grants
+            .live(port)
+            .is_some_and(|grant| grant.token.as_slice() == token.as_slice())
+    );
+}
+
+#[test]
+fn a_rejected_receipt_is_refused_without_granting() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("grant.sock");
+    let grants = forward::browser::grant::Grants::new();
+    let (slot, receiver) = feed_acceptor();
+    spawn_server(
+        grants.clone(),
+        grant_config(),
+        path.clone(),
+        slot,
+        Arc::new(|_pid| Some("session-a".to_owned())),
+        rejecting_redeemer(),
+    );
+    await_socket(&path);
+
+    assert_eq!(request_reply(&path, 60, RECEIPT), "REFUSED RECEIPT\n");
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    assert!(grants.snapshot_live().is_empty());
+}
+
+#[test]
+fn an_unreachable_laptop_feed_refuses_the_grant() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("grant.sock");
+    let grants = forward::browser::grant::Grants::new();
+    spawn_server(
+        grants.clone(),
+        grant_config(),
+        path.clone(),
+        FeedSlot::new(),
+        Arc::new(|_pid| Some("session-a".to_owned())),
+        accepting_redeemer(),
+    );
+    await_socket(&path);
+
+    assert_eq!(request_reply(&path, 60, RECEIPT), "REFUSED LAPTOP\n");
+    assert!(grants.snapshot_live().is_empty());
 }

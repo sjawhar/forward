@@ -3,8 +3,8 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
-/// The daemon answers immediately — the YubiKey touch already happened inside
-/// `secrets`, before this process even started.
+/// The daemon answers quickly — the YubiKey touch already happened during
+/// AUTHORIZE, before this connection opened; only receipt redeem and feed push remain.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Whether the calling session holds a live grant, as the daemon reports it.
