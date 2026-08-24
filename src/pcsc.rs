@@ -23,6 +23,11 @@ pub enum PcscError {
         #[source]
         source: std::io::Error,
     },
+    #[error("forward: failed to start pcsc channel accept loop: {source}")]
+    Spawn {
+        #[source]
+        source: std::io::Error,
+    },
     #[error("forward: failed to serve pcsc socket {path}: {source}")]
     Socket {
         path: std::path::PathBuf,

@@ -33,7 +33,7 @@ fn laptop_channel_pipes_raw_bytes_to_the_pcscd_socket() {
     let upstream = unix_echo(dir.path());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
-    forward::pcsc::laptop::spawn_with_listener(cfg(), listener, upstream);
+    forward::pcsc::laptop::spawn_with_listener(cfg(), listener, upstream).unwrap();
 
     let mut client = TcpStream::connect(address).unwrap();
     client.write_all(&[0x12, 0x00, 0x00, 0x00, 0x11]).unwrap();
@@ -86,7 +86,8 @@ fn laptop_channel_closes_immediately_when_pcscd_is_absent() {
         cfg(),
         listener,
         std::path::PathBuf::from("/nonexistent/pcscd.comm"),
-    );
+    )
+    .unwrap();
 
     let mut client = TcpStream::connect(address).unwrap();
     client

@@ -31,18 +31,37 @@ pub fn spawn(cfg: &Config) -> Result<(), PcscError> {
         source,
     })?;
     eprintln!("forward: pcsc channel on {ip}:{}", cfg.pcsc_port);
-    spawn_with_listener(cfg.clone(), listener, PathBuf::from(LAPTOP_PCSCD_SOCKET));
+    spawn_with_listener(cfg.clone(), listener, PathBuf::from(LAPTOP_PCSCD_SOCKET))?;
     Ok(())
 }
 
 /// Test seam: accept on a listener the caller already bound.
 #[doc(hidden)]
-pub fn spawn_with_listener(cfg: Config, listener: TcpListener, upstream: PathBuf) {
-    drop(
+pub fn spawn_with_listener(
+    cfg: Config,
+    listener: TcpListener,
+    upstream: PathBuf,
+) -> Result<(), PcscError> {
+    listener_spawn_result(
         thread::Builder::new()
             .name("pcsc-laptop".to_owned())
-            .spawn(move || accept_loop(cfg, listener, upstream)),
-    );
+            .spawn(move || {
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    accept_loop(cfg, listener, upstream)
+                }));
+                match outcome {
+                    Err(_) => eprintln!("forward: pcsc channel accept loop panicked; exiting"),
+                    Ok(()) => eprintln!("forward: pcsc channel accept loop ended; exiting"),
+                }
+                std::process::exit(1);
+            }),
+    )
+}
+
+fn listener_spawn_result(result: std::io::Result<thread::JoinHandle<()>>) -> Result<(), PcscError> {
+    result
+        .map(drop)
+        .map_err(|source| PcscError::Spawn { source })
 }
 
 fn accept_loop(cfg: Config, listener: TcpListener, upstream: PathBuf) {
@@ -59,10 +78,15 @@ fn accept_loop(cfg: Config, listener: TcpListener, upstream: PathBuf) {
                 };
                 let cfg = cfg.clone();
                 let upstream = upstream.clone();
-                drop(thread::spawn(move || {
-                    let _permit = permit;
-                    handle(&cfg, &upstream, stream);
-                }));
+                if let Err(error) = thread::Builder::new()
+                    .name("pcsc-session".to_owned())
+                    .spawn(move || {
+                        let _permit = permit;
+                        handle(&cfg, &upstream, stream);
+                    })
+                {
+                    eprintln!("forward: pcsc channel failed to start connection handler: {error}");
+                }
             }
             Err(error) => {
                 eprintln!("forward: pcsc channel accept failed: {error}");
@@ -108,5 +132,22 @@ pub fn handle_from(cfg: &Config, upstream: &Path, remote: IpAddr, stream: TcpStr
     }
     if let Err(error) = bidirectional(stream, pcscd) {
         eprintln!("forward: pcsc session for {remote} ended: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::listener_spawn_result;
+    use crate::pcsc::PcscError;
+    use std::io;
+
+    #[test]
+    fn listener_thread_spawn_failure_is_reported() {
+        let error =
+            listener_spawn_result(Err(io::Error::other("thread limit"))).expect_err("must fail");
+
+        assert!(
+            matches!(error, PcscError::Spawn { source } if source.kind() == io::ErrorKind::Other)
+        );
     }
 }
