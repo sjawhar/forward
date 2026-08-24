@@ -40,31 +40,24 @@ fn relay_port_zero_skips_the_spawn_and_logs_disabled() {
 }
 
 #[test]
-fn the_daemon_serves_the_channel_it_announces() {
+fn the_daemon_serves_the_channel_it_announces_when_the_feed_is_down() {
     // Given: an ephemeral browser relay listener. Nothing listens on
     // 127.0.0.1:9224 here: omp-browser-relay never runs on the devbox or CI, so
     // this dials only the daemon's ephemeral listener and never binds 9224.
     let dir = tempfile::tempdir().unwrap();
     let relay_port = test_port();
-    let token_path = dir.path().join("relay.token");
-    std::fs::write(&token_path, "daemon-relay-token\n").unwrap();
 
-    // When: the daemon announces the channel and a tokened client dials it locally.
-    let (daemon, port) = start(
-        dir.path(),
-        &format!(
-            "relay_port = {relay_port}\nrelay_token_file = \"{}\"\n",
-            token_path.display()
-        ),
-    );
+    // When: the daemon announces the channel and a client dials it locally
+    // while no devbox feed has attached.
+    let (daemon, port) = start(dir.path(), &format!("relay_port = {relay_port}\n"));
     daemon.wait_for_log(&format!("browser relay channel on 127.0.0.1:{relay_port}"));
     let mut relay = connect(relay_port);
     relay.write_all(b"RELAY daemon-relay-token\n").unwrap();
     let mut response = Vec::new();
     relay.read_to_end(&mut response).unwrap();
 
-    // Then: the channel returns the generic upstream refusal and the daemon's
+    // Then: the channel reports the observed missing feed and the daemon's
     // original URL channel remains responsive.
-    assert_eq!(response, b"REFUSED\n");
+    assert_eq!(response, b"REFUSED FEED\n");
     drop(connect(port));
 }

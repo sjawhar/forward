@@ -17,8 +17,6 @@ const REAPER_INTERVAL: Duration = Duration::from_millis(100);
 /// Generous liveness bound for idle reads and blocked writes during a callback.
 const PIPE_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 pub const MAX_DYNAMIC_FORWARDS: usize = 4;
-/// Devbox endpoint of the laptop hardware-token tunnel.
-pub const PCSC_PORT: u16 = 12_799;
 /// URL receiver port, named by the `forward-daemon.service` user unit.
 pub const CHANNEL_PORT: u16 = 12_800;
 /// File-preview port, named by the `forward.service` user unit.
@@ -26,11 +24,25 @@ pub const FILES_PORT: u16 = 12_802;
 /// Laptop-loopback port where `omp browser-relay` listens; the browser
 /// channel's constant upstream (the relay's own default).
 pub const RELAY_TARGET_PORT: u16 = 9_224;
-const STATIC_TUNNEL_PORTS: [u16; 3] = [PCSC_PORT, CHANNEL_PORT, FILES_PORT];
 
-/// Ports carried by the SSH tunnel or served by forward itself, never leased.
-pub fn is_dynamic_port(port: u16) -> bool {
-    !STATIC_TUNNEL_PORTS.contains(&port)
+/// Every port the effective config assigns to a forward service, plus the
+/// constant service ports. Derived from `Config`, never from the defaults: an
+/// overridden port carries its protection with it. A value of 0 marks a
+/// disabled service and reserves nothing (port 0 is separately never leased).
+pub fn service_ports(cfg: &Config) -> [u16; 6] {
+    [
+        CHANNEL_PORT,
+        FILES_PORT,
+        cfg.bridge_port,
+        cfg.relay_port,
+        cfg.pcsc_port,
+        cfg.grant_port,
+    ]
+}
+
+/// Ports served by forward itself are never leased for callbacks.
+pub fn is_dynamic_port(cfg: &Config, port: u16) -> bool {
+    port != 0 && !service_ports(cfg).contains(&port)
 }
 
 /// One logical lease per callback port, however many listeners serve it.

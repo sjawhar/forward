@@ -80,12 +80,10 @@ fn bridge_serve_refuses_wildcard_listen_before_binding_a_port() {
     drop(port_probe);
     let mut bridge_cfg = cfg(bridge_port);
     bridge_cfg.listen = "0.0.0.0".to_owned();
+    let armed = forward::bridge::Armed::new(bridge_cfg.clone());
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     std::thread::spawn(move || {
-        let _ = sender.send(forward::bridge::serve(
-            bridge_cfg,
-            forward::bridge::Armed::new(),
-        ));
+        let _ = sender.send(forward::bridge::serve(bridge_cfg, armed));
     });
 
     // When: the bridge entrypoint is invoked directly.
@@ -106,20 +104,21 @@ fn dangerous_ports_are_never_armed_or_relayed() {
     // Given: a bridge listener and every forbidden port armed by a local caller.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let bridge_port = listener.local_addr().unwrap().port();
-    let armed = forward::bridge::Armed::new();
+    let config = cfg(bridge_port);
+    let armed = forward::bridge::Armed::new(config.clone());
     let forbidden = [
         0, 80, 1_023, 2_345, 2_375, 2_376, 3_306, 5_432, 5_678, 6_379, 8_001, 9_229,
     ];
     for port in forbidden {
         armed.arm(port, Duration::from_secs(30));
     }
-    forward::bridge::spawn_with_listener(cfg(bridge_port), armed.clone(), listener);
+    forward::bridge::spawn_with_listener(config.clone(), armed.clone(), listener);
 
     // When: the local caller checks its leases and a peer requests each one.
     // Then: no lease exists and the bridge independently refuses every request.
     for port in forbidden {
         assert!(!armed.is_armed(port), "port {port} was armed");
-        assert!(forward::bridge::denied_port(bridge_port, port));
+        assert!(forward::bridge::denied_port(&config, bridge_port, port));
         let mut client = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
         writeln!(client, "CONNECT {port}").unwrap();
         assert_refused(&mut client, "REFUSED DENIED\n");
@@ -140,7 +139,7 @@ fn actual_listener_port_is_refused_even_when_config_port_differs() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let listener_port = listener.local_addr().unwrap().port();
     let configured_port = listener_port.checked_add(1).unwrap();
-    let armed = forward::bridge::Armed::new();
+    let armed = forward::bridge::Armed::new(cfg(configured_port));
     armed.arm(listener_port, Duration::from_secs(30));
     armed.arm(upstream_port, Duration::from_secs(30));
     forward::bridge::spawn_with_listener(cfg(configured_port), armed, listener);
@@ -158,7 +157,9 @@ fn actual_listener_port_is_refused_even_when_config_port_differs() {
 #[test]
 fn a_flooding_client_still_gets_its_refusal_and_frees_its_slot() {
     // Given: an unarmed bridge and a client continually writing after its request.
-    let bridge_port = super::spawn_bridge(forward::bridge::Armed::new());
+    let bridge_port = super::spawn_bridge(forward::bridge::Armed::new(
+        forward::config::Config::default_values_for_test(),
+    ));
     let client = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
     let mut reader = client.try_clone().unwrap();
     reader
@@ -167,7 +168,7 @@ fn a_flooding_client_still_gets_its_refusal_and_frees_its_slot() {
     let stop = Arc::new(AtomicBool::new(false));
     let writer_stop = Arc::clone(&stop);
     let writer = std::thread::spawn(move || {
-        let _ = (&client).write_all(b"CONNECT 12799\n");
+        let _ = (&client).write_all(b"CONNECT 0\n");
         while !writer_stop.load(Ordering::Relaxed) {
             let _ = (&client).write_all(&[0_u8; 4096]);
         }

@@ -18,6 +18,12 @@ fn missing_file_gives_defaults() {
     assert_eq!(cfg.mode, Mode::Allowlist);
     assert_eq!(cfg.opener, vec!["xdg-open".to_string()]);
     assert!(cfg.allow.is_empty());
+    assert_eq!(
+        (cfg.listen.as_str(), cfg.peer.as_str(), cfg.bridge_port),
+        ("127.0.0.1", "", 12_801)
+    );
+    assert_eq!(cfg.listen_ip().unwrap().to_string(), "127.0.0.1");
+    assert_eq!(cfg.peer_ip().unwrap(), None);
 }
 
 #[test]
@@ -39,6 +45,7 @@ relay_port = 12803
     assert!(cfg.notifier.is_empty());
     assert_eq!(cfg.forward_ttl_secs, 300);
     assert_eq!(cfg.allow.len(), 2);
+    assert_eq!((cfg.pcsc_port, cfg.grant_port), (12_804, 12_805));
 }
 
 #[test]
@@ -63,23 +70,7 @@ fn directory_errors_as_read() {
 }
 
 #[test]
-fn defaults_are_loopback() {
-    // Given: no configuration file.
-    let cfg = load(std::path::Path::new("/no/such/config.toml")).unwrap();
-
-    // When: the transport addresses are resolved.
-    // Then: they reproduce today's loopback-only behaviour, so an
-    // unconfigured install never opens a tailnet port.
-    assert_eq!(cfg.listen, "127.0.0.1");
-    assert!(cfg.peer.is_empty());
-    assert_eq!(cfg.bridge_port, 12_801);
-    assert_eq!(cfg.listen_ip().unwrap().to_string(), "127.0.0.1");
-    assert_eq!(cfg.peer_ip().unwrap(), None);
-}
-
-#[test]
 fn parses_transport_fields() {
-    // Given: both addresses written as literal tailnet addresses.
     let f = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(
         &f,
@@ -87,7 +78,6 @@ fn parses_transport_fields() {
     )
     .unwrap();
 
-    // When: the file is loaded.
     let cfg = load(f.path()).unwrap();
 
     // Then: each address parses and the bridge port is honoured.
@@ -243,4 +233,17 @@ fn production_source_contains_no_legacy_ssh_transport() {
         legacy_references.is_empty(),
         "legacy SSH transport reference(s) in production source: {legacy_references:?}"
     );
+}
+
+#[test]
+fn pcsc_and_grant_ports_default_and_parse() {
+    // This fails if the new channel ports are missing, misdefaulted, or not
+    // overridable from config.toml.
+    let cfg = Config::default_values_for_test();
+    assert_eq!(cfg.pcsc_port, 12_804);
+    assert_eq!(cfg.grant_port, 12_805);
+
+    let parsed: Config = toml::from_str("pcsc_port = 0\ngrant_port = 12905\n").unwrap();
+    assert_eq!(parsed.pcsc_port, 0);
+    assert_eq!(parsed.grant_port, 12_905);
 }

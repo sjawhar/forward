@@ -22,12 +22,15 @@ pub struct Config {
     /// Port for the browser relay channel on the laptop's tailnet address.
     #[serde(default = "default_relay_port")]
     pub relay_port: u16,
-    /// Override for the laptop's relay token file. Normally unset: the token
-    /// lives at the derived per-machine path (see [`Config::relay_token_path`]),
-    /// never in `config.toml`, which is committed to dotfiles and symlinked
-    /// into place — a secret or a machine-local path in it would be published.
-    #[serde(default)]
-    pub relay_token_file: Option<PathBuf>,
+    /// Port for the PC/SC channel: the laptop listens on it (tailnet address),
+    /// the devbox dials it. 0 disables the channel.
+    #[serde(default = "default_pcsc_port")]
+    pub pcsc_port: u16,
+    /// Port for the browser grant feed: the devbox listens on it (tailnet
+    /// address), the laptop dials and holds one persistent connection.
+    /// 0 disables the feed, which refuses every browser relay connection.
+    #[serde(default = "default_grant_port")]
+    pub grant_port: u16,
     #[serde(default)]
     pub allow: Vec<String>,
 }
@@ -93,20 +96,6 @@ impl Config {
         parse_ip("peer", &self.peer).map(Some)
     }
 
-    /// Where the laptop's relay token lives: the `relay_token_file` override
-    /// if set, else `$XDG_CONFIG_HOME/forward/relay.token`, else
-    /// `$HOME/.config/forward/relay.token` — the same derivation the binary
-    /// already uses for `config.toml` itself. `None` when no override is set
-    /// and neither variable is an absolute path; every caller treats `None`
-    /// as "no token", which refuses every relay connection.
-    pub fn relay_token_path(&self) -> Option<PathBuf> {
-        relay_token_path_from(
-            self.relay_token_file.clone(),
-            std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from),
-            std::env::var_os("HOME").map(PathBuf::from),
-        )
-    }
-
     /// Fail closed: a routable listen address without a named counterpart
     /// would accept anything that can reach it.
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -160,7 +149,8 @@ impl Config {
             peer: String::new(),
             bridge_port: default_bridge_port(),
             relay_port: default_relay_port(),
-            relay_token_file: None,
+            pcsc_port: default_pcsc_port(),
+            grant_port: default_grant_port(),
             allow: Vec::new(),
         }
     }
@@ -190,19 +180,12 @@ pub(crate) fn default_relay_port() -> u16 {
     12_803
 }
 
-fn relay_token_path_from(
-    override_path: Option<PathBuf>,
-    xdg_config_home: Option<PathBuf>,
-    home: Option<PathBuf>,
-) -> Option<PathBuf> {
-    if let Some(path) = override_path {
-        return Some(path);
-    }
-    if let Some(config_home) = xdg_config_home.filter(|path| path.is_absolute()) {
-        return Some(config_home.join("forward/relay.token"));
-    }
-    home.filter(|path| path.is_absolute())
-        .map(|home| home.join(".config/forward/relay.token"))
+pub(crate) fn default_pcsc_port() -> u16 {
+    12_804
+}
+
+pub(crate) fn default_grant_port() -> u16 {
+    12_805
 }
 
 fn parse_ip(field: &'static str, value: &str) -> Result<std::net::IpAddr, ConfigError> {
@@ -214,6 +197,3 @@ fn parse_ip(field: &'static str, value: &str) -> Result<std::net::IpAddr, Config
 
 #[cfg(test)]
 mod tests;
-
-#[cfg(test)]
-mod token_path_tests;

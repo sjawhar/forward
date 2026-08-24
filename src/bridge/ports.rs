@@ -7,12 +7,12 @@ use url::Url;
 /// Devbox loopback ports an OAuth callback for this URL may arrive on.
 ///
 /// Derived from the same `forward_ports` the laptop uses, so there is no port
-/// negotiation. Static tunnel ports are excluded: arming 12799 would expose the
-/// PC/SC socket carrying the laptop's hardware token.
-pub fn callback_ports(url: &Url) -> Vec<u16> {
+/// negotiation. forward's own service ports are excluded: arming one would
+/// let the bridge route callback bytes into a forward listener.
+pub fn callback_ports(cfg: &Config, url: &Url) -> Vec<u16> {
     let mut ports: Vec<u16> = forward_ports(url)
         .into_iter()
-        .filter(|port| is_dynamic_port(*port))
+        .filter(|port| is_dynamic_port(cfg, *port))
         .collect();
     if ports.len() > MAX_DYNAMIC_FORWARDS {
         eprintln!(
@@ -32,7 +32,7 @@ pub fn callback_ports(url: &Url) -> Vec<u16> {
 /// callback. This matches today's behaviour, where a failed forward still opens
 /// the URL.
 pub fn arm_for_url(cfg: &Config, url: &Url, socket: &Path) -> usize {
-    let ports = callback_ports(url);
+    let ports = callback_ports(cfg, url);
     if ports.is_empty() {
         return 0;
     }
@@ -61,8 +61,8 @@ mod tests {
         let url = u("http://localhost:12802/tmp/notes.md");
 
         // When: its callback ports are computed.
-        // Then: none — arming a static tunnel port would be a bridge escape.
-        assert!(callback_ports(&url).is_empty());
+        // Then: none — arming a forward service port would be a bridge escape.
+        assert!(callback_ports(&Config::default_values_for_test(), &url).is_empty());
     }
 
     #[test]
@@ -74,7 +74,10 @@ mod tests {
 
         // When: its callback ports are computed.
         // Then: the callback port is armed and nothing else is.
-        assert_eq!(callback_ports(&url), vec![8400]);
+        assert_eq!(
+            callback_ports(&Config::default_values_for_test(), &url),
+            vec![8400]
+        );
     }
 
     #[test]
@@ -87,6 +90,9 @@ mod tests {
         // When: its callback ports are computed.
         // Then: the cap holds and first-seen order is preserved, matching the
         // laptop's own cap so both sides agree on the set.
-        assert_eq!(callback_ports(&url), vec![8400, 9001, 9002, 9003]);
+        assert_eq!(
+            callback_ports(&Config::default_values_for_test(), &url),
+            vec![8400, 9001, 9002, 9003]
+        );
     }
 }

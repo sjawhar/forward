@@ -6,7 +6,10 @@ fn run_doctor_with(ports: super::DoctorPorts, relay_lines: &str) -> std::process
     let config = dir.path().join("config.toml");
     std::fs::write(
         &config,
-        format!("bridge_port = {}\n{relay_lines}", ports.bridge),
+        format!(
+            "bridge_port = {}\npcsc_port = 0\ngrant_port = 0\n{relay_lines}",
+            ports.bridge
+        ),
     )
     .unwrap();
     std::process::Command::new(env!("CARGO_BIN_EXE_forward"))

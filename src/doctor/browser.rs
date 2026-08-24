@@ -133,10 +133,10 @@ fn report_probe(
                 "browser relay: FAIL — {host}:{port}: not the configured peer — check peer on the laptop"
             ),
         ),
-        Ok(RelayEvidence::TokenFileMissing) => (
+        Ok(RelayEvidence::FeedDown) => (
             false,
             format!(
-                "browser relay: FAIL — laptop token file missing — run forward browser init-token (at {host}:{port})"
+                "browser relay: FAIL — laptop has no grant feed — is forward serve running on the devbox? (at {host}:{port})"
             ),
         ),
         Ok(RelayEvidence::TokenRequired) => (

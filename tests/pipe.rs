@@ -1,5 +1,6 @@
 use std::io::{Read, Write};
 use std::net::{Shutdown, TcpListener, TcpStream};
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -138,4 +139,39 @@ fn a_mid_copy_reset_surfaces_as_an_error() {
     // returned; a timeout here means the pipe hung instead.
     let outcome = outcome.expect("bidirectional never returned");
     assert!(outcome.is_err(), "expected an error, got {outcome:?}");
+}
+
+#[test]
+fn pipes_between_a_unix_socket_and_a_tcp_socket() {
+    // This fails if bidirectional cannot join stream types, or loses the
+    // half-close behaviour that lets a request/response finish.
+    let dir = tempfile::tempdir().unwrap();
+    let unix_path = dir.path().join("pipe.sock");
+    let unix_listener = UnixListener::bind(&unix_path).unwrap();
+    let tcp_listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let tcp_address = tcp_listener.local_addr().unwrap();
+
+    // Echo server on the TCP side.
+    let echo = std::thread::spawn(move || {
+        let (mut stream, _) = tcp_listener.accept().unwrap();
+        let mut request = Vec::new();
+        stream.read_to_end(&mut request).unwrap();
+        stream.write_all(&request).unwrap();
+    });
+    // The pipe joins the accepted unix client to a fresh TCP connection.
+    let pipe = std::thread::spawn(move || {
+        let (unix_side, _) = unix_listener.accept().unwrap();
+        let tcp_side = TcpStream::connect(tcp_address).unwrap();
+        forward::pipe::bidirectional(unix_side, tcp_side).unwrap();
+    });
+
+    let mut client = UnixStream::connect(&unix_path).unwrap();
+    client.write_all(b"ping over the pipe").unwrap();
+    client.shutdown(Shutdown::Write).unwrap();
+    let mut reply = Vec::new();
+    client.read_to_end(&mut reply).unwrap();
+
+    assert_eq!(reply, b"ping over the pipe");
+    echo.join().unwrap();
+    pipe.join().unwrap();
 }

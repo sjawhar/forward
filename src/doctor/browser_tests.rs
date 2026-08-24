@@ -143,19 +143,19 @@ fn a_token_refusal_is_proof_the_laptop_channel_is_alive() {
 }
 
 #[test]
-fn a_missing_laptop_token_file_fails_with_its_remedy() {
+fn a_missing_laptop_grant_feed_fails_with_its_remedy() {
     let cfg = Config {
         relay_port: 12_803,
         ..Config::default_values_for_test()
     };
-    let mut request = |_: &str, _: u16, _: &str| Ok(b"REFUSED TOKEN FILE\n".to_vec());
+    let mut request = |_: &str, _: u16, _: &str| Ok(b"REFUSED FEED\n".to_vec());
 
     let (healthy, line) = evaluate_with(&cfg, 12_803, 9_224, &mut request);
 
     assert!(!healthy, "got {line}");
     assert_eq!(
         line,
-        "browser relay: FAIL — laptop token file missing — run forward browser init-token (at 127.0.0.1:12803)"
+        "browser relay: FAIL — laptop has no grant feed — is forward serve running on the devbox? (at 127.0.0.1:12803)"
     );
 }
 

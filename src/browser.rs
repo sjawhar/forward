@@ -1,11 +1,9 @@
+pub mod feed;
 pub mod grant;
-pub mod init;
 pub mod peer;
 pub mod proxy;
+pub mod push;
 pub mod request;
-
-mod token;
-
 use crate::bridge::limit::ConnectionLimit;
 use crate::callback::RELAY_TARGET_PORT;
 use crate::config::Config;
@@ -16,7 +14,6 @@ use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
-
 /// The maximum idle read or blocked-write interval for a proxied CDP session.
 /// The relay sends websocket keepalives every 30s, so this only reaps dead peers.
 const PIPE_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -25,14 +22,13 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 const GENERIC_REFUSAL: &[u8] = b"REFUSED\n";
 const PEER_REFUSAL: &[u8] = b"REFUSED PEER\n";
 const BUSY_REFUSAL: &[u8] = b"REFUSED BUSY\n";
-const TOKEN_FILE_REFUSAL: &[u8] = b"REFUSED TOKEN FILE\n";
+const FEED_REFUSAL: &[u8] = b"REFUSED FEED\n";
 const TOKEN_UPSTREAM_HEALTHY_REFUSAL: &[u8] = b"REFUSED TOKEN UPSTREAM 200\n";
 const TOKEN_UPSTREAM_DOWN_REFUSAL: &[u8] = b"REFUSED TOKEN UPSTREAM 503\n";
 /// How long a connection may take to send its request line.
 const REQUEST_LINE_READ_TIMEOUT: Duration = Duration::from_secs(10);
 /// `RELAY ` plus a base64 32-byte token is 50 bytes; 128 is generous.
 const MAX_REQUEST_LINE: usize = 128;
-
 #[derive(Debug, thiserror::Error)]
 pub enum BrowserError {
     #[error("forward: failed to bind browser relay channel on {address}: {source}")]
@@ -41,20 +37,18 @@ pub enum BrowserError {
         #[source]
         source: std::io::Error,
     },
-    #[error("forward: failed to start browser relay accept loop: {source}")]
+    #[error("forward: failed to start browser relay worker: {source}")]
     Spawn {
         #[source]
         source: std::io::Error,
     },
 }
-
 /// Start the browser relay channel on the configured address.
-pub fn spawn(cfg: &Config) -> Result<(), BrowserError> {
+pub fn spawn(cfg: &Config, tokens: feed::RelayTokens) -> Result<(), BrowserError> {
     if cfg.relay_port == 0 {
         eprintln!("forward: browser relay channel disabled (relay_port = 0)");
         return Ok(());
     }
-
     let address = format!("{}:{}", cfg.listen, cfg.relay_port);
     cfg.validate().map_err(|source| BrowserError::Bind {
         address: address.clone(),
@@ -72,15 +66,16 @@ pub fn spawn(cfg: &Config) -> Result<(), BrowserError> {
     eprintln!("forward: browser relay channel on {ip}:{}", cfg.relay_port);
     spawn_with_listener(
         cfg.clone(),
+        tokens,
         listener,
         SocketAddr::from(([127, 0, 0, 1], RELAY_TARGET_PORT)),
     )
 }
-
 /// Test seam: run the browser relay on a listener the caller already bound.
 #[doc(hidden)]
 pub fn spawn_with_listener(
     cfg: Config,
+    tokens: feed::RelayTokens,
     listener: TcpListener,
     upstream: SocketAddr,
 ) -> Result<(), BrowserError> {
@@ -88,7 +83,7 @@ pub fn spawn_with_listener(
         .name("browser-relay".to_owned())
         .spawn(move || {
             let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                accept_loop(cfg, listener, upstream)
+                accept_loop(cfg, tokens, listener, upstream)
             }));
             match outcome {
                 Err(_) => eprintln!("forward: browser relay accept loop panicked; exiting"),
@@ -99,8 +94,12 @@ pub fn spawn_with_listener(
         .map(drop)
         .map_err(|source| BrowserError::Spawn { source })
 }
-
-fn accept_loop(cfg: Config, listener: TcpListener, upstream: SocketAddr) {
+fn accept_loop(
+    cfg: Config,
+    tokens: feed::RelayTokens,
+    listener: TcpListener,
+    upstream: SocketAddr,
+) {
     let limit = ConnectionLimit::standard();
     for connection in listener.incoming() {
         match connection {
@@ -113,9 +112,10 @@ fn accept_loop(cfg: Config, listener: TcpListener, upstream: SocketAddr) {
                     continue;
                 };
                 let cfg = cfg.clone();
+                let tokens = tokens.clone();
                 drop(thread::spawn(move || {
                     let _permit = permit;
-                    handle(&cfg, upstream, stream);
+                    handle(&cfg, &tokens, upstream, stream);
                 }));
             }
             Err(error) => {
@@ -125,8 +125,7 @@ fn accept_loop(cfg: Config, listener: TcpListener, upstream: SocketAddr) {
         }
     }
 }
-
-fn handle(cfg: &Config, upstream: SocketAddr, mut stream: TcpStream) {
+fn handle(cfg: &Config, tokens: &feed::RelayTokens, upstream: SocketAddr, mut stream: TcpStream) {
     let remote = match stream.peer_addr() {
         Ok(remote) => remote,
         Err(_) => {
@@ -134,33 +133,36 @@ fn handle(cfg: &Config, upstream: SocketAddr, mut stream: TcpStream) {
             return;
         }
     };
-    handle_from(cfg, upstream, remote.ip(), stream);
+    handle_from(cfg, tokens, upstream, remote.ip(), stream);
 }
-
 /// Test seam: handle a connection whose peer address is supplied by the caller.
 #[doc(hidden)]
-pub fn handle_from(cfg: &Config, upstream: SocketAddr, remote: IpAddr, mut stream: TcpStream) {
+pub fn handle_from(
+    cfg: &Config,
+    tokens: &feed::RelayTokens,
+    upstream: SocketAddr,
+    remote: IpAddr,
+    mut stream: TcpStream,
+) {
     if !authorized(cfg, remote) {
         eprintln!("forward: browser relay refused peer {remote}");
         refuse(&mut stream, PEER_REFUSAL);
         return;
     }
-
-    let Some(expected) = cfg.relay_token_path().and_then(|path| token::load(&path)) else {
-        eprintln!("forward: browser relay local token is unavailable");
-        refuse(&mut stream, TOKEN_FILE_REFUSAL);
-        return;
-    };
     let presented = read_relay_token(&mut stream, REQUEST_LINE_READ_TIMEOUT);
     let accepted = presented
         .as_deref()
-        .is_some_and(|presented| token::constant_time_eq(&expected, presented));
+        .is_some_and(|presented| tokens.accepts(presented));
     if !accepted {
+        if !tokens.is_connected() {
+            eprintln!("forward: browser relay refused {remote}: no grant feed attached");
+            refuse(&mut stream, FEED_REFUSAL);
+            return;
+        }
         eprintln!("forward: browser relay refused an untokened connection from {remote}");
         refuse(&mut stream, token_refusal(upstream));
         return;
     }
-
     let upstream_stream = match TcpStream::connect(upstream) {
         Ok(stream) => stream,
         Err(error) => {
@@ -177,7 +179,6 @@ pub fn handle_from(cfg: &Config, upstream: SocketAddr, remote: IpAddr, mut strea
         eprintln!("forward: browser relay session for {remote} ended: {error}");
     }
 }
-
 /// Report only whether the extension's status endpoint is healthy to an
 /// already-authorized peer whose token did not match.
 fn token_refusal(upstream: SocketAddr) -> &'static [u8] {
@@ -192,7 +193,6 @@ fn token_refusal(upstream: SocketAddr) -> &'static [u8] {
     {
         return TOKEN_UPSTREAM_DOWN_REFUSAL;
     }
-
     let mut status = Vec::new();
     if BufReader::new(stream)
         .read_until(b'\n', &mut status)
@@ -208,7 +208,6 @@ fn read_relay_token(stream: &mut TcpStream, timeout: Duration) -> Option<Vec<u8>
     let deadline = Instant::now().checked_add(timeout)?;
     let mut line = Vec::with_capacity(MAX_REQUEST_LINE);
     let mut byte = [0_u8; 1];
-
     while line.len() < MAX_REQUEST_LINE {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
@@ -228,7 +227,6 @@ fn read_relay_token(stream: &mut TcpStream, timeout: Duration) -> Option<Vec<u8>
     }
     None
 }
-
 fn configure_pipe_timeouts(
     left: &TcpStream,
     right: &TcpStream,

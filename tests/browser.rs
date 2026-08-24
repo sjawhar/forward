@@ -1,3 +1,4 @@
+use forward::browser::feed::RelayTokens;
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -10,13 +11,11 @@ fn cfg_with_peer(peer: &str) -> forward::config::Config {
     cfg
 }
 
-fn cfg_with_token(peer: &str, token: &str) -> (forward::config::Config, tempfile::TempDir) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("relay.token");
-    std::fs::write(&path, format!("{token}\n")).unwrap();
-    let mut cfg = cfg_with_peer(peer);
-    cfg.relay_token_file = Some(path);
-    (cfg, directory)
+fn cfg_with_token(peer: &str, token: &str) -> (forward::config::Config, RelayTokens) {
+    let tokens = RelayTokens::new();
+    tokens.insert(token.as_bytes().to_vec(), Duration::from_secs(60));
+    tokens.set_connected(true);
+    (cfg_with_peer(peer), tokens)
 }
 
 fn assert_refused(client: &mut TcpStream, expected: &str) {
@@ -53,10 +52,10 @@ fn socket_pair() -> (TcpStream, TcpStream) {
     (client, server)
 }
 
-fn spawn_relay(cfg: forward::config::Config, upstream: SocketAddr) -> u16 {
+fn spawn_relay(cfg: forward::config::Config, tokens: RelayTokens, upstream: SocketAddr) -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    forward::browser::spawn_with_listener(cfg, listener, upstream).unwrap();
+    forward::browser::spawn_with_listener(cfg, tokens, listener, upstream).unwrap();
     port
 }
 
@@ -73,6 +72,7 @@ fn read_pong(client: &mut TcpStream) {
 fn an_unauthorized_peer_is_refused_and_its_payload_never_reaches_the_upstream() {
     // Given: a foreign peer, a payload, and an upstream that must not be dialed.
     let (mut client, server) = socket_pair();
+    let tokens = RelayTokens::new();
     client.write_all(b"payload").unwrap();
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     upstream.set_nonblocking(true).unwrap();
@@ -80,6 +80,7 @@ fn an_unauthorized_peer_is_refused_and_its_payload_never_reaches_the_upstream() 
     // When: the browser relay handles the unauthorized connection.
     forward::browser::handle_from(
         &cfg_with_peer("100.64.0.9"),
+        &tokens,
         upstream.local_addr().unwrap(),
         "100.64.0.7".parse().unwrap(),
         server,
@@ -94,13 +95,34 @@ fn an_unauthorized_peer_is_refused_and_its_payload_never_reaches_the_upstream() 
 }
 
 #[test]
+fn an_unknown_token_with_no_feed_attached_is_refused_as_feed_down() {
+    // Given: an authorized peer and no grant feed connection.
+    let (mut client, server) = socket_pair();
+    let tokens = RelayTokens::new();
+    client.write_all(b"RELAY never-issued\n").unwrap();
+
+    // When: it presents a token the laptop has not received.
+    forward::browser::handle_from(
+        &cfg_with_peer("100.64.0.9"),
+        &tokens,
+        SocketAddr::from(([127, 0, 0, 1], 1)),
+        "100.64.0.9".parse().unwrap(),
+        server,
+    );
+
+    // Then: the refusal identifies the missing feed, not a normal locked state.
+    assert_refused(&mut client, "REFUSED FEED\n");
+}
+
+#[test]
 fn the_configured_peer_is_proxied_bidirectionally() {
     // Given: the configured, non-loopback peer and a pong upstream.
     let (mut client, server) = socket_pair();
-    let (cfg, _directory) = cfg_with_token("100.64.0.9", "correct-horse");
+    let (cfg, tokens) = cfg_with_token("100.64.0.9", "correct-horse");
     let handler = thread::spawn(move || {
         forward::browser::handle_from(
             &cfg,
+            &tokens,
             spawn_pong_upstream(),
             "100.64.0.9".parse().unwrap(),
             server,
@@ -120,10 +142,11 @@ fn the_configured_peer_is_proxied_bidirectionally() {
 fn a_mapped_ipv6_peer_matches_the_configured_ipv4_peer() {
     // Given: an IPv4 configured peer represented as a mapped IPv6 remote.
     let (mut client, server) = socket_pair();
-    let (cfg, _directory) = cfg_with_token("100.64.0.9", "correct-horse");
+    let (cfg, tokens) = cfg_with_token("100.64.0.9", "correct-horse");
     let handler = thread::spawn(move || {
         forward::browser::handle_from(
             &cfg,
+            &tokens,
             spawn_pong_upstream(),
             "::ffff:100.64.0.9".parse::<IpAddr>().unwrap(),
             server,
@@ -140,8 +163,8 @@ fn a_mapped_ipv6_peer_matches_the_configured_ipv4_peer() {
 #[test]
 fn a_loopback_client_stays_authorized_for_local_tooling() {
     // Given: a real listener and a configuration naming only a remote peer.
-    let (cfg, _directory) = cfg_with_token("100.64.0.9", "correct-horse");
-    let relay = spawn_relay(cfg, spawn_pong_upstream());
+    let (cfg, tokens) = cfg_with_token("100.64.0.9", "correct-horse");
+    let relay = spawn_relay(cfg, tokens, spawn_pong_upstream());
     let mut client = TcpStream::connect(("127.0.0.1", relay)).unwrap();
 
     // When/Then: the local doctor-style client is still proxied end to end.
@@ -163,8 +186,8 @@ fn half_close_propagates_in_each_direction() {
         stream.write_all(b"gone").unwrap();
         stream.shutdown(Shutdown::Write).unwrap();
     });
-    let (cfg, _directory) = cfg_with_token("100.64.0.9", "correct-horse");
-    let relay = spawn_relay(cfg, upstream_address);
+    let (cfg, tokens) = cfg_with_token("100.64.0.9", "correct-horse");
+    let relay = spawn_relay(cfg, tokens, upstream_address);
     let mut client = TcpStream::connect(("127.0.0.1", relay)).unwrap();
 
     // When: the client half-closes after its tokened request.
@@ -190,8 +213,8 @@ fn an_absent_upstream_closes_the_connection_without_killing_the_accept_loop() {
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let upstream = probe.local_addr().unwrap();
     drop(probe);
-    let (cfg, _directory) = cfg_with_token("100.64.0.9", "correct-horse");
-    let relay = spawn_relay(cfg, upstream);
+    let (cfg, tokens) = cfg_with_token("100.64.0.9", "correct-horse");
+    let relay = spawn_relay(cfg, tokens, upstream);
 
     // When: the first tokened client reaches the absent upstream. The token
     // gate now precedes the dial, so an untokened client would see

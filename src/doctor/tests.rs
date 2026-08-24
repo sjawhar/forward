@@ -1,21 +1,20 @@
 use super::browser::{RelayEvidence, classify};
 use super::*;
 use crate::bridge::denied_port;
-use crate::callback::PCSC_PORT;
 use crate::config::Config;
 use std::net::TcpListener;
 use std::thread;
 
 #[test]
 fn the_bridge_probe_asks_for_a_permanently_denylisted_port() {
-    // Given: the default configuration.
+    // Given: a configuration with any service port overrides.
     let cfg = Config::default_values_for_test();
 
     // When: the port the bridge probe requests is put through the gate.
     // Then: it is denylisted, so the probe can never reach anything. If the
     // denylist ever stops covering it, this fails loudly instead of the
-    // probe quietly becoming a real connection request for a hardware token.
-    assert!(denied_port(cfg.bridge_port, PCSC_PORT));
+    // probe quietly becoming a real connection request.
+    assert!(denied_port(&cfg, cfg.bridge_port, 0));
 }
 
 #[test]
@@ -78,6 +77,7 @@ fn classifies_browser_relay_responses() {
     assert_eq!(classify(b"REFUSED PEER\n"), Ok(RelayEvidence::PeerRefused));
     assert_eq!(classify(b"REFUSED\n"), Ok(RelayEvidence::UpstreamDown));
     assert_eq!(classify(b"REFUSED BUSY\n"), Ok(RelayEvidence::Busy));
+    assert_eq!(classify(b"REFUSED FEED\n"), Ok(RelayEvidence::FeedDown));
     assert_eq!(
         classify(b"HTTP/1.1 200 OK\r\n\r\n{}"),
         Ok(RelayEvidence::Healthy)

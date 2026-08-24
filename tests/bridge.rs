@@ -65,7 +65,7 @@ fn assert_refused(client: &mut TcpStream, expected: &str) {
 fn hops_to_an_armed_loopback_port() {
     // Given: a loopback-only upstream, armed on the bridge.
     let upstream_port = spawn_echo_upstream();
-    let armed = forward::bridge::Armed::new();
+    let armed = forward::bridge::Armed::new(forward::config::Config::default_values_for_test());
     armed.arm(upstream_port, Duration::from_secs(30));
     let bridge_port = spawn_bridge(armed);
 
@@ -85,7 +85,7 @@ fn hops_to_an_armed_loopback_port() {
 fn payload_in_the_same_packet_as_the_request_line_still_reaches_the_upstream() {
     // Given: the same armed loopback-only upstream.
     let upstream_port = spawn_echo_upstream();
-    let armed = forward::bridge::Armed::new();
+    let armed = forward::bridge::Armed::new(forward::config::Config::default_values_for_test());
     armed.arm(upstream_port, Duration::from_secs(30));
     let bridge_port = spawn_bridge(armed);
 
@@ -107,7 +107,9 @@ fn payload_in_the_same_packet_as_the_request_line_still_reaches_the_upstream() {
 #[test]
 fn refuses_an_unarmed_port() {
     // Given: a bridge with nothing armed.
-    let bridge_port = spawn_bridge(forward::bridge::Armed::new());
+    let bridge_port = spawn_bridge(forward::bridge::Armed::new(
+        forward::config::Config::default_values_for_test(),
+    ));
 
     // When: a client asks for a port anyway.
     let mut client = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
@@ -120,40 +122,72 @@ fn refuses_an_unarmed_port() {
 
 #[test]
 fn refuses_denylisted_ports_even_when_armed() {
-    // Given: the PC/SC port armed by mistake. Devbox loopback 12799 is the far
-    // end of the SSH tunnel carrying the laptop's hardware token.
-    let armed = forward::bridge::Armed::new();
-    armed.arm(12_799, Duration::from_secs(30));
-    let bridge_port = spawn_bridge(armed);
+    // Given: a bridge whose config moves the relay port, and an armed set
+    // built under a stale default config that would let that port through.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let bridge_port = listener.local_addr().unwrap().port();
+    let mut bridge_cfg = cfg(bridge_port);
+    bridge_cfg.relay_port = 12_911;
+    let armed = forward::bridge::Armed::new(cfg(bridge_port));
+    assert!(
+        armed.arm(12_911, Duration::from_secs(30)),
+        "the stale policy must accept it, or this test proves nothing"
+    );
+    forward::bridge::spawn_with_listener(bridge_cfg, armed, listener);
 
-    // When: a client asks for it.
+    // When: a client asks for the effective relay port.
     let mut client = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
-    client.write_all(b"CONNECT 12799\n").unwrap();
+    client.write_all(b"CONNECT 12911\n").unwrap();
 
-    // Then: the denylist refuses it regardless of the armed set, so an arming
-    // mistake cannot expose the token.
+    // Then: the connect-time denylist refuses it regardless of the armed set,
+    // so neither an arming mistake nor a stale arming policy can expose a
+    // forward service listener.
+    assert_refused(&mut client, "REFUSED DENIED\n");
+}
+
+#[test]
+fn default_relay_port_is_refused_at_connect_time_when_stale_policy_armed_it() {
+    // Given: the default relay port armed under a config that moved that
+    // service elsewhere. This makes the arm gate accept it before the bridge
+    // starts with the effective default config.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let bridge_port = listener.local_addr().unwrap().port();
+    let bridge_cfg = cfg(bridge_port);
+    let mut stale_cfg = cfg(bridge_port);
+    stale_cfg.relay_port = 12_911;
+    let armed = forward::bridge::Armed::new(stale_cfg);
+    assert!(armed.arm(12_803, Duration::from_secs(30)));
+    forward::bridge::spawn_with_listener(bridge_cfg, armed, listener);
+
+    // When/Then: the bridge refuses the default relay listener before dialing
+    // it, even though its stale armed set contains the port.
+    let mut client = TcpStream::connect(("127.0.0.1", bridge_port)).unwrap();
+    client.write_all(b"CONNECT 12803\n").unwrap();
     assert_refused(&mut client, "REFUSED DENIED\n");
 }
 
 #[test]
 fn denylist_covers_forwards_own_ports() {
-    // Given: a bridge listening on its default port.
-    let bridge_port = 12_801;
+    // Given: a bridge on its default port with an otherwise default config.
+    let config = cfg(12_801);
 
-    // When/Then: the token socket, the URL channel, the file preview and the
-    // bridge itself are all refused; an ordinary callback port is not. The
-    // listener port is explicit so a stale Config value cannot bypass it.
-    assert!(forward::bridge::denied_port(bridge_port, 12_799));
-    assert!(forward::bridge::denied_port(bridge_port, 12_800));
-    assert!(forward::bridge::denied_port(bridge_port, bridge_port));
-    assert!(forward::bridge::denied_port(bridge_port, 12_802));
-    assert!(!forward::bridge::denied_port(bridge_port, 8_400));
+    // When/Then: the URL channel, the bridge itself, the file preview, the
+    // browser relay, the pcsc channel, and the grant feed are all refused; an
+    // ordinary callback port is not. The listener port stays an explicit
+    // argument so a stale Config value cannot bypass it.
+    for port in [12_800, 12_801, 12_802, 12_803, 12_804, 12_805] {
+        assert!(
+            forward::bridge::denied_port(&config, 12_801, port),
+            "port {port} was not denied"
+        );
+    }
+    assert!(!forward::bridge::denied_port(&config, 12_801, 8_400));
 }
 
 #[test]
 fn refuses_a_malformed_request_line() {
     // Given: an armed port and a client that speaks HTTP at the bridge.
-    let armed = forward::bridge::Armed::new();
+    let armed = forward::bridge::Armed::new(forward::config::Config::default_values_for_test());
     armed.arm(8_400, Duration::from_secs(30));
     let bridge_port = spawn_bridge(armed);
 
@@ -168,7 +202,7 @@ fn refuses_a_malformed_request_line() {
 #[test]
 fn refuses_a_request_line_with_no_newline() {
     // Given: an armed port, so only the missing newline can refuse the request.
-    let armed = forward::bridge::Armed::new();
+    let armed = forward::bridge::Armed::new(forward::config::Config::default_values_for_test());
     armed.arm(8_400, Duration::from_secs(30));
     let bridge_port = spawn_bridge(armed);
 

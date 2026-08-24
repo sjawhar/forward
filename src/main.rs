@@ -64,7 +64,7 @@ enum Command {
         #[arg(long, default_value_t = FILES_PORT)]
         files_port: u16,
     },
-    /// Manage browser access (laptop: init-token)
+    /// Manage browser access
     Browser {
         #[command(subcommand)]
         action: BrowserCommand,
@@ -73,12 +73,6 @@ enum Command {
 
 #[derive(Subcommand)]
 enum BrowserCommand {
-    /// Generate the relay token, store it, and print it once (laptop side)
-    InitToken {
-        #[arg(long)]
-        config: Option<std::path::PathBuf>,
-    },
-
     /// Request browser access for this session (devbox side)
     Grant {
         /// Grant lifetime, for example 45s, 30m, or 2h
@@ -117,15 +111,24 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Serve { port, config } => {
             let (cfg, _) = load_config(config)?;
-            let armed = bridge::Armed::new();
+            // PC/SC binds under a temporary process-wide umask, so start it
+            // before any service thread can create a file.
+            forward::pcsc::devbox::spawn(&cfg).unwrap_or_else(|error| exit_with_error(error));
+            let armed = bridge::Armed::new(cfg.clone());
             bridge::serve_arming(armed.clone(), bridge::arm_socket_path());
             let grants = forward::browser::grant::Grants::new();
+            let slot = forward::browser::push::FeedSlot::new();
+            forward::browser::push::spawn_listener(&cfg, slot.clone(), grants.clone())
+                .unwrap_or_else(|error| exit_with_error(error));
             let grant_cfg = cfg.clone();
+            let grant_slot = slot.clone();
+            let grant_grants = grants.clone();
             drop(std::thread::spawn(move || {
                 forward::browser::request::serve(
-                    grants,
+                    grant_grants,
                     grant_cfg,
                     forward::browser::request::socket_path(),
+                    grant_slot,
                 );
             }));
             let bridge_cfg = cfg.clone();
@@ -143,33 +146,20 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Browser { action } => match action {
-            BrowserCommand::InitToken { config } => {
-                let (cfg, _) = load_config(config)?;
-                let path = cfg.relay_token_path().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "forward: cannot resolve the relay token path: relay_token_file is unset and neither XDG_CONFIG_HOME nor HOME is an absolute path"
-                    )
-                })?;
-                let value = forward::browser::init::write_token(&path)?;
-                let mut stdout = std::io::stdout().lock();
-                writeln!(stdout, "{value}")?;
-                Ok(())
-            }
             BrowserCommand::Grant { ttl, config } => {
                 let _ = load_config(config)?;
-                let Ok(token) = std::env::var("FORWARD_BROWSER_GRANT") else {
-                    eprintln!("forward: FORWARD_BROWSER_GRANT is not set; run");
-                    eprintln!("  secrets FORWARD_BROWSER_GRANT -- forward browser grant --ttl 30m");
-                    std::process::exit(1);
-                };
                 let Some(ttl_secs) = forward::browser::request::parse_ttl(&ttl) else {
                     eprintln!("forward: invalid --ttl {ttl:?}; use 45s, 30m, or 2h");
                     std::process::exit(1);
                 };
+                // The broker runs the YubiKey ceremony; this blocks through
+                // the touch window and prints nothing until it resolves.
+                let receipt = forward::secretsd::authorize(forward::secretsd::CAP_BROWSER)
+                    .unwrap_or_else(|error| exit_with_error(error));
                 let socket = forward::browser::request::socket_path();
-                let Some(port) =
-                    forward::browser::request::request(&socket, ttl_secs, token.as_bytes())
-                else {
+                let granted = forward::browser::request::request(&socket, ttl_secs, &receipt);
+                drop(receipt);
+                let Some(port) = granted else {
                     eprintln!(
                         "forward: grant refused, or no forward serve at {}",
                         socket.display()
