@@ -117,6 +117,9 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Serve { port, config } => {
             let (cfg, _) = load_config(config)?;
+            // PC/SC binds under a temporary process-wide umask, so start it
+            // before any service thread can create a file.
+            forward::pcsc::devbox::spawn(&cfg).unwrap_or_else(|error| exit_with_error(error));
             let armed = bridge::Armed::new();
             bridge::serve_arming(armed.clone(), bridge::arm_socket_path());
             let grants = forward::browser::grant::Grants::new();
@@ -134,7 +137,6 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("{error}");
                 }
             }));
-            forward::pcsc::devbox::spawn(&cfg).unwrap_or_else(|error| exit_with_error(error));
             serve::run(&cfg, port).unwrap_or_else(|error| exit_with_error(error));
             Ok(())
         }

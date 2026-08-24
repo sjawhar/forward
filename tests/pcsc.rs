@@ -6,6 +6,8 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+#[path = "pcsc/devbox_paths.rs"]
+mod devbox_paths;
 
 fn cfg() -> Config {
     Config::default_values_for_test()

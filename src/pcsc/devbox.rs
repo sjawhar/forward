@@ -6,9 +6,10 @@ use super::{ACCEPT_ERROR_BACKOFF, CONNECT_TIMEOUT, PcscError};
 use crate::bridge::limit::ConnectionLimit;
 use crate::config::Config;
 use crate::pipe::{bidirectional, keepalive};
+use nix::sys::stat::{Mode, umask};
 use std::io;
 use std::net::{SocketAddr, TcpStream};
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::FileTypeExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -35,10 +36,7 @@ pub fn spawn(cfg: &Config) -> Result<(), PcscError> {
 
     let path = socket_path().ok_or(PcscError::Home)?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| PcscError::Socket {
-            path: path.clone(),
-            source,
-        })?;
+        std::fs::create_dir_all(parent).map_err(|source| socket_error(&path, source))?;
     }
     let listener = bind_socket(&path)?;
     let upstream = SocketAddr::new(peer, cfg.pcsc_port);
@@ -49,28 +47,91 @@ pub fn spawn(cfg: &Config) -> Result<(), PcscError> {
     spawn_with_unix_listener(listener, upstream)
 }
 
-/// Bind the compatibility socket without disrupting a working predecessor.
-fn bind_socket(path: &Path) -> Result<UnixListener, PcscError> {
-    let socket_error = |source| PcscError::Socket {
+fn socket_error(path: &Path, source: io::Error) -> PcscError {
+    PcscError::Socket {
         path: path.to_owned(),
         source,
-    };
+    }
+}
 
+/// Bind the compatibility socket without disrupting a working predecessor.
+fn bind_socket(path: &Path) -> Result<UnixListener, PcscError> {
     match UnixStream::connect(path) {
-        Ok(_) => return Err(socket_error(io::Error::from(io::ErrorKind::AddrInUse))),
-        // A refused unix-stream connection is the kernel's stale-socket signal.
-        // Do not remove any other failure: it may be a live, overloaded, or
-        // inaccessible service, and migration must never disrupt one.
-        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
-            std::fs::remove_file(path).map_err(socket_error)?;
+        Ok(_) => {
+            return Err(socket_error(
+                path,
+                io::Error::from(io::ErrorKind::AddrInUse),
+            ));
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(source) => return Err(socket_error(source)),
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+            remove_stale_socket(path, error)?;
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            match std::fs::symlink_metadata(path) {
+                Err(source) if source.kind() == io::ErrorKind::NotFound => {}
+                Ok(_) => return Err(socket_error(path, error)),
+                Err(source) => return Err(socket_error(path, source)),
+            }
+        }
+        Err(source) => return Err(socket_error(path, source)),
     }
 
-    let listener = UnixListener::bind(path).map_err(socket_error)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).map_err(socket_error)?;
-    Ok(listener)
+    bind_listener(path).map_err(|source| socket_error(path, source))
+}
+
+/// Remove only a socket that remains unserved at the final check.
+fn remove_stale_socket(path: &Path, initial_error: io::Error) -> Result<(), PcscError> {
+    if !path_is_socket(path, initial_error)? {
+        return Ok(());
+    }
+
+    match UnixStream::connect(path) {
+        Ok(_) => Err(socket_error(
+            path,
+            io::Error::from(io::ErrorKind::AddrInUse),
+        )),
+        Err(error) if error.kind() == io::ErrorKind::ConnectionRefused => {
+            if !path_is_socket(path, error)? {
+                return Ok(());
+            }
+            // Cutover ordering serializes a competing socat restart. This
+            // recheck narrows, but cannot eliminate, the final syscall race.
+            match std::fs::remove_file(path) {
+                Ok(()) => Ok(()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+                Err(source) => Err(socket_error(path, source)),
+            }
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(socket_error(path, source)),
+    }
+}
+
+/// Return false only when the path disappeared; all non-socket entries keep
+/// their original connection error rather than being treated as stale.
+fn path_is_socket(path: &Path, original_error: io::Error) -> Result<bool, PcscError> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_socket() => Ok(true),
+        Ok(_) => Err(socket_error(path, original_error)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(source) => Err(socket_error(path, source)),
+    }
+}
+
+struct UmaskRestore(Mode);
+
+impl Drop for UmaskRestore {
+    fn drop(&mut self) {
+        umask(self.0);
+    }
+}
+
+/// `0177` makes UnixListener's `0777` creation mode exactly `0600`.
+fn bind_listener(path: &Path) -> io::Result<UnixListener> {
+    let restore = UmaskRestore(umask(Mode::from_bits_truncate(0o177)));
+    let listener = UnixListener::bind(path);
+    drop(restore);
+    listener
 }
 
 /// Test seam: accept on a unix listener the caller already bound.
@@ -130,11 +191,20 @@ fn accept_loop(listener: UnixListener, upstream: SocketAddr) {
 }
 
 fn handle(upstream: SocketAddr, stream: UnixStream) {
+    handle_with_dial(upstream, stream, |address, timeout| {
+        TcpStream::connect_timeout(&address, timeout)
+    });
+}
+
+fn handle_with_dial<F>(upstream: SocketAddr, stream: UnixStream, dial: F)
+where
+    F: FnOnce(SocketAddr, std::time::Duration) -> io::Result<TcpStream>,
+{
     // Fail loud and fast: an immediate close is what pcsc clients already
     // treat as "no service", exactly like the retired bridge when its tunnel
     // was down. secretsd's probe and stderr classifier turn that into
     // YUBIKEY_UNREACHABLE before any request queues.
-    let laptop = match TcpStream::connect_timeout(&upstream, CONNECT_TIMEOUT) {
+    let laptop = match dial(upstream, CONNECT_TIMEOUT) {
         Ok(laptop) => laptop,
         Err(error) => {
             eprintln!("forward: pcsc channel: laptop {upstream} unreachable: {error}");
@@ -151,18 +221,4 @@ fn handle(upstream: SocketAddr, stream: UnixStream) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::listener_spawn_result;
-    use crate::pcsc::PcscError;
-    use std::io;
-
-    #[test]
-    fn listener_thread_spawn_failure_is_reported() {
-        let error =
-            listener_spawn_result(Err(io::Error::other("thread limit"))).expect_err("must fail");
-
-        assert!(
-            matches!(error, PcscError::Spawn { source } if source.kind() == io::ErrorKind::Other)
-        );
-    }
-}
+mod tests;
