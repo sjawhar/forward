@@ -1,9 +1,9 @@
 use crate::config::Config;
 use std::os::unix::net::UnixStream;
 
-/// The devbox unix leg: `~/.pcscd/pcscd.comm` must accept when this machine
-/// relays a peer. On machines without the marker directory (the laptop) the
-/// row is informational and always healthy.
+/// The devbox Unix leg lives at `~/.pcscd/pcscd.comm`. A successful probe
+/// reports only that the path accepted a connection; it cannot attribute the
+/// listener or verify its configured relay target.
 pub(super) fn report(cfg: &Config) -> bool {
     let (healthy, line) = evaluate(
         cfg,
@@ -34,15 +34,7 @@ fn evaluate(cfg: &Config, socket: Option<std::path::PathBuf>) -> (bool, String) 
         );
     }
     match UnixStream::connect(&path) {
-        Ok(_) => (
-            true,
-            format!(
-                "pcsc socket: {} accepts (relaying to {}:{})",
-                path.display(),
-                cfg.peer,
-                cfg.pcsc_port
-            ),
-        ),
+        Ok(_) => (true, format!("pcsc socket: {} accepts", path.display())),
         Err(error) => (
             false,
             format!(
@@ -80,8 +72,9 @@ mod tests {
         assert!(line.contains("is forward serve running?"));
 
         let _listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let expected = format!("pcsc socket: {} accepts", path.display());
         let (healthy, line) = evaluate(&cfg, Some(path));
         assert!(healthy, "{line}");
-        assert!(line.contains("accepts"));
+        assert_eq!(line, expected);
     }
 }

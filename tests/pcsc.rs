@@ -13,6 +13,15 @@ fn cfg() -> Config {
     Config::default_values_for_test()
 }
 
+fn tempdir() -> tempfile::TempDir {
+    // devbox::spawn temporarily changes the process-wide umask. A tempfile
+    // directory created during that window can lose its execute bit.
+    let _lock = PROCESS_STATE_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    tempfile::tempdir().unwrap()
+}
+
 fn unix_echo(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("pcscd.comm");
     let listener = UnixListener::bind(&path).unwrap();
@@ -33,7 +42,7 @@ fn unix_echo(dir: &std::path::Path) -> std::path::PathBuf {
 fn laptop_channel_pipes_raw_bytes_to_the_pcscd_socket() {
     // This fails if the channel parses, frames, or injects anything: pcscd
     // bytes must arrive verbatim and flow back.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let upstream = unix_echo(dir.path());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -52,7 +61,7 @@ fn laptop_channel_pipes_raw_bytes_to_the_pcscd_socket() {
 fn laptop_channel_refuses_an_unauthorized_peer_with_a_bare_close() {
     // This fails if a non-peer address is served, or if the refusal writes
     // bytes into a protocol that has no place for them.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let upstream = unix_echo(dir.path());
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();
@@ -113,13 +122,13 @@ fn disabled_laptop_channel_does_not_resolve_or_bind_its_listener() {
     assert!(forward::pcsc::laptop::spawn(&config).is_ok());
 }
 
-static HOME_LOCK: Mutex<()> = Mutex::new(());
+static PROCESS_STATE_LOCK: Mutex<()> = Mutex::new(());
 
 struct HomeRestore(Option<std::ffi::OsString>);
 
 impl Drop for HomeRestore {
     fn drop(&mut self) {
-        // SAFETY: HOME is protected by HOME_LOCK for every test that mutates it.
+        // SAFETY: HOME is protected by PROCESS_STATE_LOCK for every test that mutates it.
         unsafe {
             match self.0.as_ref() {
                 Some(home) => std::env::set_var("HOME", home),
@@ -130,11 +139,11 @@ impl Drop for HomeRestore {
 }
 
 fn with_home<T>(home: &std::path::Path, test: impl FnOnce() -> T) -> T {
-    let lock = HOME_LOCK
+    let lock = PROCESS_STATE_LOCK
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let restore = HomeRestore(std::env::var_os("HOME"));
-    // SAFETY: HOME is protected by HOME_LOCK for every test that mutates it.
+    // SAFETY: HOME is protected by PROCESS_STATE_LOCK for every test that mutates it.
     unsafe { std::env::set_var("HOME", home) };
     let result = test();
     drop(restore);
@@ -145,7 +154,7 @@ fn with_home<T>(home: &std::path::Path, test: impl FnOnce() -> T) -> T {
 #[test]
 fn devbox_socket_pipes_raw_bytes_to_the_laptop_leg() {
     // This fails if the devbox leg frames, drops, or reorders pcscd bytes.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let socket = dir.path().join("pcscd.comm");
     let laptop = TcpListener::bind("127.0.0.1:0").unwrap();
     let laptop_address = laptop.local_addr().unwrap();
@@ -171,7 +180,7 @@ fn devbox_socket_pipes_raw_bytes_to_the_laptop_leg() {
 fn devbox_socket_closes_fast_when_the_laptop_is_unreachable() {
     // This fails if an unreachable laptop hangs pcsc clients instead of the
     // immediate loud failure secretsd's classifier expects.
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let socket = dir.path().join("pcscd.comm");
     // A bound-then-dropped port refuses connections immediately.
     let dead = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -198,7 +207,7 @@ fn devbox_socket_closes_fast_when_the_laptop_is_unreachable() {
 
 #[test]
 fn devbox_spawn_replaces_a_stale_socket_with_mode_0600() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let socket = dir.path().join(".pcscd/pcscd.comm");
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     drop(UnixListener::bind(&socket).unwrap());
@@ -216,7 +225,7 @@ fn devbox_spawn_replaces_a_stale_socket_with_mode_0600() {
 
 #[test]
 fn devbox_spawn_does_not_replace_a_live_socket() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let socket = dir.path().join(".pcscd/pcscd.comm");
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     let _live = UnixListener::bind(&socket).unwrap();

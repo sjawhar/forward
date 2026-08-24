@@ -1,8 +1,8 @@
-use super::{cfg, with_home};
+use super::{cfg, tempdir, with_home};
 
 #[test]
 fn devbox_spawn_preserves_non_socket_paths() {
-    let dir = tempfile::tempdir().unwrap();
+    let dir = tempdir();
     let socket = dir.path().join(".pcscd/pcscd.comm");
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     std::fs::write(&socket, b"do not delete").unwrap();
