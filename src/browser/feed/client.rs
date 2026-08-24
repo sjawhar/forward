@@ -8,6 +8,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
+/// Past the outage budget the peer is down, not blipping; keep dialing, but at
+/// a cadence that will not spam the journal for the length of a real outage.
+const OUTAGE_RECONNECT_BACKOFF: Duration = Duration::from_secs(60);
 pub(super) const MAX_UNHEALTHY_FEED: Duration = Duration::from_secs(30);
 const MAX_FEED_LINE: u64 = 128;
 /// A feed that stays attached for a full outage window is useful even without
@@ -65,25 +68,41 @@ fn worker(address: SocketAddr, tokens: RelayTokens) {
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client_loop(address, &tokens)
     }));
-    match outcome {
-        Err(_) => eprintln!("forward: grant feed worker panicked; exiting"),
-        Ok(()) => eprintln!("forward: grant feed reconnect budget exhausted; exiting"),
+    if outcome.is_err() {
+        eprintln!("forward: grant feed worker panicked; exiting");
     }
     std::process::exit(1);
 }
 
-fn client_loop(address: SocketAddr, tokens: &RelayTokens) {
+fn client_loop(address: SocketAddr, tokens: &RelayTokens) -> ! {
     let mut failures = ReconnectBudget::default();
+    let mut in_outage = false;
     loop {
         match run_once(address, tokens, &mut failures) {
             Ok(()) => eprintln!("forward: grant feed to {address} closed"),
             Err(error) => eprintln!("forward: grant feed to {address} failed: {error}"),
         }
         tokens.set_connected(false);
-        if failures.failed_at(Instant::now()) {
-            return;
+        thread::sleep(next_backoff(&mut failures, &mut in_outage, Instant::now()));
+    }
+}
+
+/// An exhausted outage budget slows the dial cadence instead of exiting: the
+/// feed is one channel of the laptop daemon, and an unreachable devbox must
+/// not take the URL opener and browser relay down with it.
+fn next_backoff(failures: &mut ReconnectBudget, in_outage: &mut bool, now: Instant) -> Duration {
+    if failures.failed_at(now) {
+        if !*in_outage {
+            eprintln!(
+                "forward: grant feed outage budget exhausted; dialing every {}s until the peer returns",
+                OUTAGE_RECONNECT_BACKOFF.as_secs()
+            );
         }
-        thread::sleep(RECONNECT_BACKOFF);
+        *in_outage = true;
+        OUTAGE_RECONNECT_BACKOFF
+    } else {
+        *in_outage = false;
+        RECONNECT_BACKOFF
     }
 }
 
@@ -135,72 +154,4 @@ fn parse_token_line(line: &str) -> Option<(Vec<u8>, u64)> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::net::TcpListener;
-
-    #[test]
-    fn a_parsed_feed_token_resets_a_prior_outage() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (mut stream, _) = listener.accept().unwrap();
-            let mut greeting = String::new();
-            BufReader::new(stream.try_clone().unwrap())
-                .read_line(&mut greeting)
-                .unwrap();
-            assert_eq!(greeting, "FEED\n");
-            stream.write_all(b"TOKEN relay-token 30\n").unwrap();
-            let mut ack = [0_u8; 3];
-            stream.read_exact(&mut ack).unwrap();
-            assert_eq!(ack, *b"OK\n");
-        });
-        let tokens = RelayTokens::new();
-        let now = Instant::now();
-        let mut failures = ReconnectBudget {
-            unhealthy_since: Some(now - MAX_UNHEALTHY_FEED),
-        };
-
-        run_once(address, &tokens, &mut failures).unwrap();
-        server.join().unwrap();
-
-        assert!(!failures.failed_at(Instant::now()));
-    }
-
-    #[test]
-    fn greet_then_close_preserves_an_exhausted_outage_budget() {
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = listener.local_addr().unwrap();
-        let server = thread::spawn(move || {
-            let (stream, _) = listener.accept().unwrap();
-            let mut greeting = String::new();
-            BufReader::new(stream).read_line(&mut greeting).unwrap();
-            assert_eq!(greeting, "FEED\n");
-        });
-        let tokens = RelayTokens::new();
-        let now = Instant::now();
-        let mut failures = ReconnectBudget {
-            unhealthy_since: Some(now - MAX_UNHEALTHY_FEED),
-        };
-
-        run_once(address, &tokens, &mut failures).unwrap();
-        server.join().unwrap();
-
-        assert!(
-            failures.failed_at(Instant::now()),
-            "a greeting followed by close must not reset the outage budget"
-        );
-    }
-
-    #[test]
-    fn a_long_lived_idle_feed_resets_a_prior_outage() {
-        let now = Instant::now();
-        let mut failures = ReconnectBudget {
-            unhealthy_since: Some(now - MAX_UNHEALTHY_FEED),
-        };
-
-        failures.restored_if_long_lived(now - MIN_USEFUL_FEED_LIFETIME);
-
-        assert!(!failures.failed_at(Instant::now()));
-    }
-}
+mod tests;

@@ -61,3 +61,46 @@ fn the_daemon_serves_the_channel_it_announces_when_the_feed_is_down() {
     assert_eq!(response, b"REFUSED FEED\n");
     drop(connect(port));
 }
+
+#[test]
+fn the_url_channel_survives_a_feed_outage_past_the_reconnect_budget() {
+    // Given: a feed peer that greets and closes, the exact flapper that can
+    // never reset the reconnect budget. The old client exited the whole daemon
+    // once that budget ran out, taking the URL channel down with it.
+    let dir = tempfile::tempdir().unwrap();
+    let grant_port = test_port();
+    let flapper = TcpListener::bind(("127.0.0.1", grant_port)).unwrap();
+    std::thread::spawn(move || {
+        for stream in flapper.incoming() {
+            drop(stream);
+        }
+    });
+    let config = format!(
+        "peer = \"127.0.0.1\"\nrelay_port = {}\npcsc_port = {}\ngrant_port = {grant_port}\n",
+        test_port(),
+        test_port(),
+    );
+
+    // When: the daemon runs past its whole 30-second reconnect budget. This is
+    // the one deliberately slow test in the suite: the budget is wall-clock
+    // time, and shrinking it would need a knob in production code.
+    let (daemon, port) = start(dir.path(), &config);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !daemon.log().contains("grant feed outage budget exhausted") {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no outage escalation within 60s; daemon logs: {:?}",
+            daemon.log()
+        );
+        std::thread::sleep(std::time::Duration::from_millis(500));
+    }
+
+    // Then: past the point where the old client called exit(1), the daemon
+    // still serves its URL channel and reports no worker exit.
+    drop(connect(port));
+    assert!(
+        !daemon.log().contains("exiting"),
+        "a worker exited during the outage; daemon logs: {:?}",
+        daemon.log()
+    );
+}
