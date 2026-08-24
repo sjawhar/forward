@@ -146,6 +146,7 @@ pub(crate) fn ok_fields(reply: &str, verb: Verb<'_>) -> Result<Zeroizing<String>
         ("DENIED", Verb::Redeem) => BrokerError::ReceiptRejected,
         ("TIMEOUT", Verb::Authorize { .. }) => BrokerError::Timeout,
         ("YUBIKEY_UNREACHABLE", Verb::Authorize { .. }) => BrokerError::YubikeyUnreachable,
+        ("TOO_MANY_PENDING", Verb::Authorize { .. }) => BrokerError::TooManyPending,
         ("NOT_HUMAN_KEY" | "AMBIGUOUS_KEY", Verb::Authorize { cap }) => {
             BrokerError::NotProvisioned(cap.to_owned(), cap.to_ascii_uppercase())
         }

@@ -5,6 +5,7 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
+use zeroize::Zeroizing;
 
 const TOKEN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -84,7 +85,7 @@ impl FakeBroker {
     }
 }
 
-fn authorize(broker: &FakeBroker) -> Result<Vec<u8>, BrokerError> {
+fn authorize(broker: &FakeBroker) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
     let token_file = broker.dir.path().join("token");
     std::fs::write(&token_file, TOKEN).unwrap();
     let _environment = AuthorizeEnvironment::set(&broker.path, &token_file);

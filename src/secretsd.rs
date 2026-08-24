@@ -49,6 +49,10 @@ pub enum BrokerError {
     NoScope,
     #[error("forward: secretsd rejected the receipt")]
     ReceiptRejected,
+    #[error(
+        "forward: the broker's approval queue is full; wait for a pending touch to resolve and retry"
+    )]
+    TooManyPending,
 }
 
 /// `SECRETSD_SOCK`, else `$XDG_RUNTIME_DIR/secretsd.sock`, else
@@ -65,8 +69,8 @@ pub fn socket_path() -> PathBuf {
 }
 
 /// Run the broker's touch ceremony for `cap`; blocks through the touch window.
-/// Returns the single-use receipt as lowercase hex bytes.
-pub fn authorize(cap: &str) -> Result<Vec<u8>, BrokerError> {
+/// Returns the single-use receipt as lowercase hex bytes, wiped on drop.
+pub fn authorize(cap: &str) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
     let path = socket_path();
     let frame = Zeroizing::new(wire::authorize_frame(
         cap,
@@ -81,7 +85,7 @@ pub fn authorize(cap: &str) -> Result<Vec<u8>, BrokerError> {
         wire::Verb::Authorize { cap },
     )?;
     let receipt = wire::authorized_receipt(&fields)?;
-    Ok(receipt.as_bytes().to_vec())
+    Ok(Zeroizing::new(receipt.as_bytes().to_vec()))
 }
 
 /// Redeem a receipt with the broker; `Ok(())` only when the broker confirms

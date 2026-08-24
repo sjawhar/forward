@@ -157,8 +157,9 @@ fn main() -> anyhow::Result<()> {
                 let receipt = forward::secretsd::authorize(forward::secretsd::CAP_BROWSER)
                     .unwrap_or_else(|error| exit_with_error(error));
                 let socket = forward::browser::request::socket_path();
-                let Some(port) = forward::browser::request::request(&socket, ttl_secs, &receipt)
-                else {
+                let granted = forward::browser::request::request(&socket, ttl_secs, &receipt);
+                drop(receipt);
+                let Some(port) = granted else {
                     eprintln!(
                         "forward: grant refused, or no forward serve at {}",
                         socket.display()

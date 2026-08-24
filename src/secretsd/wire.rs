@@ -96,6 +96,17 @@ mod tests {
             ok_fields("ERR\tYUBIKEY_UNREACHABLE\treader missing", Verb::Hello),
             Err(BrokerError::Protocol(_))
         ));
+        assert!(matches!(
+            ok_fields(
+                "ERR\tTOO_MANY_PENDING\tqueue full",
+                Verb::Authorize { cap: "browser" }
+            ),
+            Err(BrokerError::TooManyPending)
+        ));
+        assert!(matches!(
+            ok_fields("ERR\tTOO_MANY_PENDING\tqueue full", Verb::Redeem),
+            Err(BrokerError::Protocol(_))
+        ));
         for code in ["NO_SCOPE", "UNKNOWN_TOKEN", "FOREIGN_CALLER", "AGENT_TTY"] {
             let reply = format!("ERR\t{code}\tscope rejected");
             assert!(matches!(
