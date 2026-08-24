@@ -36,7 +36,7 @@ pub enum BrowserError {
         #[source]
         source: std::io::Error,
     },
-    #[error("forward: failed to start browser relay accept loop: {source}")]
+    #[error("forward: failed to start browser relay worker: {source}")]
     Spawn {
         #[source]
         source: std::io::Error,

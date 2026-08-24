@@ -14,6 +14,7 @@ fn tokens_are_accepted_until_their_deadline_and_never_after() {
     assert!(tokens.accepts(b"live-token"));
     assert!(!tokens.accepts(b"dead-token"));
     assert!(!tokens.accepts(b"never-issued"));
+    assert!(!tokens.accepts(b"live-tokex"));
     assert!(!tokens.accepts(b""));
 }
 
@@ -27,7 +28,7 @@ fn the_feed_client_registers_pushed_tokens_and_acknowledges() {
     cfg.peer = "127.0.0.1".to_owned();
     cfg.grant_port = port;
     let tokens = RelayTokens::new();
-    forward::browser::feed::spawn_client(&cfg, tokens.clone());
+    forward::browser::feed::spawn_client(&cfg, tokens.clone()).unwrap();
 
     let (feed, _) = listener.accept().unwrap();
     let mut reader = BufReader::new(feed.try_clone().unwrap());

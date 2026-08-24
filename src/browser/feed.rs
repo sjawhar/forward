@@ -2,26 +2,25 @@
 //!
 //! The laptop dials the devbox and holds one persistent connection. Each
 //! `TOKEN <token> <ttl>` line registers a relay token until its deadline.
+mod client;
+mod reaper;
 
-use crate::config::Config;
-use crate::pipe::keepalive;
+pub use client::spawn_client;
+
+use nix::time::ClockId;
 use parking_lot::Mutex;
-use std::io::{BufRead as _, BufReader, Read as _, Write as _};
-use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use zeroize::Zeroize as _;
 
 /// More live grants than this is not a workflow; evict the oldest.
 const MAX_LIVE_TOKENS: usize = 64;
-const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
-/// `TOKEN ` + a 43-character token + ` ` + TTL digits is well under this.
-const MAX_FEED_LINE: u64 = 128;
+
+type BootTime = Duration;
 
 struct TokenEntry {
     token: Vec<u8>,
-    deadline: Instant,
+    deadline: BootTime,
 }
 
 impl Drop for TokenEntry {
@@ -40,6 +39,7 @@ struct Inner {
 #[derive(Clone, Default)]
 pub struct RelayTokens {
     inner: Arc<Mutex<Inner>>,
+    reaper: Arc<reaper::Reaper>,
 }
 
 impl RelayTokens {
@@ -47,28 +47,69 @@ impl RelayTokens {
         Self::default()
     }
 
-    pub fn insert(&self, token: Vec<u8>, ttl: Duration) {
-        let mut inner = self.inner.lock();
-        let now = Instant::now();
-        inner.entries.retain(|entry| entry.deadline > now);
-        if inner.entries.len() == MAX_LIVE_TOKENS {
-            inner.entries.remove(0);
-        }
-        inner.entries.push(TokenEntry {
-            token,
-            deadline: now + ttl,
-        });
+    pub fn insert(&self, mut token: Vec<u8>, ttl: Duration) {
+        let now = boottime_now();
+        let Some(deadline) = now.checked_add(ttl) else {
+            token.zeroize();
+            return;
+        };
+        self.insert_until(token, deadline, now);
+        self.reaper.schedule(self.clone());
     }
 
     /// Compare against every live token without early exit. Expiry is checked
     /// before comparison, while a token's byte position remains indistinguishable.
     pub fn accepts(&self, presented: &[u8]) -> bool {
+        self.accepts_at(presented, boottime_now())
+    }
+
+    #[cfg(test)]
+    fn insert_at(&self, token: Vec<u8>, ttl: Duration, now: BootTime) {
+        if let Some(deadline) = now.checked_add(ttl) {
+            self.insert_until(token, deadline, now);
+        }
+    }
+
+    fn insert_until(&self, token: Vec<u8>, deadline: BootTime, now: BootTime) {
         let mut inner = self.inner.lock();
-        let now = Instant::now();
+        inner.entries.retain(|entry| entry.deadline > now);
+        if inner.entries.len() == MAX_LIVE_TOKENS {
+            inner.entries.remove(0);
+        }
+        inner.entries.push(TokenEntry { token, deadline });
+    }
+
+    fn accepts_at(&self, presented: &[u8], now: BootTime) -> bool {
+        let mut inner = self.inner.lock();
         inner.entries.retain(|entry| entry.deadline > now);
         inner.entries.iter().fold(false, |accepted, entry| {
             accepted | constant_time_eq(&entry.token, presented)
         })
+    }
+
+    fn reap_expired(&self) {
+        self.reap_expired_at(boottime_now());
+    }
+
+    fn reap_expired_at(&self, now: BootTime) {
+        self.inner
+            .lock()
+            .entries
+            .retain(|entry| entry.deadline > now);
+    }
+
+    fn next_deadline(&self) -> Option<BootTime> {
+        self.inner
+            .lock()
+            .entries
+            .iter()
+            .map(|entry| entry.deadline)
+            .min()
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.inner.lock().entries.len()
     }
 
     pub fn set_connected(&self, connected: bool) {
@@ -93,62 +134,19 @@ pub(crate) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
     difference == 0
 }
 
-/// Dial the devbox feed listener for the life of the process.
-pub fn spawn_client(cfg: &Config, tokens: RelayTokens) {
-    let Ok(Some(peer)) = cfg.peer_ip() else {
-        eprintln!("forward: grant feed disabled: no peer configured");
-        return;
-    };
-    if cfg.grant_port == 0 {
-        eprintln!("forward: grant feed disabled (grant_port = 0)");
-        return;
-    }
-    let address = SocketAddr::new(peer, cfg.grant_port);
-    drop(
-        thread::Builder::new()
-            .name("grant-feed".to_owned())
-            .spawn(move || {
-                loop {
-                    match run_once(address, &tokens) {
-                        Ok(()) => eprintln!("forward: grant feed to {address} closed"),
-                        Err(error) => eprintln!("forward: grant feed to {address} failed: {error}"),
-                    }
-                    tokens.set_connected(false);
-                    thread::sleep(RECONNECT_BACKOFF);
-                }
-            }),
-    );
+fn boottime_now() -> BootTime {
+    let now = ClockId::CLOCK_BOOTTIME
+        .now()
+        .unwrap_or_else(|error| clock_failure(error));
+    let seconds = u64::try_from(now.tv_sec()).unwrap_or_else(|error| clock_failure(error));
+    let nanoseconds = u32::try_from(now.tv_nsec()).unwrap_or_else(|error| clock_failure(error));
+    Duration::new(seconds, nanoseconds)
 }
 
-fn run_once(address: SocketAddr, tokens: &RelayTokens) -> std::io::Result<()> {
-    let mut stream = TcpStream::connect_timeout(&address, crate::pcsc::CONNECT_TIMEOUT)?;
-    keepalive(&stream)?;
-    stream.write_all(b"FEED\n")?;
-    tokens.set_connected(true);
-    let mut reader = BufReader::new(stream.try_clone()?);
-    loop {
-        let mut line = String::new();
-        let bytes = reader.by_ref().take(MAX_FEED_LINE).read_line(&mut line)?;
-        if bytes == 0 {
-            return Ok(());
-        }
-        let Some((token, ttl)) = parse_token_line(line.trim_end_matches(['\r', '\n'])) else {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "malformed feed line",
-            ));
-        };
-        tokens.insert(token, Duration::from_secs(ttl));
-        stream.write_all(b"OK\n")?;
-    }
+fn clock_failure(error: impl std::fmt::Display) -> ! {
+    eprintln!("forward: grant feed could not read CLOCK_BOOTTIME: {error}");
+    std::process::exit(1);
 }
 
-fn parse_token_line(line: &str) -> Option<(Vec<u8>, u64)> {
-    let rest = line.strip_prefix("TOKEN ")?;
-    let (token, ttl) = rest.split_once(' ')?;
-    if token.is_empty() || token.contains(' ') {
-        return None;
-    }
-    let ttl: u64 = ttl.parse().ok()?;
-    (ttl != 0).then(|| (token.as_bytes().to_vec(), ttl))
-}
+#[cfg(test)]
+mod tests;

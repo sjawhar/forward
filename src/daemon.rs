@@ -58,7 +58,7 @@ pub fn run(cfg: Config, config_path: &Path, port: u16) -> Result<(), DaemonError
     let leases = Leases::new();
     spawn_reaper(leases.clone());
     let tokens = forward::browser::feed::RelayTokens::new();
-    forward::browser::feed::spawn_client(&cfg, tokens.clone());
+    forward::browser::feed::spawn_client(&cfg, tokens.clone())?;
     forward::browser::spawn(&cfg, tokens)?;
     forward::pcsc::laptop::spawn(&cfg).map_err(DaemonError::Pcsc)?;
     for connection in listener.incoming() {

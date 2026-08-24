@@ -152,11 +152,12 @@ connection open. It sends `FEED\n`; the devbox pushes
 `OK\n` acknowledgment.
 
 The laptop keeps each received token in an in-memory registry until its
-deadline. Relay connections are accepted only when their `RELAY <token>\n`
-prefix matches a live registry entry. Entries are zeroized when they leave the
-registry. The dial direction and the devbox's port binding establish process
-identity, so browser authorization needs no provisioned bearer secret or
-machine-local token path.
+deadline. The deadline is measured against Linux `CLOCK_BOOTTIME`, so suspended
+time counts and a laptop wake cannot extend a grant. Relay connections are
+accepted only when their `RELAY <token>\n` prefix matches a live registry entry.
+Entries are zeroized when they leave the registry. The dial direction and the
+devbox's port binding establish process identity, so browser authorization needs
+no provisioned bearer secret or machine-local token path.
 
 ## Peer attribution
 
@@ -226,7 +227,7 @@ The laptop feed and relay gate stay separate from the devbox grant plumbing:
 | Condition | Behaviour |
 | --- | --- |
 | secretsd down, or YubiKey absent | no new grants; existing grants keep working |
-| laptop grant feed unavailable | every relay connection receives `REFUSED FEED`; doctor identifies the missing feed |
+| laptop grant feed unavailable | no new tokens arrive and unmatched relays receive `REFUSED FEED`; already-registered tokens remain valid until their own deadlines |
 | grant expires mid-session | new connections refused, established ones survive |
 | peer PID unresolvable | refused and logged, never allowed |
 | relay extension disconnected | tokened traffic receives the relay's 503; doctor reports the disconnected extension from its restricted untokened status probe |

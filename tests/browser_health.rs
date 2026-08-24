@@ -51,7 +51,7 @@ fn an_authorized_peer_is_told_when_the_laptop_has_no_grant_feed() {
 }
 
 #[test]
-fn an_untokened_authorized_peer_receives_the_upstream_extension_state() {
+fn a_same_length_wrong_relay_token_with_feed_attached_reports_extension_state() {
     let (cfg, tokens) = cfg_with_token("correct-horse");
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
     let upstream_address = upstream.local_addr().unwrap();
@@ -73,9 +73,7 @@ fn an_untokened_authorized_peer_receives_the_upstream_extension_state() {
             server,
         );
     });
-    client
-        .write_all(b"GET /json/version HTTP/1.0\r\n\r\n")
-        .unwrap();
+    client.write_all(b"RELAY correct-horsf\n").unwrap();
 
     assert_refusal(&mut client, "REFUSED TOKEN UPSTREAM 503\n");
     handler.join().unwrap();
