@@ -120,7 +120,7 @@ fn main() -> anyhow::Result<()> {
             // PC/SC binds under a temporary process-wide umask, so start it
             // before any service thread can create a file.
             forward::pcsc::devbox::spawn(&cfg).unwrap_or_else(|error| exit_with_error(error));
-            let armed = bridge::Armed::new();
+            let armed = bridge::Armed::new(cfg.clone());
             bridge::serve_arming(armed.clone(), bridge::arm_socket_path());
             let grants = forward::browser::grant::Grants::new();
             let grant_cfg = cfg.clone();

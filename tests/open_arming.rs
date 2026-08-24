@@ -19,7 +19,7 @@ fn open_arms_a_dynamic_callback_port_on_the_local_arming_socket() {
     // opener channel listener on a kernel-selected port.
     let runtime_dir = tempfile::tempdir().unwrap();
     let socket = runtime_dir.path().join("forward-arm.sock");
-    let armed = forward::bridge::Armed::new();
+    let armed = forward::bridge::Armed::new(forward::config::Config::default_values_for_test());
     forward::bridge::serve_arming(armed.clone(), socket.clone());
     wait_for_socket(&socket);
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();

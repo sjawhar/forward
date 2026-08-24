@@ -41,7 +41,7 @@ fn arming_over_the_local_socket_makes_a_port_reachable() {
     // Given: a bridge with an arming socket in a temporary directory.
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("arm.sock");
-    let armed = forward::bridge::Armed::new();
+    let armed = forward::bridge::Armed::new(forward::config::Config::default_values_for_test());
     forward::bridge::serve_arming(armed.clone(), socket.clone());
     wait_for_socket(&socket);
 
@@ -70,7 +70,7 @@ fn arming_socket_refuses_unsafe_callback_ports() {
     // Given: a live local arming socket and an inspector port supplied by a URL.
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("arm.sock");
-    let armed = forward::bridge::Armed::new();
+    let armed = forward::bridge::Armed::new(forward::config::Config::default_values_for_test());
     forward::bridge::serve_arming(armed.clone(), socket.clone());
     wait_for_socket(&socket);
 
@@ -87,7 +87,7 @@ fn an_overlong_unterminated_arm_line_is_refused_without_arming() {
     // Given: a bridge with an arming socket.
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("arm.sock");
-    let armed = forward::bridge::Armed::new();
+    let armed = forward::bridge::Armed::new(forward::config::Config::default_values_for_test());
     forward::bridge::serve_arming(armed.clone(), socket.clone());
     wait_for_socket(&socket);
 
@@ -198,7 +198,7 @@ fn open_arms_only_the_dynamic_callback_ports_of_a_url() {
     // Given: a bridge arming socket, as `forward serve` provides.
     let dir = tempfile::tempdir().unwrap();
     let socket = dir.path().join("arm.sock");
-    let armed = forward::bridge::Armed::new();
+    let armed = forward::bridge::Armed::new(forward::config::Config::default_values_for_test());
     forward::bridge::serve_arming(armed.clone(), socket.clone());
     wait_for_socket(&socket);
     let cfg = forward::config::Config::default_values_for_test();

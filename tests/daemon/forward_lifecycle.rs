@@ -39,30 +39,34 @@ fn an_expired_lease_stops_listening() {
 }
 
 #[test]
-fn static_tunnel_ports_are_never_leased() {
-    // Given: a daemon that can serve callback ports.
+fn forward_service_ports_are_never_leased() {
+    // Given: a daemon whose config moves the relay/pcsc/grant ports off their
+    // defaults — the lease filter must track the effective config, not them.
     let dir = tempfile::tempdir().unwrap();
     let bridged = dir.path().join("bridged");
     let bridge_port = spawn_bridge(&bridged);
-    let (daemon, port) = start(dir.path(), &config(bridge_port, 1));
+    let config = format!(
+        "{}relay_port = 12911\npcsc_port = 12912\ngrant_port = 12913\n",
+        config(bridge_port, 1)
+    );
+    let (daemon, port) = start(dir.path(), &config);
 
-    // When: URLs naming each static tunnel port arrive.
-    for static_port in [12_799, 12_800, 12_802] {
-        send(port, &format!("http://localhost:{static_port}/callback"));
+    // When: URLs naming each forward service port arrive.
+    for service_port in [12_800, 12_802, 12_911, 12_912, 12_913] {
+        send(port, &format!("http://localhost:{service_port}/callback"));
         daemon.wait_for_log(&format!(
-            "opener spawned for http://localhost:{static_port}/callback"
+            "opener spawned for http://localhost:{service_port}/callback"
         ));
     }
 
-    // Then: none of them is ever leased or relayed. 12799 above all: on the
-    // devbox that port is the far end of the PC/SC tunnel.
+    // Then: none of them is ever leased or relayed.
     assert!(
         !daemon.log().contains("served on loopback"),
-        "static tunnel ports must never be leased"
+        "forward service ports must never be leased"
     );
     assert!(
         !bridged.exists(),
-        "static tunnel ports must never be dialled"
+        "forward service ports must never be dialled"
     );
 }
 

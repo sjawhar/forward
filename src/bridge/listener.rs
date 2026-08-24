@@ -107,7 +107,7 @@ fn handle(cfg: &Config, armed: &Armed, listener_port: u16, mut stream: TcpStream
         refuse(&mut stream, GENERIC_REFUSAL);
         return;
     };
-    if denied_port(listener_port, port) {
+    if denied_port(cfg, listener_port, port) {
         eprintln!("forward: bridge refused denylisted port {port}");
         refuse(&mut stream, DENIED_PORT_REFUSAL);
         return;
@@ -215,5 +215,19 @@ mod tests {
         // Then: the drip is refused as a whole.
         assert_eq!(port, None);
         writer.join().unwrap();
+    }
+
+    #[test]
+    fn request_line_parses_zero_for_the_policy_to_refuse() {
+        // Given: the doctor's configuration-independent probe request.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let mut client = TcpStream::connect(address).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        client.write_all(b"CONNECT 0\n").unwrap();
+
+        // When/Then: parsing retains zero; the policy layer rejects it before
+        // any dial rather than treating it as a malformed protocol line.
+        assert_eq!(read_port(&mut server), Some(0));
     }
 }

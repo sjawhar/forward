@@ -1,4 +1,3 @@
-use crate::callback::PCSC_PORT;
 use crate::config::Config;
 use crate::target::url_host;
 use std::fmt::Display;
@@ -96,8 +95,36 @@ pub fn run(cfg: &Config, channel_port: u16, files_port: u16) -> bool {
     );
     let relay = browser::report(cfg);
     grant::report();
-    report_pcsc();
-    url && preview && bridge && relay
+    let feed = if cfg.grant_port == 0 {
+        print_line("browser feed: disabled (grant_port = 0)");
+        true
+    } else {
+        report(
+            cfg,
+            &hosts,
+            ChannelProbe {
+                name: "browser feed",
+                port: cfg.grant_port,
+                probe: probe_url_channel,
+            },
+        )
+    };
+    let pcsc_channel = if cfg.pcsc_port == 0 {
+        print_line("pcsc channel: disabled (pcsc_port = 0)");
+        true
+    } else {
+        report(
+            cfg,
+            &hosts,
+            ChannelProbe {
+                name: "pcsc channel",
+                port: cfg.pcsc_port,
+                probe: probe_url_channel,
+            },
+        )
+    };
+    let pcsc_socket = pcsc::report(cfg);
+    url && preview && bridge && relay && feed && pcsc_channel && pcsc_socket
 }
 
 fn report(cfg: &Config, hosts: &[String], channel: ChannelProbe) -> bool {
@@ -184,7 +211,7 @@ fn probe_file_preview(host: &str, port: u16) -> Result<ProbeEvidence, String> {
 fn probe_bridge(host: &str, port: u16) -> Result<ProbeEvidence, String> {
     let mut stream = connect(host, port)?;
     stream
-        .write_all(format!("CONNECT {PCSC_PORT}\n").as_bytes())
+        .write_all(b"CONNECT 0\n")
         .map_err(|error| error.to_string())?;
     let mut body = Vec::new();
     match stream.read_to_end(&mut body) {
@@ -196,22 +223,13 @@ fn probe_bridge(host: &str, port: u16) -> Result<ProbeEvidence, String> {
     }
 }
 
-fn report_pcsc() {
-    let state = match connect("127.0.0.1", PCSC_PORT) {
-        Ok(_) => "a listener answers",
-        Err(_) => "no listener",
-    };
-    print_line(format_args!(
-        "pcsc: info — 127.0.0.1:{PCSC_PORT} {state}; end-to-end token health belongs to the secrets broker, not forward"
-    ));
-}
-
 fn print_line(message: impl Display) {
     let _ = writeln!(std::io::stdout(), "{message}");
 }
 
 mod browser;
 mod grant;
+mod pcsc;
 
 #[cfg(test)]
 mod browser_tests;

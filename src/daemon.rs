@@ -155,7 +155,7 @@ fn forward_url(cfg: &Config, url: &Url, leases: &Leases) {
     let mut forwarded = 0;
     let mut dropped = 0;
     for port in forward_ports(url) {
-        if !is_dynamic_port(port) {
+        if !is_dynamic_port(cfg, port) {
             continue;
         }
         if forwarded == MAX_DYNAMIC_FORWARDS {

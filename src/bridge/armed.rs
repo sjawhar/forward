@@ -1,4 +1,5 @@
 use super::port_policy::can_arm;
+use crate::config::Config;
 use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -13,21 +14,25 @@ use std::time::{Duration, Instant};
 ///
 /// Clones share one set, so the arming socket and the bridge listener can hold a
 /// handle each.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Armed {
+    cfg: Config,
     ports: Arc<Mutex<HashMap<u16, Instant>>>,
 }
 
 impl Armed {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(cfg: Config) -> Self {
+        Self {
+            cfg,
+            ports: Arc::default(),
+        }
     }
 
     /// Arm `port` for `ttl`. A longer lease replaces a shorter one; a shorter one
     /// never shortens a lease already granted. Returns false for an unsafe port or
     /// an unrepresentable deadline.
     pub fn arm(&self, port: u16, ttl: Duration) -> bool {
-        if !can_arm(port) {
+        if !can_arm(&self.cfg, port) {
             return false;
         }
         let mut ports = self.ports.lock();
@@ -54,12 +59,13 @@ impl Armed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Config;
     use std::time::Duration;
 
     #[test]
     fn an_armed_port_is_reachable_until_it_expires() {
         // Given: a port armed for a very short window.
-        let armed = Armed::new();
+        let armed = Armed::new(Config::default_values_for_test());
         armed.arm(8400, Duration::from_millis(80));
 
         // When: it is checked inside and then outside that window.
@@ -73,7 +79,7 @@ mod tests {
     #[test]
     fn an_unarmed_port_is_never_reachable() {
         // Given: one armed port.
-        let armed = Armed::new();
+        let armed = Armed::new(Config::default_values_for_test());
         armed.arm(8400, Duration::from_secs(60));
 
         // When/Then: a port nobody armed is not reachable through it.
@@ -83,7 +89,7 @@ mod tests {
     #[test]
     fn arming_again_extends_the_window() {
         // Given: a port armed for a window about to close.
-        let armed = Armed::new();
+        let armed = Armed::new(Config::default_values_for_test());
         armed.arm(8400, Duration::from_millis(60));
         std::thread::sleep(Duration::from_millis(40));
 
@@ -98,7 +104,7 @@ mod tests {
     #[test]
     fn arming_again_never_shortens_the_window() {
         // Given: a port armed for a long window.
-        let armed = Armed::new();
+        let armed = Armed::new(Config::default_values_for_test());
         armed.arm(8400, Duration::from_secs(30));
 
         // When: it is immediately armed again for a much shorter window.
@@ -112,7 +118,7 @@ mod tests {
     #[test]
     fn clones_share_one_set() {
         // Given: a handle cloned for another thread.
-        let armed = Armed::new();
+        let armed = Armed::new(Config::default_values_for_test());
         let other = armed.clone();
 
         // When: one clone arms a port.
@@ -125,7 +131,7 @@ mod tests {
     #[test]
     fn dangerous_and_privileged_ports_are_never_armed() {
         // Given: ports that an OAuth loopback callback cannot legitimately own.
-        let armed = Armed::new();
+        let armed = Armed::new(Config::default_values_for_test());
         let forbidden = [
             0, 443, 1_023, 2_345, 2_375, 2_376, 3_306, 5_432, 5_678, 6_379, 8_001, 9_229,
         ];

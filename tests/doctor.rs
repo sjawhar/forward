@@ -57,7 +57,10 @@ fn run_doctor(ports: DoctorPorts) -> std::process::Output {
     let config = dir.path().join("config.toml");
     std::fs::write(
         &config,
-        format!("bridge_port = {}\nrelay_port = 0\n", ports.bridge),
+        format!(
+            "bridge_port = {}\nrelay_port = 0\npcsc_port = 0\ngrant_port = 0\n",
+            ports.bridge
+        ),
     )
     .unwrap();
     std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
@@ -94,7 +97,7 @@ fn doctor_names_every_channel_and_exits_non_zero_when_one_is_down() {
     let config = dir.path().join("config.toml");
     std::fs::write(
         &config,
-        "peer = \"127.0.0.2\"\nbridge_port = 9\nrelay_port = 9\n",
+        "peer = \"127.0.0.2\"\nbridge_port = 9\nrelay_port = 9\npcsc_port = 0\ngrant_port = 0\n",
     )
     .unwrap();
 
@@ -112,35 +115,38 @@ fn doctor_names_every_channel_and_exits_non_zero_when_one_is_down() {
         .output()
         .unwrap();
 
-    // Then: it names each channel, marks the dead ones, keeps the PC/SC line
-    // informational, and exits non-zero so a wrapper can act on it.
+    // Then: it names each channel, marks the dead ones, treats deliberately
+    // disabled channels as healthy information, and exits non-zero so a wrapper
+    // can act on the failures.
     let text = output_text(&output);
     assert!(text.contains("url channel: FAIL"), "got {text}");
     assert!(text.contains("file preview: FAIL"), "got {text}");
     assert!(text.contains("callback bridge: FAIL"), "got {text}");
     assert!(text.contains("browser relay: FAIL"), "got {text}");
-    assert!(text.contains("pcsc: info"), "got {text}");
-    assert!(text.contains("belongs to the secrets broker"), "got {text}");
+    assert!(text.contains("browser feed: disabled"), "got {text}");
+    assert!(text.contains("pcsc channel: disabled"), "got {text}");
+    assert!(text.contains("pcsc socket:"), "got {text}");
     assert!(!output.status.success());
 }
 
 #[test]
-fn the_pcsc_line_never_decides_overall_health() {
+fn disabled_pcsc_channel_and_socket_are_healthy() {
     // Given: the channels this test exercises answer as doctor expects, the
-    // browser relay is disabled, and no assumption whatsoever about the PC/SC
-    // forward, which stays on SSH and may or may not have a listener here.
+    // browser relay and PC/SC channel are deliberately disabled, and no
+    // assumption about a legacy socket that may happen to exist here.
     let channel_port = spawn_accept_and_close();
     let bridge_port = spawn_bridge_refusal(b"REFUSED DENIED\n");
     let files_port = spawn_file_preview(200);
     let mut cfg = forward::config::Config::default_values_for_test();
     cfg.bridge_port = bridge_port;
     cfg.relay_port = 0;
+    cfg.grant_port = 0;
+    cfg.pcsc_port = 0;
 
     // When: doctor reports.
     let healthy = forward::doctor::run(&cfg, channel_port, files_port);
 
-    // Then: the verdict is healthy. The PC/SC line is informational, so whether
-    // 12799 answers here cannot change it.
+    // Then: deliberately disabled PC/SC is healthy information, not a failure.
     assert!(healthy);
 }
 
