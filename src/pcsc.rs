@@ -6,6 +6,7 @@
 //! opaque, so a refusal is a bare close. Writing `REFUSED ...` bytes would be
 //! injected into a real client's protocol stream.
 
+pub mod devbox;
 pub mod laptop;
 
 use std::time::Duration;

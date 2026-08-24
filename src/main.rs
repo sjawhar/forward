@@ -134,6 +134,7 @@ fn main() -> anyhow::Result<()> {
                     eprintln!("{error}");
                 }
             }));
+            forward::pcsc::devbox::spawn(&cfg).unwrap_or_else(|error| exit_with_error(error));
             serve::run(&cfg, port).unwrap_or_else(|error| exit_with_error(error));
             Ok(())
         }
