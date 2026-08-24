@@ -86,6 +86,7 @@ fn run_once(
     let mut stream = TcpStream::connect_timeout(&address, crate::pcsc::CONNECT_TIMEOUT)?;
     keepalive(&stream)?;
     stream.write_all(b"FEED\n")?;
+    failures.restored();
     tokens.set_connected(true);
     let mut reader = BufReader::new(stream.try_clone()?);
     loop {
@@ -102,7 +103,6 @@ fn run_once(
         };
         tokens.insert(token, Duration::from_secs(ttl));
         stream.write_all(b"OK\n")?;
-        failures.restored();
     }
 }
 
@@ -114,4 +114,32 @@ fn parse_token_line(line: &str) -> Option<(Vec<u8>, u64)> {
     }
     let ttl: u64 = ttl.parse().ok()?;
     (ttl != 0).then(|| (token.as_bytes().to_vec(), ttl))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    #[test]
+    fn a_successful_feed_handshake_resets_a_prior_outage() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut greeting = String::new();
+            BufReader::new(stream).read_line(&mut greeting).unwrap();
+            assert_eq!(greeting, "FEED\n");
+        });
+        let tokens = RelayTokens::new();
+        let now = Instant::now();
+        let mut failures = ReconnectBudget {
+            unhealthy_since: Some(now - MAX_UNHEALTHY_FEED),
+        };
+
+        run_once(address, &tokens, &mut failures).unwrap();
+        server.join().unwrap();
+
+        assert!(!failures.failed_at(Instant::now()));
+    }
 }

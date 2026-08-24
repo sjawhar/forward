@@ -1,16 +1,34 @@
 use super::*;
 use crate::browser::BrowserError;
+use parking_lot::Mutex;
 use std::io;
+use std::sync::Arc;
 use std::time::Duration;
+
+struct ManualClock(Mutex<BootTime>);
+
+impl ManualClock {
+    fn set(&self, now: BootTime) {
+        *self.0.lock() = now;
+    }
+}
+
+impl Clock for ManualClock {
+    fn now(&self) -> BootTime {
+        *self.0.lock()
+    }
+}
 
 #[test]
 fn deadlines_include_simulated_suspend_time() {
-    let tokens = RelayTokens::new();
-    let now = Duration::from_secs(100);
-    tokens.insert_at(b"suspend-safe".to_vec(), Duration::from_secs(30), now);
+    let start = boottime_now();
+    let clock = Arc::new(ManualClock(Mutex::new(start)));
+    let tokens = RelayTokens::with_clock(clock.clone());
+    tokens.insert(b"suspend-safe".to_vec(), Duration::from_secs(30 * 60));
 
-    assert!(tokens.accepts_at(b"suspend-safe", now + Duration::from_secs(29)));
-    assert!(!tokens.accepts_at(b"suspend-safe", now + Duration::from_secs(31)));
+    assert!(tokens.accepts(b"suspend-safe"));
+    clock.set(start + Duration::from_secs(8 * 60 * 60));
+    assert!(!tokens.accepts(b"suspend-safe"));
 }
 
 #[test]

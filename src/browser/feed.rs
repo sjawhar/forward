@@ -18,6 +18,18 @@ const MAX_LIVE_TOKENS: usize = 64;
 
 type BootTime = Duration;
 
+trait Clock: Send + Sync {
+    fn now(&self) -> BootTime;
+}
+
+struct BoottimeClock;
+
+impl Clock for BoottimeClock {
+    fn now(&self) -> BootTime {
+        boottime_now()
+    }
+}
+
 struct TokenEntry {
     token: Vec<u8>,
     deadline: BootTime,
@@ -36,10 +48,17 @@ struct Inner {
 }
 
 /// Live relay tokens shared by the feed client and relay connection handlers.
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct RelayTokens {
     inner: Arc<Mutex<Inner>>,
     reaper: Arc<reaper::Reaper>,
+    clock: Arc<dyn Clock>,
+}
+
+impl Default for RelayTokens {
+    fn default() -> Self {
+        Self::with_clock(Arc::new(BoottimeClock))
+    }
 }
 
 impl RelayTokens {
@@ -47,8 +66,16 @@ impl RelayTokens {
         Self::default()
     }
 
+    fn with_clock(clock: Arc<dyn Clock>) -> Self {
+        Self {
+            inner: Arc::default(),
+            reaper: Arc::default(),
+            clock,
+        }
+    }
+
     pub fn insert(&self, mut token: Vec<u8>, ttl: Duration) {
-        let now = boottime_now();
+        let now = self.clock.now();
         let Some(deadline) = now.checked_add(ttl) else {
             token.zeroize();
             return;
@@ -60,14 +87,7 @@ impl RelayTokens {
     /// Compare against every live token without early exit. Expiry is checked
     /// before comparison, while a token's byte position remains indistinguishable.
     pub fn accepts(&self, presented: &[u8]) -> bool {
-        self.accepts_at(presented, boottime_now())
-    }
-
-    #[cfg(test)]
-    fn insert_at(&self, token: Vec<u8>, ttl: Duration, now: BootTime) {
-        if let Some(deadline) = now.checked_add(ttl) {
-            self.insert_until(token, deadline, now);
-        }
+        self.accepts_at(presented, self.clock.now())
     }
 
     fn insert_until(&self, token: Vec<u8>, deadline: BootTime, now: BootTime) {
@@ -88,7 +108,7 @@ impl RelayTokens {
     }
 
     fn reap_expired(&self) {
-        self.reap_expired_at(boottime_now());
+        self.reap_expired_at(self.clock.now());
     }
 
     fn reap_expired_at(&self, now: BootTime) {
