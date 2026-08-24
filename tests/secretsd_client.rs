@@ -170,3 +170,38 @@ fn a_reply_without_a_newline_is_a_protocol_error() {
     broker.finish();
     assert!(matches!(error, BrokerError::Protocol(_)));
 }
+
+#[test]
+fn redeem_rejects_an_authorize_shaped_success() {
+    let broker = FakeBroker::start(vec![
+        hello(),
+        Step {
+            expected: redeem(),
+            reply: Reply::Text("OK\tstatus=authorized cap=browser\n".to_owned()),
+        },
+    ]);
+
+    let result = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
+    broker.finish();
+    assert!(matches!(result, Err(BrokerError::Protocol(_))));
+}
+
+#[test]
+fn redeem_rejects_duplicate_or_unexpected_success_fields() {
+    for response in [
+        "OK\tstatus=redeemed cap=browser cap=other\n",
+        "OK\tstatus=redeemed cap=browser extra=value\n",
+    ] {
+        let broker = FakeBroker::start(vec![
+            hello(),
+            Step {
+                expected: redeem(),
+                reply: Reply::Text(response.to_owned()),
+            },
+        ]);
+
+        let result = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
+        broker.finish();
+        assert!(matches!(result, Err(BrokerError::Protocol(_))));
+    }
+}

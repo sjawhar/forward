@@ -70,7 +70,7 @@ pub fn authorize(cap: &str) -> Result<Vec<u8>, BrokerError> {
     let path = socket_path();
     let frame = Zeroizing::new(wire::authorize_frame(
         cap,
-        wire::session_token(),
+        wire::session_token()?,
         wire::caller_tty(),
     )?);
     wire::hello(&path, CONTROL_TIMEOUT)?;
@@ -80,11 +80,7 @@ pub fn authorize(cap: &str) -> Result<Vec<u8>, BrokerError> {
         AUTHORIZE_TIMEOUT,
         wire::Verb::Authorize { cap },
     )?;
-    let receipt = wire::field(&fields, "receipt")
-        .filter(|receipt| wire::valid_receipt(receipt))
-        .ok_or_else(|| {
-            BrokerError::Protocol("authorized reply without a valid receipt".to_owned())
-        })?;
+    let receipt = wire::authorized_receipt(&fields)?;
     Ok(receipt.as_bytes().to_vec())
 }
 
@@ -104,11 +100,5 @@ pub fn redeem(path: &Path, receipt: &[u8], cap: &str) -> Result<(), BrokerError>
     frame.push(b'\n');
     wire::hello(path, CONTROL_TIMEOUT)?;
     let fields = wire::call(path, &frame, CONTROL_TIMEOUT, wire::Verb::Redeem)?;
-    if wire::field(&fields, "cap").is_some_and(|value| value == cap) {
-        Ok(())
-    } else {
-        Err(BrokerError::Protocol(
-            "redeemed a different capability".to_owned(),
-        ))
-    }
+    wire::redeemed_cap(&fields, cap)
 }

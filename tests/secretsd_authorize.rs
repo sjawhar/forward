@@ -86,7 +86,7 @@ impl FakeBroker {
 
 fn authorize(broker: &FakeBroker) -> Result<Vec<u8>, BrokerError> {
     let token_file = broker.dir.path().join("token");
-    std::fs::write(&token_file, format!("{TOKEN}\n")).unwrap();
+    std::fs::write(&token_file, TOKEN).unwrap();
     let _environment = AuthorizeEnvironment::set(&broker.path, &token_file);
     secretsd::authorize(CAP_BROWSER)
 }
@@ -113,4 +113,59 @@ fn authorize_maps_denied_to_authorization_denied() {
     let result = authorize(&broker);
     broker.finish();
     assert!(matches!(result, Err(BrokerError::Denied)));
+}
+
+#[test]
+fn authorize_rejects_wrong_duplicate_or_unexpected_success_fields() {
+    for response in [
+        "OK\tstatus=redeemed receipt=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        "OK\tstatus=authorized receipt=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa receipt=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
+        "OK\tstatus=authorized receipt=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa extra=value\n",
+    ] {
+        let _lock = AUTHORIZE_ENV.lock();
+        let broker = FakeBroker::start(response);
+
+        let result = authorize(&broker);
+        broker.finish();
+        assert!(matches!(result, Err(BrokerError::Protocol(_))));
+    }
+}
+
+#[test]
+fn an_oversized_authorize_frame_never_reaches_the_broker() {
+    let _lock = AUTHORIZE_ENV.lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secretsd.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let token_file = dir.path().join("token");
+    std::fs::write(&token_file, TOKEN).unwrap();
+    let _environment = AuthorizeEnvironment::set(&path, &token_file);
+
+    let cap = "a".repeat(4_096);
+    let result = secretsd::authorize(&cap);
+    assert!(matches!(result, Err(BrokerError::Protocol(_))));
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+}
+
+#[test]
+fn a_control_containing_token_file_never_reaches_the_broker() {
+    let _lock = AUTHORIZE_ENV.lock();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("secretsd.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let token_file = dir.path().join("token");
+    std::fs::write(&token_file, format!("{TOKEN}\n")).unwrap();
+    let _environment = AuthorizeEnvironment::set(&path, &token_file);
+
+    let result = secretsd::authorize(CAP_BROWSER);
+    assert!(matches!(result, Err(BrokerError::Protocol(_))));
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
 }
