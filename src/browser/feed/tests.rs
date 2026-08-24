@@ -1,5 +1,6 @@
 use super::*;
 use crate::browser::BrowserError;
+use nix::time::{ClockId, clock_gettime};
 use parking_lot::Mutex;
 use std::io;
 use std::sync::Arc;
@@ -29,6 +30,14 @@ fn deadlines_include_simulated_suspend_time() {
     assert!(tokens.accepts(b"suspend-safe"));
     clock.set(start + Duration::from_secs(8 * 60 * 60));
     assert!(!tokens.accepts(b"suspend-safe"));
+}
+
+#[test]
+fn production_clock_samples_clock_boottime() {
+    let expected = Duration::from(clock_gettime(ClockId::CLOCK_BOOTTIME).unwrap());
+    let actual = BoottimeClock.now();
+
+    assert!(actual.abs_diff(expected) <= Duration::from_millis(100));
 }
 
 #[test]
