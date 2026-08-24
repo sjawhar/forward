@@ -10,6 +10,7 @@ pub mod pipe;
 pub mod policy;
 pub(crate) mod refusal;
 mod render;
+pub mod secretsd;
 pub mod send;
 pub mod serve;
 pub mod target;
