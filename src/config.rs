@@ -28,6 +28,15 @@ pub struct Config {
     /// into place — a secret or a machine-local path in it would be published.
     #[serde(default)]
     pub relay_token_file: Option<PathBuf>,
+    /// Port for the PC/SC channel: the laptop listens on it (tailnet address),
+    /// the devbox dials it. 0 disables the channel.
+    #[serde(default = "default_pcsc_port")]
+    pub pcsc_port: u16,
+    /// Port for the browser grant feed: the devbox listens on it (tailnet
+    /// address), the laptop dials and holds one persistent connection.
+    /// 0 disables the feed, which refuses every browser relay connection.
+    #[serde(default = "default_grant_port")]
+    pub grant_port: u16,
     #[serde(default)]
     pub allow: Vec<String>,
 }
@@ -160,6 +169,8 @@ impl Config {
             peer: String::new(),
             bridge_port: default_bridge_port(),
             relay_port: default_relay_port(),
+            pcsc_port: default_pcsc_port(),
+            grant_port: default_grant_port(),
             relay_token_file: None,
             allow: Vec::new(),
         }
@@ -188,6 +199,14 @@ fn default_bridge_port() -> u16 {
 
 pub(crate) fn default_relay_port() -> u16 {
     12_803
+}
+
+pub(crate) fn default_pcsc_port() -> u16 {
+    12_804
+}
+
+pub(crate) fn default_grant_port() -> u16 {
+    12_805
 }
 
 fn relay_token_path_from(
