@@ -64,7 +64,7 @@ enum Command {
         #[arg(long, default_value_t = FILES_PORT)]
         files_port: u16,
     },
-    /// Manage browser access (laptop: init-token)
+    /// Manage browser access
     Browser {
         #[command(subcommand)]
         action: BrowserCommand,
@@ -73,12 +73,6 @@ enum Command {
 
 #[derive(Subcommand)]
 enum BrowserCommand {
-    /// Generate the relay token, store it, and print it once (laptop side)
-    InitToken {
-        #[arg(long)]
-        config: Option<std::path::PathBuf>,
-    },
-
     /// Request browser access for this session (devbox side)
     Grant {
         /// Grant lifetime, for example 45s, 30m, or 2h
@@ -146,18 +140,6 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Browser { action } => match action {
-            BrowserCommand::InitToken { config } => {
-                let (cfg, _) = load_config(config)?;
-                let path = cfg.relay_token_path().ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "forward: cannot resolve the relay token path: relay_token_file is unset and neither XDG_CONFIG_HOME nor HOME is an absolute path"
-                    )
-                })?;
-                let value = forward::browser::init::write_token(&path)?;
-                let mut stdout = std::io::stdout().lock();
-                writeln!(stdout, "{value}")?;
-                Ok(())
-            }
             BrowserCommand::Grant { ttl, config } => {
                 let _ = load_config(config)?;
                 let Ok(token) = std::env::var("FORWARD_BROWSER_GRANT") else {

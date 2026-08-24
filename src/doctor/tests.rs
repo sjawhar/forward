@@ -77,6 +77,7 @@ fn classifies_browser_relay_responses() {
     assert_eq!(classify(b"REFUSED PEER\n"), Ok(RelayEvidence::PeerRefused));
     assert_eq!(classify(b"REFUSED\n"), Ok(RelayEvidence::UpstreamDown));
     assert_eq!(classify(b"REFUSED BUSY\n"), Ok(RelayEvidence::Busy));
+    assert_eq!(classify(b"REFUSED FEED\n"), Ok(RelayEvidence::FeedDown));
     assert_eq!(
         classify(b"HTTP/1.1 200 OK\r\n\r\n{}"),
         Ok(RelayEvidence::Healthy)

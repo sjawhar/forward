@@ -1,3 +1,4 @@
+use forward::browser::feed::RelayTokens;
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::sync::{
@@ -45,9 +46,11 @@ fn a_flooding_unauthorized_peer_still_gets_the_refusal_and_frees_its_slot() {
         }
     });
     let cfg = cfg_with_peer("100.64.0.9");
+    let tokens = RelayTokens::new();
     let handler = thread::spawn(move || {
         forward::browser::handle_from(
             &cfg,
+            &tokens,
             upstream.local_addr().unwrap(),
             "100.64.0.7".parse().unwrap(),
             server,

@@ -138,39 +138,25 @@ The refusal vocabulary is:
 
 | Refusal | Meaning |
 | --- | --- |
-| `REFUSED TOKEN FILE` | laptop: local token missing, unreadable, or empty; emitted only after the peer check |
-| `REFUSED TOKEN UPSTREAM 200` | laptop: token absent or non-matching; its fixed status probe found the extension healthy |
-| `REFUSED TOKEN UPSTREAM 503` | laptop: token absent or non-matching; its fixed status probe found the extension unavailable |
+| `REFUSED FEED` | laptop: no grant-feed connection is attached; emitted only after the peer check |
+| `REFUSED TOKEN UPSTREAM 200` | laptop: token absent or non-matching while the feed is attached; its fixed status probe found the extension healthy |
+| `REFUSED TOKEN UPSTREAM 503` | laptop: token absent or non-matching while the feed is attached; its fixed status probe found the extension unavailable |
 | `REFUSED UNGRANTED` | devbox: no live grant for this endpoint |
 | `REFUSED SESSION` | devbox: connection did not come from the granted session |
 
-## Token provisioning
+## Grant feed
 
-The laptop holds the expected value in a `0600` file at
-`$XDG_CONFIG_HOME/forward/relay.token`, falling back to
-`$HOME/.config/forward/relay.token`, with an optional `relay_token_file`
-override for anyone who wants it elsewhere. The path is derived rather than
-configured because `config.toml` is committed to dotfiles and symlinked into
-place: it can hold neither the secret nor a machine-specific absolute path.
+The laptop dials the devbox's configured `grant_port` and keeps that feed
+connection open. It sends `FEED\n`; the devbox pushes
+`TOKEN <token> <ttl>\n` for each live browser grant and waits for the laptop's
+`OK\n` acknowledgment.
 
-The devbox holds the same value as a human-tier secretsd secret, so reading it
-requires the touch and the grant is scoped to the requesting session for that
-session's lifetime.
-
-Provisioned once, by hand, without the value passing through any agent context:
-
-```
-ssh sami@sami forward browser init-token | secrets edit-human FORWARD_BROWSER_GRANT
-```
-
-`init-token` reads 32 bytes from `/dev/urandom` — a CSPRNG, needing no crate —
-encodes them with the `base64` dependency the crate already carries, writes the
-laptop file at `0600`, and prints the value to stdout exactly once.
-`edit-human` reads stdin whenever stdin is not a TTY,
-takes the bare value and builds the `NAME=value` assignment itself, and rejects
-empty or multi-line input. Creating a key that does not yet exist through a
-pipe forces a *local* human secret, so the token stays machine-local and never
-reaches shared or committed storage.
+The laptop keeps each received token in an in-memory registry until its
+deadline. Relay connections are accepted only when their `RELAY <token>\n`
+prefix matches a live registry entry. Entries are zeroized when they leave the
+registry. The dial direction and the devbox's port binding establish process
+identity, so browser authorization needs no provisioned bearer secret or
+machine-local token path.
 
 ## Peer attribution
 
@@ -194,16 +180,16 @@ eliminate PID-reuse risk. Failure to resolve is refused, never allowed.
 
 ## Configuration and health checks
 
-Neither machine gains a required config key: the laptop derives its token path,
-and `relay_token_file` exists only as an override.
+The feed uses `grant_port`; configuration contains neither a relay secret nor a
+machine-local token path.
 
-`forward doctor` reports the relay row without holding any secret. An
-authorized untokened probe receives only a refusal and the result of the
-laptop's fixed `/json/version` status probe: `REFUSED TOKEN UPSTREAM 200`
-means locked but healthy, while `REFUSED TOKEN UPSTREAM 503` reports a
-disconnected extension. `REFUSED TOKEN FILE` is a failure that names
-`forward browser init-token` as the laptop remedy. A connection failure remains
-distinct from all three refusals, and none requires a touch or exposes targets,
+`forward doctor` reports the relay row without holding any secret. A
+`REFUSED FEED` response means the probe observed no attached grant feed. An
+authorized untokened probe with an attached feed receives only a refusal and
+the result of the laptop's fixed `/json/version` status probe:
+`REFUSED TOKEN UPSTREAM 200` means locked but healthy, while `REFUSED TOKEN
+UPSTREAM 503` reports a disconnected extension. A connection failure remains
+distinct from these refusals, and none requires a touch or exposes targets,
 URLs, titles, or counts.
 
 The devbox row reports whether the invoking session holds a live grant. It
@@ -225,23 +211,22 @@ No shims are kept, because a surviving direct path would reopen the bypass.
 
 ## Module layout
 
-`browser.rs` is at 160 lines against a 250-line cap, and the natural neighbours
-are nearly full (`doctor/browser.rs` 235, `bridge/arming.rs` 225), so the devbox
-side becomes a directory:
+The laptop feed and relay gate stay separate from the devbox grant plumbing:
 
 | File | Responsibility |
 | --- | --- |
+| `browser/feed.rs` | laptop feed client and live relay-token registry |
 | `browser/grant.rs` | grant registry: session, process anchor, port, token, deadline |
 | `browser/proxy.rs` | per-grant loopback listener and process-anchor refusals |
 | `browser/peer.rs` | connection → PID → process ancestry resolution |
-| `browser.rs` | laptop-side channel, now with the token check |
+| `browser.rs` | laptop relay listener and registry gate |
 
 ## Failure modes
 
 | Condition | Behaviour |
 | --- | --- |
 | secretsd down, or YubiKey absent | no new grants; existing grants keep working |
-| laptop token file missing | every connection refused; doctor names it and tells the laptop operator to run `forward browser init-token` |
+| laptop grant feed unavailable | every relay connection receives `REFUSED FEED`; doctor identifies the missing feed |
 | grant expires mid-session | new connections refused, established ones survive |
 | peer PID unresolvable | refused and logged, never allowed |
 | relay extension disconnected | tokened traffic receives the relay's 503; doctor reports the disconnected extension from its restricted untokened status probe |

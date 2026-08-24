@@ -1,7 +1,7 @@
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::doctor) enum RelayEvidence {
     PeerRefused,
-    TokenFileMissing,
+    FeedDown,
     TokenRequired,
     UpstreamDown,
     Busy,
@@ -13,8 +13,8 @@ pub(in crate::doctor) fn classify(body: &[u8]) -> Result<RelayEvidence, String> 
     if body.starts_with(b"REFUSED PEER") {
         return Ok(RelayEvidence::PeerRefused);
     }
-    if body.starts_with(b"REFUSED TOKEN FILE") {
-        return Ok(RelayEvidence::TokenFileMissing);
+    if body.starts_with(b"REFUSED FEED") {
+        return Ok(RelayEvidence::FeedDown);
     }
     if body.starts_with(b"REFUSED TOKEN UPSTREAM 503") {
         return Ok(RelayEvidence::ExtensionDisconnected);
