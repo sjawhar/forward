@@ -1,0 +1,20 @@
+[package]
+name = "proto"
+version.workspace = true
+edition.workspace = true
+# Both binaries depend on this crate, and forward holds a 1.88 floor.
+rust-version = "1.88"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# getuid for the socket-path derivation.
+nix = { workspace = true, features = ["user"] }
+# Wipe secret payloads on drop. forward never receives one, but the response
+# parser is shared and must stay correct for the caller that does.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[lints]
+workspace = true

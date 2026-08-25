@@ -1,0 +1,21 @@
+[package]
+name = "containment"
+version.workspace = true
+edition.workspace = true
+# Both binaries depend on this crate, and forward holds a 1.88 floor.
+rust-version = "1.88"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# `SO_PEERPIDFD`, which pins the peer process, is surfaced by nix 0.31 as a
+# typed sockopt returning an `OwnedFd`, so the resolver needs no unsafe block.
+nix = { workspace = true, features = ["socket"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"

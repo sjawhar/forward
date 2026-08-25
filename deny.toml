@@ -1,24 +1,58 @@
+# Merged from the two pre-consolidation configs. Rule: stricter wins per
+# field, union only on the license allow-list.
+#   confidence-threshold -> 0.93 (secretsd)
+#   unknown-git          -> deny  (forward)
+#   [bans] deny          -> secretsd's list, kept in full
 [advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 ignore = []
 
 [licenses]
 allow = [
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
     "MIT",
+    "MPL-2.0",
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",
 ]
-confidence-threshold = 0.8
+confidence-threshold = 0.93
 exceptions = []
 private = { ignore = true }
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
+skip = [
+    # Reviewed 2026-08-25: nix 0.29 remains in the credential-path crates
+    # until the planned 0.31 unification also removes containment's legacy
+    # SO_PEERPIDFD code. Main owns that complete, separately verified change
+    # in this session; do not renew this exception.
+    { name = "nix", version = "0.29.0", reason = "credential-path nix 0.31 migration pending its required source cutover" },
+    # Reviewed 2026-08-25: these are the lower transitive halves of the
+    # distinct TOML 0.8 (secrets) and TOML 1 (forward) parser stacks.
+    { name = "serde_spanned", version = "0.6.9", reason = "transitive from secrets' TOML 0.8 source-root parser" },
+    { name = "syn", version = "2.0.119", reason = "transitive derive-macro dependency; current direct dependencies require both majors" },
+    { name = "toml", version = "0.8.23", reason = "secrets parses source-root configuration with the 0.8 API" },
+    { name = "toml_datetime", version = "0.6.11", reason = "transitive from the secrets TOML 0.8 parser" },
+    { name = "winnow", version = "0.7.15", reason = "transitive from the secrets TOML 0.8 parser" },
+]
 wildcards = "deny"
 highlight = "all"
+deny = [
+    { name = "async-std", reason = "use tokio" },
+    { name = "actix-web", reason = "use axum" },
+    { name = "chrono", reason = "use jiff" },
+    # The secrets daemon holds plaintext. A general-purpose deserializer would
+    # copy it into buffers we cannot zeroize; the wire protocol is hand-rolled.
+    { name = "serde_json", reason = "no serde on the plaintext path (see crates/secrets/Cargo.toml note)" },
+]
 
 [sources]
 unknown-registry = "deny"

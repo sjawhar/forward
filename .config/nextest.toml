@@ -1,0 +1,18 @@
+# The workspace runs under nextest because the secrets broker's integration
+# tests mutate process-global environment and need process-per-test isolation.
+#
+# That same isolation breaks forward's daemon tests, which coordinate through an
+# in-process `DAEMON_TEST_LOCK` mutex: under one test binary they serialized, but
+# nextest gives each test its own process, so the mutex no longer serializes
+# anything and they race over fixed ports, `HOME`, and umask. The pcsc tests
+# coordinate the same way through `PROCESS_STATE_LOCK`.
+#
+# Rather than rewrite both suites around cross-process locking, declare the
+# constraint that was previously implicit: these binaries run serially.
+
+[test-groups]
+serial-daemon = { max-threads = 1 }
+
+[[profile.default.overrides]]
+filter = 'binary(daemon) or binary(pcsc)'
+test-group = 'serial-daemon'

@@ -1,0 +1,24 @@
+[package]
+name = "hygiene"
+version.workspace = true
+edition.workspace = true
+# Both binaries depend on this crate, and forward holds a 1.88 floor.
+rust-version = "1.88"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# Syscalls for the process-hardening helpers and the boot-time clock.
+nix = { workspace = true, features = ["mman", "process", "resource", "time"] }
+# Constant-time comparison. Audited, and it replaces a hand-rolled loop that
+# previously lived in forward.
+subtle = "2"
+# The optional-memlock path warns rather than failing; journald captures it.
+tracing = "0.1"
+# Wipe secret-adjacent material on drop.
+zeroize = { version = "1", features = ["zeroize_derive"] }
+
+[lints]
+workspace = true

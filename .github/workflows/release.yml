@@ -29,6 +29,7 @@ jobs:
         run: |
           set -euo pipefail
 
+          # One version for both binaries, read from [workspace.package].
           latest_tag="$(git tag --list 'v*' --sort=-version:refname | sed -n '1p')"
           if [[ -n "$latest_tag" ]]; then
             current="${latest_tag#v}"
@@ -96,6 +97,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Both crates inherit version.workspace, so this one rewrite covers them.
           sed -i '0,/^version = ".*"/s//version = "'"$VERSION"'"/' Cargo.toml
           cargo update --workspace
           grep -Fx "version = \"$VERSION\"" Cargo.toml
@@ -103,37 +105,75 @@ jobs:
       - name: Install cross
         run: cargo install cross --version 0.2.5 --locked
 
-      - name: Build release archives
+      - name: Build forward archives (musl, per target)
         shell: bash
         run: |
           set -euo pipefail
-          # Each cross container gets its own target dir, as ci.yml's cross jobs
-          # and the previous release workflow do. Sharing one rust-cache-restored
-          # target/ across both containers left the aarch64 build resolving stale
-          # host proc-macro artifacts (E0463 on zerofrom_derive) in this
-          # workflow's first run.
+          # Each cross container gets its own target dir: sharing one
+          # rust-cache-restored target/ across containers left the aarch64 build
+          # resolving stale host proc-macro artifacts (E0463).
           for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
             export CARGO_TARGET_DIR="target/cross-$target"
-            cross build --locked --release --target "$target"
+            cross build --locked --release -p forward --target "$target"
             tar -czf "forward-$target.tar.gz" -C "$CARGO_TARGET_DIR/$target/release" forward
             tar -tzf "forward-$target.tar.gz" | grep -Fx forward
           done
 
-      - name: Attest x86_64 archive
+      - name: Build secrets archive (native glibc)
+        shell: bash
+        run: |
+          set -euo pipefail
+          # The broker stays a native glibc build: it depends on mlockall and
+          # pidfd behaviour that a static musl build would change.
+          cargo build --locked --profile secrets-release -p secrets
+          # Version-free, and named like forward's own two archives. mise
+          # selects this asset by an exact `asset_pattern` against a `latest`
+          # release, which a version-stamped name would force to be a glob.
+          staging="secrets-x86_64-unknown-linux-gnu"
+          mkdir -p "$staging/bin" "$staging/share/secretsd/opencode/plugins" \
+                   "$staging/share/secretsd/skills/using-secrets" "$staging/systemd"
+          install -m 0755 target/secrets-release/secrets "$staging/bin/secrets"
+          install -m 0644 opencode/plugins/secretsd.ts "$staging/share/secretsd/opencode/plugins/secretsd.ts"
+          install -m 0644 skills/using-secrets/SKILL.md "$staging/share/secretsd/skills/using-secrets/SKILL.md"
+          install -m 0644 systemd/secretsd.service "$staging/systemd/secretsd.service"
+          install -m 0644 systemd/secretsd.socket "$staging/systemd/secretsd.socket"
+          tar czf "${staging}.tar.gz" "$staging"
+
+          # The installer reads these paths out of the archive; a missing one
+          # fails at install time on the devbox instead of here.
+          for artifact in \
+            "$staging/bin/secrets" \
+            "$staging/share/secretsd/opencode/plugins/secretsd.ts" \
+            "$staging/share/secretsd/skills/using-secrets/SKILL.md" \
+            "$staging/systemd/secretsd.service" \
+            "$staging/systemd/secretsd.socket"; do
+            tar --list --gzip --file="${staging}.tar.gz" \
+              | grep --fixed-strings --line-regexp -- "$artifact" >/dev/null \
+              || { printf 'release archive is missing: %s\n' "$artifact" >&2; exit 1; }
+          done
+
+      - name: Attest forward x86_64 archive
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: forward-x86_64-unknown-linux-musl.tar.gz
 
-      - name: Attest aarch64 archive
+      - name: Attest forward aarch64 archive
         uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
         with:
           subject-path: forward-aarch64-unknown-linux-musl.tar.gz
+
+      - name: Attest secrets archive
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-path: secrets-x86_64-unknown-linux-gnu.tar.gz
 
       - name: Upload release archives
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-assets
-          path: forward-*-unknown-linux-musl.tar.gz
+          path: |
+            forward-*-unknown-linux-musl.tar.gz
+            secrets-x86_64-unknown-linux-gnu.tar.gz
 
   release:
     needs: [version, build]
@@ -156,12 +196,15 @@ jobs:
         run: |
           set -euo pipefail
           sed -i '0,/^version = ".*"/s//version = "'"$VERSION"'"/' Cargo.toml
+          # The opencode plugin speaks a versioned protocol to the broker, so it
+          # carries the same version and ships in the same release.
+          sed -i '0,/"version": ".*"/s//"version": "'"$VERSION"'"/' package.json
           cargo update --workspace
           grep -Fx "version = \"$VERSION\"" Cargo.toml
 
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add Cargo.toml Cargo.lock
+          git add Cargo.toml Cargo.lock package.json
           git commit -m "chore: release v${VERSION} [skip ci]"
           git tag "v${VERSION}"
           git push origin main --tags
@@ -172,8 +215,19 @@ jobs:
           name: release-assets
           path: release-assets
 
+      - name: Generate checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd release-assets && sha256sum ./*.tar.gz > ../SHA256SUMS)
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.version.outputs.version }}
-        run: gh release create "v${VERSION}" release-assets/forward-*-unknown-linux-musl.tar.gz --generate-notes
+        run: |
+          gh release create "v${VERSION}" \
+            release-assets/forward-*-unknown-linux-musl.tar.gz \
+            release-assets/secrets-x86_64-unknown-linux-gnu.tar.gz \
+            SHA256SUMS \
+            --generate-notes

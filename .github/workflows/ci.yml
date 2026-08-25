@@ -13,13 +13,20 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
 jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: rustup component add rustfmt
-      - run: cargo fmt --all -- --check
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      # Nightly: rustfmt.toml uses imports_granularity and group_imports.
+      - run: cargo +nightly fmt --all -- --check
 
   clippy:
     runs-on: ubuntu-latest
@@ -27,9 +34,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: rustup component add clippy
-      - run: cargo clippy --locked --all-targets --all-features -- -D warnings
+      - run: cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+      # Second, stricter pass over shipped code only. The secrets crate gets
+      # this from its manifest lints; this covers the whole workspace uniformly.
       - run: >-
-          cargo clippy --locked --lib --bins --all-features --
+          cargo clippy --locked --workspace --lib --bins --all-features --
           -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic
           -D clippy::indexing_slicing
 
@@ -38,7 +47,12 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
-      - run: cargo test --locked
+      - uses: taiki-e/install-action@nextest
+      # nextest, not `cargo test`: the broker's integration tests mutate
+      # process-global environment and need process-per-test isolation. The
+      # daemon and pcsc suites need the opposite and are pinned to a serial
+      # test-group in .config/nextest.toml.
+      - run: cargo nextest run --locked --workspace --all-targets --all-features
 
   source-line-limit:
     runs-on: ubuntu-latest
@@ -51,7 +65,50 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install 1.88.0 --profile minimal
-      - run: cargo +1.88.0 test --locked
+      # Package-scoped on purpose: the secrets crate requires 1.92, so a
+      # --workspace run would fail on it before proving anything about the
+      # crates that do hold the 1.88 floor. All four floor crates run their
+      # own tests here; forward alone would only compile the other three.
+      - run: cargo +1.88.0 test --locked -p forward -p containment -p proto -p hygiene
+
+  miri:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@nextest
+      # Miri cannot execute the clock syscall, socket resolver, or /proc
+      # resolver front-ends. The selected tests instead cover the pure security
+      # primitives and containment core through their injectable seams.
+      - env:
+          MIRIFLAGS: "-Zmiri-strict-provenance -Zmiri-symbolic-alignment-check"
+        run: |
+          set -euo pipefail
+          run_miri() {
+            local package=$1
+            local filter=$2
+            local log="miri-${package}.log"
+            local ran
+
+            cargo +nightly miri nextest run --all-features -p "$package" -E "$filter" 2>&1 | tee "$log"
+            # The workflow sets CARGO_TERM_COLOR=always, so nextest's summary
+            # reads `<esc>[1m83<esc>[0m tests run`. Strip the escapes before
+            # matching, or the count never parses and this gate fails on a
+            # passing run — which is how it was caught.
+            ran="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -oE '[0-9]+ tests run' | tail -n 1 | cut -d' ' -f1)"
+            if [[ ! "$ran" =~ ^[1-9][0-9]*$ ]]; then
+              printf 'error: miri executed no %s tests\n' "$package" >&2
+              exit 1
+            fi
+            printf 'miri executed %s %s tests\n' "$ran" "$package"
+          }
+
+          run_miri secrets 'package(secrets) and test(/^(capability_grants|capability|config|grants|proto|receipts|requests|secret|client)::tests::/)'
+          run_miri hygiene 'package(hygiene) and test(/^tests::(boot_time_arithmetic_saturates_instead_of_wrapping|constant_time_eq_matches_equality_including_length|hex_decode_refuses_anything_but_the_exact_length|hex_decode_refuses_non_hex_bytes|hex_round_trips_at_the_declared_length)$/)'
+          run_miri containment 'package(containment)'
 
   cross-compile:
     runs-on: ubuntu-latest
@@ -67,7 +124,34 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo install cross --version 0.2.5 --locked
-      - run: cross build --locked --release --target ${{ matrix.target }}
+      # forward ships musl per-target tarballs. The secrets daemon stays a
+      # native glibc build (mlockall, pidfd) and is not cross-compiled here.
+      - run: cross build --locked --release -p forward --target ${{ matrix.target }}
+
+  opencode-plugin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+      - run: bun install --frozen-lockfile && bun run test:secretsd-plugin
+
+  omp-extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: oven-sh/setup-bun@735343b667d3e6f658f44d0eca948eb6282f2b76 # v2.0.2
+      - name: Install root dependencies (extension imports the opencode protocol client)
+        run: bun install --frozen-lockfile
+      - name: Test omp secretsd extension
+        working-directory: omp
+        run: bun install --frozen-lockfile && bun run test:secretsd-omp-extension
+
+  machete:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: bnjbvr/cargo-machete@main
 
   deny:
     runs-on: ubuntu-latest
