@@ -4,6 +4,7 @@ pub mod peer;
 pub mod proxy;
 pub mod push;
 pub mod request;
+pub mod subscription;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::thread;

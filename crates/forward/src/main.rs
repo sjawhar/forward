@@ -130,6 +130,8 @@ fn main() -> anyhow::Result<()> {
             let armed = bridge::Armed::new(cfg.clone());
             bridge::serve_arming(armed.clone(), bridge::arm_socket_path());
             let grants = forward::browser::grant::Grants::new();
+            forward::browser::subscription::spawn(grants.clone())
+                .unwrap_or_else(|error| exit_with_error(error));
             let slot = forward::browser::push::FeedSlot::new();
             forward::browser::push::spawn_listener(&cfg, slot.clone(), grants.clone())
                 .unwrap_or_else(|error| exit_with_error(error));

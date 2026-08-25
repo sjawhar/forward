@@ -81,6 +81,8 @@ pub enum Request {
     },
     /// Wipe all plaintext and revoke all grants.
     Lock,
+    /// Hold this connection open for broker authority epoch events.
+    Subscribe,
 }
 
 impl fmt::Debug for Request {
@@ -126,6 +128,7 @@ impl fmt::Debug for Request {
             Self::Grants => formatter.write_str("Grants"),
             Self::Deny { id } => formatter.debug_struct("Deny").field("id", id).finish(),
             Self::Lock => formatter.write_str("Lock"),
+            Self::Subscribe => formatter.write_str("Subscribe"),
         }
     }
 }
@@ -206,6 +209,10 @@ pub fn parse_request(line: &[u8]) -> Result<Request, ErrCode> {
                 .map_err(|_| ErrCode::BadRequest)?,
         }),
         "LOCK" => Ok(Request::Lock),
+        "SUBSCRIBE" => fields
+            .is_empty()
+            .then_some(Request::Subscribe)
+            .ok_or(ErrCode::BadRequest),
         _ => Err(ErrCode::UnknownOp),
     }
 }
@@ -256,6 +263,11 @@ mod tests {
         );
     }
 
+    #[test]
+    fn subscription_is_input_free() {
+        assert_eq!(parse_request(b"SUBSCRIBE"), Ok(Request::Subscribe));
+        assert_eq!(parse_request(b"SUBSCRIBE\tpid=1"), Err(ErrCode::BadRequest));
+    }
     #[test]
     fn rejects_unknown_op() {
         assert_eq!(parse_request(b"FROBNICATE\tx=1"), Err(ErrCode::UnknownOp));

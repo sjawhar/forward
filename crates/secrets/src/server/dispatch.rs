@@ -322,6 +322,8 @@ fn lock(shared: &Shared) -> Decision {
     state.receipts.clear();
     state.capability_grants.clear();
     state.lock_epoch = state.lock_epoch.saturating_add(1);
+    let epoch = state.lock_epoch;
+    let subscribers = std::sync::Arc::clone(&state.subscribers);
     if let Some(active) = state.active_decrypt.take() {
         state.queue.deny(active.id);
         let _ = nix::sys::signal::killpg(
@@ -331,6 +333,11 @@ fn lock(shared: &Shared) -> Decision {
     }
     drop(state);
     condvar.notify_all();
+    // The epoch changes before any fallible socket write. Subscribers attach
+    // under the same publication lock, so they see either this event or its
+    // current epoch; reconnecting forward re-reads HELLO to fail closed if a
+    // write was missed while its socket was down.
+    subscribers.publish(epoch);
     Decision {
         outcome: Outcome::Ok,
         scope_kind: None,
@@ -410,6 +417,12 @@ pub(super) fn dispatch(
         Request::Grants => grants(shared),
         Request::Deny { id } => deny(shared, id),
         Request::Lock => lock(shared),
+        Request::Subscribe => Decision {
+            outcome: Outcome::Failed(ErrCode::BadRequest, "subscription is connection-scoped"),
+            scope_kind: None,
+            source: None,
+            request_id: None,
+        },
         Request::Authorize {
             cap,
             token_hex,
@@ -428,6 +441,7 @@ pub(super) fn request_key(request: &Request) -> Option<&str> {
         | Request::Grants
         | Request::Deny { .. }
         | Request::Lock
+        | Request::Subscribe
         | Request::Authorize { .. }
         | Request::Redeem { .. } => None,
     }

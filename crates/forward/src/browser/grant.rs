@@ -3,7 +3,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// A process instance that owns a grant.
-///
 /// Linux may reuse a PID after its process exits. Pairing the PID with the
 /// kernel start time prevents a new process from inheriting that authority.
 /// Shared with the secrets broker: see `crates/containment`.
@@ -12,7 +11,6 @@ use parking_lot::Mutex;
 use zeroize::Zeroize;
 
 /// One session's authorisation to reach the laptop's browser.
-///
 /// `Clone` on purpose: `Grants::live` hands the proxy a copy whose token lives
 /// as long as its handler; expiry zeroes only the registry's copy.
 #[derive(Clone)]
@@ -25,10 +23,15 @@ pub struct Grant {
     pub token: Vec<u8>,
     pub deadline: Instant,
 }
-
+impl Drop for Grant {
+    fn drop(&mut self) {
+        self.token.zeroize();
+    }
+}
 /// Live pipe handles per port: duplicated descriptors for both ends of every
 /// connection the port's grant is currently serving.
 type PipeTable = HashMap<u16, Vec<(u64, (std::net::TcpStream, std::net::TcpStream))>>;
+type PipeHandles = Vec<(u64, (std::net::TcpStream, std::net::TcpStream))>;
 
 /// Live grants, keyed by the loopback port each one owns.
 ///
@@ -39,6 +42,7 @@ type PipeTable = HashMap<u16, Vec<(u64, (std::net::TcpStream, std::net::TcpStrea
 pub struct Grants {
     ports: Arc<Mutex<HashMap<u16, Grant>>>,
     pipes: Arc<Mutex<PipeTable>>,
+    authority_epoch: Arc<Mutex<Option<u64>>>,
     next_pipe_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -51,6 +55,47 @@ impl Grants {
         let mut ports = self.ports.lock();
         drop(scrub(&mut ports, port));
         ports.insert(port, grant);
+    }
+
+    /// Insert only when a live subscription has proven `epoch` current.
+    ///
+    /// Keeping the authority lock through insertion closes the last interval
+    /// between the request handler's HELLO recheck and this registry update.
+    pub fn insert_if_epoch(&self, port: u16, epoch: u64, grant: Grant) -> bool {
+        let authority_epoch = self.authority_epoch.lock();
+        if *authority_epoch != Some(epoch) {
+            return false;
+        }
+        self.insert(port, grant);
+        true
+    }
+
+    /// Record a subscription epoch and revoke every grant if it changed.
+    ///
+    /// The first epoch merely establishes authority. Every later advance or
+    /// regression is unprovable continuity and therefore fails closed.
+    pub fn observe_epoch(&self, epoch: u64) -> bool {
+        let mut authority_epoch = self.authority_epoch.lock();
+        let changed = authority_epoch.is_some_and(|seen| seen != epoch);
+        *authority_epoch = Some(epoch);
+        if changed {
+            shutdown(self.drain_all());
+        }
+        changed
+    }
+
+    /// Revoke every grant for a newly observed broker instance.
+    pub fn replace_authority(&self, epoch: u64) {
+        let mut authority_epoch = self.authority_epoch.lock();
+        *authority_epoch = Some(epoch);
+        shutdown(self.drain_all());
+    }
+
+    /// Revoke every grant when the subscription remains unprovable.
+    pub fn invalidate_authority(&self) {
+        let mut authority_epoch = self.authority_epoch.lock();
+        *authority_epoch = None;
+        shutdown(self.drain_all());
     }
 
     /// The grant for `port` if it has not expired.
@@ -154,12 +199,27 @@ impl Grants {
             drop(scrub(&mut ports, port));
             pipes.remove(&port).unwrap_or_default()
         };
-        for (_, (client, laptop)) in severed {
-            // Both directions of both sockets: the pipe threads block on reads
-            // of either end, and a one-sided shutdown leaves the other blocked.
-            let _ = client.shutdown(std::net::Shutdown::Both);
-            let _ = laptop.shutdown(std::net::Shutdown::Both);
-        }
+        shutdown(severed);
+    }
+
+    fn drain_all(&self) -> PipeHandles {
+        let mut pipes = self.pipes.lock();
+        let mut ports = self.ports.lock();
+        ports.values_mut().for_each(|grant| grant.token.zeroize());
+        ports.clear();
+        std::mem::take(&mut *pipes)
+            .into_values()
+            .flatten()
+            .collect()
+    }
+}
+
+fn shutdown(severed: PipeHandles) {
+    for (_, (client, laptop)) in severed {
+        // Both directions of both sockets: the pipe threads block on reads of
+        // either end, and a one-sided shutdown leaves the other blocked.
+        let _ = client.shutdown(std::net::Shutdown::Both);
+        let _ = laptop.shutdown(std::net::Shutdown::Both);
     }
 }
 

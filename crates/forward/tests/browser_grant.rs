@@ -8,6 +8,9 @@ use forward::browser::grant::{Grant, Grants, ProcessAnchor};
 use forward::browser::peer::process_start;
 use forward::browser::proxy::{self, Resolver};
 
+#[path = "browser_grant/subscription.rs"]
+mod subscription;
+
 const TOKEN: &[u8] = b"correct-horse";
 
 fn current_anchor() -> ProcessAnchor {

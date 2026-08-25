@@ -13,12 +13,25 @@
 //! belongs here and not in the shared crate. The broker's own CLI never sends
 //! either verb.
 
+use std::io::Write as _;
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use proto::{BrokerClient, BrokerResponse, ClientError};
 use zeroize::Zeroizing;
 
+const SUBSCRIPTION_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Browser capability namespace in the broker.
 pub const CAP_BROWSER: &str = "browser";
+
+/// The broker identity and authority epoch from a version-checked handshake.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct BrokerIdentity {
+    pub(crate) instance: String,
+    pub(crate) epoch: u64,
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerError {
@@ -110,16 +123,50 @@ pub fn redeem(path: &Path, receipt: &[u8], cap: &str) -> Result<u64, BrokerError
     redeemed_cap(&fields, cap)
 }
 
-/// Read the broker authority epoch through a fresh, version-checked `HELLO`.
-pub fn lock_epoch(path: &Path) -> Result<u64, BrokerError> {
+/// Read the broker identity and authority epoch through a fresh, version-checked
+/// `HELLO`.
+pub(crate) fn broker_identity(path: &Path) -> Result<BrokerIdentity, BrokerError> {
     let fields = BrokerClient::new(path)
         .hello_fields()
         .map_err(|error| map_error(error, path, Verb::Hello))?;
-    fields
+    let instance = fields.required("instance").map_err(|_| {
+        BrokerError::Protocol("broker HELLO reply has no usable instance".to_owned())
+    })?;
+    let epoch = fields
         .required("epoch")
         .map_err(|_| BrokerError::Protocol("broker HELLO reply has no usable epoch".to_owned()))?
         .parse()
-        .map_err(|_| BrokerError::Protocol("broker HELLO reply has no usable epoch".to_owned()))
+        .map_err(|_| BrokerError::Protocol("broker HELLO reply has no usable epoch".to_owned()))?;
+    Ok(BrokerIdentity {
+        instance: instance.to_owned(),
+        epoch,
+    })
+}
+
+/// Attach to the broker's input-free authority-event subscription.
+pub(crate) fn subscribe(path: &Path) -> Result<UnixStream, BrokerError> {
+    let mut stream = UnixStream::connect(path).map_err(|source| BrokerError::Connect {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    stream
+        .set_write_timeout(Some(SUBSCRIPTION_WRITE_TIMEOUT))
+        .map_err(|source| BrokerError::Connect {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    stream
+        .write_all(b"SUBSCRIBE\n")
+        .map_err(|source| BrokerError::Connect {
+            path: path.to_path_buf(),
+            source,
+        })?;
+    Ok(stream)
+}
+
+/// Read the broker authority epoch through a fresh, version-checked `HELLO`.
+pub fn lock_epoch(path: &Path) -> Result<u64, BrokerError> {
+    broker_identity(path).map(|identity| identity.epoch)
 }
 
 /// Send one request over the shared transport and map its reply.

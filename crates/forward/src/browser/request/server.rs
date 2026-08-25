@@ -182,15 +182,19 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
     }
     let port = proxy.port();
     let deadline = Instant::now() + Duration::from_secs(ttl);
-    deps.grants.insert(
+    if !deps.grants.insert_if_epoch(
         port,
+        redeemed_epoch,
         Grant {
             session: session.clone(),
             anchor,
             token: std::mem::take(&mut *token),
             deadline,
         },
-    );
+    ) {
+        let _ = stream.write_all(b"REFUSED\n");
+        return;
+    }
     proxy::reap_at(deps.grants.clone(), port, deadline);
     proxy.serve();
     eprintln!(

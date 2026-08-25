@@ -45,10 +45,15 @@ const FAST_CONNECTION_WORKERS: usize = 1;
 const FAST_CONNECTION_QUEUE_DEPTH: usize = 8;
 const CONTROL_CONNECTION_WORKERS: usize = 1;
 const CONTROL_CONNECTION_QUEUE_DEPTH: usize = 8;
+const SUBSCRIPTION_CONNECTION_WORKERS: usize = 1;
+const SUBSCRIPTION_CONNECTION_QUEUE_DEPTH: usize = 8;
 #[cfg(test)]
 const CONNECTION_CAPACITY: usize = CONNECTION_WORKERS + CONNECTION_QUEUE_DEPTH;
 const CONNECTION_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const CONNECTION_CAPACITY_RESPONSE: &[u8] = b"ERR\tINTERNAL\tconnection capacity reached\n";
+const SUBSCRIBER_CAPACITY: usize = 8;
+const SUBSCRIBER_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
+const SUBSCRIBER_CAPACITY_RESPONSE: &[u8] = b"ERR\tINTERNAL\tsubscription capacity reached\n";
 
 #[derive(Debug)]
 struct State {
@@ -64,6 +69,7 @@ struct State {
     config: Config,
     failures: Vec<(RequestId, ErrCode)>,
     lock_epoch: u64,
+    subscribers: Arc<SubscriberHub>,
     active_decrypt: Option<ActiveDecrypt>,
 }
 
@@ -95,6 +101,7 @@ impl State {
             config,
             failures: Vec::new(),
             lock_epoch: 0,
+            subscribers: Arc::new(SubscriberHub::default()),
             active_decrypt: None,
         })
     }
@@ -126,6 +133,58 @@ fn wait_state<'a>(
         .wait_timeout(guard, duration)
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .0
+}
+
+#[derive(Debug)]
+struct Subscriber {
+    peer: crate::peer::PeerIdentity,
+    stream: UnixStream,
+}
+
+#[derive(Debug, Default)]
+struct SubscriberHub {
+    subscribers: Mutex<Vec<Subscriber>>,
+}
+
+impl SubscriberHub {
+    fn attach(
+        &self,
+        shared: &Shared,
+        mut stream: UnixStream,
+        peer: crate::peer::PeerIdentity,
+    ) -> std::io::Result<()> {
+        stream.set_write_timeout(Some(SUBSCRIBER_WRITE_TIMEOUT))?;
+        // This lock serializes attach with publication. If LOCK wins the state
+        // mutex first, attach observes its epoch; if attach wins first, LOCK
+        // publishes the next epoch after this initial line.
+        let mut subscribers = self
+            .subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        subscribers.retain(|subscriber| subscriber.peer.is_alive());
+        if subscribers.len() >= SUBSCRIBER_CAPACITY {
+            return stream.write_all(SUBSCRIBER_CAPACITY_RESPONSE);
+        }
+        let epoch = {
+            let (mutex, _) = &**shared;
+            lock_state(mutex).lock_epoch
+        };
+        stream.write_all(format!("EPOCH {epoch}\n").as_bytes())?;
+        subscribers.push(Subscriber { peer, stream });
+        drop(subscribers);
+        Ok(())
+    }
+
+    fn publish(&self, epoch: u64) {
+        let line = format!("EPOCH {epoch}\n");
+        let mut subscribers = self
+            .subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        subscribers.retain_mut(|subscriber| {
+            subscriber.peer.is_alive() && subscriber.stream.write_all(line.as_bytes()).is_ok()
+        });
+    }
 }
 
 /// Generate an identifier unique to this daemon process.
@@ -197,6 +256,7 @@ fn audit_context(request: &Request, shared: &Shared) -> AuditContext {
         | Request::Grants
         | Request::Deny { .. }
         | Request::Lock
+        | Request::Subscribe
         | Request::Redeem { .. } => return audit,
     };
     let Some(token) = token_hex
@@ -319,6 +379,14 @@ fn handle(mut stream: UnixStream, shared: &Shared) -> std::io::Result<()> {
     if let Ok(request) = &request {
         tests::delay_register_handler(request);
     }
+    if matches!(&request, Ok(Request::Subscribe)) {
+        let subscribers = {
+            let (mutex, _) = &**shared;
+            Arc::clone(&lock_state(mutex).subscribers)
+        };
+        tracing::info!(peer_pid = ?peer_pid, caller_pid = ?caller.pid(), "subscription attached");
+        return subscribers.attach(shared, stream, caller);
+    }
     let decision = request.map_or_else(
         |_| dispatch::Decision {
             outcome: Outcome::Failed(ErrCode::BadRequest, "invalid request frame"),
@@ -378,6 +446,7 @@ enum ConnectionLane {
     Main,
     Fast,
     Control,
+    Subscription,
 }
 
 const fn request_lane(request: &Request) -> ConnectionLane {
@@ -391,6 +460,10 @@ const fn request_lane(request: &Request) -> ConnectionLane {
         | Request::Grants
         | Request::Redeem { .. } => ConnectionLane::Fast,
         Request::Deny { .. } | Request::Lock => ConnectionLane::Control,
+        // Attaching can wait for a bounded write to a saturated subscriber. It
+        // hands its held socket to SubscriberHub and returns, but remains on a
+        // dedicated lane so this cannot delay the Control lane's LOCK worker.
+        Request::Subscribe => ConnectionLane::Subscription,
     }
 }
 
@@ -478,6 +551,13 @@ fn serve_listener(listener: &UnixListener, config: Config) -> std::io::Result<()
     start_connection_workers(fast_receiver, &shared, FAST_CONNECTION_WORKERS);
     let (control_sender, control_receiver) = mpsc::sync_channel(CONTROL_CONNECTION_QUEUE_DEPTH);
     start_connection_workers(control_receiver, &shared, CONTROL_CONNECTION_WORKERS);
+    let (subscription_sender, subscription_receiver) =
+        mpsc::sync_channel(SUBSCRIPTION_CONNECTION_QUEUE_DEPTH);
+    start_connection_workers(
+        subscription_receiver,
+        &shared,
+        SUBSCRIPTION_CONNECTION_WORKERS,
+    );
     loop {
         let (stream, _) = listener.accept()?;
         match ready_request_lane(&stream) {
@@ -486,6 +566,7 @@ fn serve_listener(listener: &UnixListener, config: Config) -> std::io::Result<()
                     Some(ConnectionLane::Main) | None => main_sender.try_send(stream),
                     Some(ConnectionLane::Fast) => fast_sender.try_send(stream),
                     Some(ConnectionLane::Control) => control_sender.try_send(stream),
+                    Some(ConnectionLane::Subscription) => subscription_sender.try_send(stream),
                 };
                 match result {
                     Ok(()) => {}
@@ -517,6 +598,7 @@ pub fn serve(config: Config) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::io::{BufRead as _, BufReader};
     use std::os::fd::AsFd;
     use std::path::Path;
 
@@ -601,6 +683,88 @@ mod tests {
 
         assert!(matches!(request_lane(&authorize), ConnectionLane::Main));
         assert!(matches!(request_lane(&redeem), ConnectionLane::Fast));
+        assert!(matches!(
+            request_lane(&Request::Subscribe),
+            ConnectionLane::Subscription
+        ));
+    }
+
+    #[test]
+    fn subscription_reports_the_current_epoch_and_does_not_hold_the_lock_lane() {
+        // This fails if SUBSCRIBE is handled as an ordinary one-shot request,
+        // if it does not publish the attach epoch, or if its held connection
+        // can monopolize LOCK's dedicated worker.
+        let directory = tempfile::tempdir().unwrap();
+        let config = test_config(directory.path());
+        let socket_path = config.socket_path.clone();
+        let server_listener = listener(&config).unwrap();
+        let _server = thread::spawn(move || serve_listener(&server_listener, config).unwrap());
+
+        let mut subscriber = UnixStream::connect(&socket_path).unwrap();
+        subscriber
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        subscriber.write_all(b"SUBSCRIBE\n").unwrap();
+        let mut reader = BufReader::new(subscriber.try_clone().unwrap());
+        let mut attached = String::new();
+        reader.read_line(&mut attached).unwrap();
+        assert_eq!(attached, "EPOCH 0\n");
+
+        let mut control = UnixStream::connect(socket_path).unwrap();
+        control
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        control.write_all(b"LOCK\n").unwrap();
+        let mut response = String::new();
+        BufReader::new(control).read_line(&mut response).unwrap();
+        assert_eq!(response, "OK\n");
+
+        let mut after_lock = String::new();
+        reader.read_line(&mut after_lock).unwrap();
+        assert_eq!(after_lock, "EPOCH 1\n");
+    }
+
+    #[test]
+    fn a_dead_subscriber_does_not_consume_the_attachment_cap() {
+        // This fails if the cap is checked before PinnedPeer::is_alive: the
+        // fresh subscriber receives the capacity refusal instead of EPOCH 0.
+        let directory = tempfile::tempdir().unwrap();
+        let shared = Arc::new((
+            Mutex::new(State::new(test_config(directory.path())).unwrap()),
+            Condvar::new(),
+        ));
+        let subscribers = Arc::clone(&lock_state(&shared.0).subscribers);
+        {
+            let mut entries = subscribers
+                .subscribers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            for _ in 0..SUBSCRIBER_CAPACITY {
+                let (stream, _) = UnixStream::pair().unwrap();
+                let fd = std::fs::File::open("/dev/null").unwrap().into();
+                entries.push(Subscriber {
+                    peer: crate::peer::PeerIdentity::from_owned_fd(fd),
+                    stream,
+                });
+            }
+        }
+        let (server, client) = UnixStream::pair().unwrap();
+
+        subscribers
+            .attach(&shared, server, crate::peer::current_for_test())
+            .unwrap();
+
+        let mut epoch = String::new();
+        BufReader::new(client).read_line(&mut epoch).unwrap();
+        assert_eq!(epoch, "EPOCH 0\n");
+        assert_eq!(
+            subscribers
+                .subscribers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            1
+        );
     }
 
     #[test]

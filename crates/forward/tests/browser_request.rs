@@ -84,6 +84,7 @@ fn spawn_server(
     resolver: SessionResolver,
     redeemer: Redeemer,
 ) {
+    grants.observe_epoch(0);
     thread::spawn(move || {
         serve_with_binder(
             Deps {
