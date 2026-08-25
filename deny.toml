@@ -28,7 +28,21 @@ exceptions = []
 private = { ignore = true }
 
 [bans]
-multiple-versions = "warn"
+multiple-versions = "deny"
+skip = [
+    # Reviewed 2026-08-25: nix 0.29 remains in the credential-path crates
+    # until the planned 0.31 unification also removes containment's legacy
+    # SO_PEERPIDFD code. Main owns that complete, separately verified change
+    # in this session; do not renew this exception.
+    { name = "nix", version = "0.29.0", reason = "credential-path nix 0.31 migration pending its required source cutover" },
+    # Reviewed 2026-08-25: these are the lower transitive halves of the
+    # distinct TOML 0.8 (secrets) and TOML 1 (forward) parser stacks.
+    { name = "serde_spanned", version = "0.6.9", reason = "transitive from secrets' TOML 0.8 source-root parser" },
+    { name = "syn", version = "2.0.119", reason = "transitive derive-macro dependency; current direct dependencies require both majors" },
+    { name = "toml", version = "0.8.23", reason = "secrets parses source-root configuration with the 0.8 API" },
+    { name = "toml_datetime", version = "0.6.11", reason = "transitive from the secrets TOML 0.8 parser" },
+    { name = "winnow", version = "0.7.15", reason = "transitive from the secrets TOML 0.8 parser" },
+]
 wildcards = "deny"
 highlight = "all"
 deny = [

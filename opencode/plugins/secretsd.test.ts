@@ -61,7 +61,7 @@ test("exports a V1 server plugin despite its testable named helpers", () => {
 });
 
 test("keeps the Rust and plugin protocol versions in lockstep", () => {
-  const protoPath = "../../crates/secrets/src/proto.rs";
+  const protoPath = "../../crates/proto/src/lib.rs";
   const proto = readFileSync(join(import.meta.dir, protoPath), "utf8");
   const rustVersion = /pub const PROTOCOL_VERSION: u32 = (\d+)/.exec(proto)?.[1];
 
