@@ -15,6 +15,9 @@ use crate::config::Config;
 use crate::peer::authorized;
 use crate::pipe::bidirectional;
 use crate::refusal::refuse;
+/// The devbox's maximum requested grant lifetime, enforced on both peers.
+pub(crate) const LONGEST_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+
 /// The maximum idle read or blocked-write interval for a proxied CDP session.
 /// The relay sends websocket keepalives every 30s, so this only reaps dead peers.
 const PIPE_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);

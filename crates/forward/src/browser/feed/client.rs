@@ -4,7 +4,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use super::super::BrowserError;
-use super::RelayTokens;
+use super::{RelayTokens, clamp_wire_ttl};
 use crate::config::Config;
 use crate::pipe::keepalive;
 
@@ -145,7 +145,12 @@ fn parse_token_line(line: &str) -> Option<(Vec<u8>, u64)> {
         return None;
     }
     let ttl: u64 = ttl.parse().ok()?;
-    (ttl != 0).then(|| (token.as_bytes().to_vec(), ttl))
+    (ttl != 0).then(|| {
+        (
+            token.as_bytes().to_vec(),
+            clamp_wire_ttl(Duration::from_secs(ttl)).as_secs(),
+        )
+    })
 }
 
 #[cfg(test)]

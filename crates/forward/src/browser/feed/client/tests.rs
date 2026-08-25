@@ -3,6 +3,14 @@ use std::net::TcpListener;
 use super::*;
 
 #[test]
+fn feed_line_ttl_is_clamped_to_twelve_hours() {
+    // This fails if a peer can send a wire ttl beyond the authority maximum.
+    let (_, ttl) = parse_token_line("TOKEN clamp-me 86400").expect("valid feed line");
+
+    assert_eq!(ttl, 12 * 60 * 60);
+}
+
+#[test]
 fn a_parsed_feed_token_resets_a_prior_outage() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let address = listener.local_addr().unwrap();

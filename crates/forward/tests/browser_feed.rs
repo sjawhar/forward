@@ -1,9 +1,9 @@
 use std::io::{BufRead as _, BufReader, Write as _};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use forward::browser::feed::RelayTokens;
-use forward::browser::grant::Grants;
+use forward::browser::grant::{Grant, Grants, ProcessAnchor};
 use forward::browser::push::{FeedSlot, spawn_listener};
 
 #[test]
@@ -75,4 +75,52 @@ fn the_devbox_feed_slot_pushes_a_token_to_the_laptop_feed_client() {
 
     assert!(slot.push(b"fresh-relay-token", 60));
     assert!(laptop_tokens.accepts(b"fresh-relay-token"));
+}
+
+#[test]
+fn live_grants_are_re_pushed_on_the_renewal_tick() {
+    // This fails if an attached feed does not periodically renew live grants.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    let mut cfg = forward::config::Config::default_values_for_test();
+    cfg.listen = "127.0.0.1".to_owned();
+    cfg.peer = "127.0.0.1".to_owned();
+    cfg.grant_port = port;
+    let grants = Grants::new();
+    grants.insert(
+        12811,
+        Grant {
+            session: "live".to_owned(),
+            anchor: ProcessAnchor::new(1, 1),
+            token: b"renewed-token".to_vec(),
+            deadline: Instant::now() + Duration::from_secs(5 * 60),
+        },
+    );
+    grants.insert(
+        12812,
+        Grant {
+            session: "expired".to_owned(),
+            anchor: ProcessAnchor::new(1, 1),
+            token: b"expired-token".to_vec(),
+            deadline: Instant::now() - Duration::from_secs(1),
+        },
+    );
+
+    spawn_listener(&cfg, FeedSlot::new(), grants).unwrap();
+    let mut feed = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    feed.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    feed.write_all(b"FEED\n").unwrap();
+    let mut reader = BufReader::new(feed.try_clone().unwrap());
+    let mut first = String::new();
+    reader.read_line(&mut first).unwrap();
+    assert_eq!(first.split_whitespace().nth(1), Some("renewed-token"));
+    feed.write_all(b"OK\n").unwrap();
+
+    feed.set_read_timeout(Some(Duration::from_secs(65)))
+        .unwrap();
+    let mut renewal = String::new();
+    reader.read_line(&mut renewal).unwrap();
+    assert_eq!(renewal.split_whitespace().nth(1), Some("renewed-token"));
+    feed.write_all(b"OK\n").unwrap();
 }

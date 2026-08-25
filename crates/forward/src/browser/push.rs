@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use parking_lot::Mutex;
+use zeroize::Zeroize as _;
 
 use crate::browser::BrowserError;
 use crate::browser::grant::Grants;
@@ -21,6 +22,7 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_UNHEALTHY_LISTENER: Duration = Duration::from_secs(30);
 const TOKEN_BYTES: usize = 32;
+const RENEW: Duration = Duration::from_secs(60);
 
 /// The one attached feed connection, if any. Grants fail while empty: a token
 /// the laptop never acknowledged would be a dead grant sold as live.
@@ -40,6 +42,10 @@ impl FeedSlot {
             let _ = previous.shutdown(Shutdown::Both);
         }
         *slot = Some(stream);
+    }
+
+    fn is_attached(&self) -> bool {
+        self.inner.lock().is_some()
     }
 
     /// Push one token and wait for the laptop's `OK`. Serialized by the slot
@@ -102,10 +108,20 @@ pub fn spawn_listener(cfg: &Config, slot: FeedSlot, grants: Grants) -> Result<()
             source,
         })?;
     eprintln!("forward: grant feed listener on {ip}:{}", cfg.grant_port);
+    spawn_renewer(slot.clone(), grants.clone())?;
+
     let cfg = cfg.clone();
     thread::Builder::new()
         .name("grant-feed-listener".to_owned())
         .spawn(move || worker(cfg, listener, slot, grants))
+        .map(drop)
+        .map_err(|source| BrowserError::Spawn { source })
+}
+
+fn spawn_renewer(slot: FeedSlot, grants: Grants) -> Result<(), BrowserError> {
+    thread::Builder::new()
+        .name("grant-feed-renewer".to_owned())
+        .spawn(move || renewal_loop(slot, grants))
         .map(drop)
         .map_err(|source| BrowserError::Spawn { source })
 }
@@ -155,6 +171,15 @@ fn accept_loop(cfg: Config, listener: TcpListener, slot: FeedSlot, grants: Grant
     }
 }
 
+fn renewal_loop(slot: FeedSlot, grants: Grants) -> ! {
+    loop {
+        thread::sleep(RENEW);
+        if slot.is_attached() {
+            push_live(&slot, &grants);
+        }
+    }
+}
+
 /// A connection becomes the feed only after identifying itself with `FEED`:
 /// a doctor probe that connects and closes must never displace a live feed.
 fn attach_if_feed(cfg: &Config, slot: &FeedSlot, grants: &Grants, stream: TcpStream) {
@@ -178,8 +203,13 @@ fn attach_if_feed(cfg: &Config, slot: &FeedSlot, grants: &Grants, stream: TcpStr
     }
     eprintln!("forward: grant feed attached from {}", remote.ip());
     slot.attach(stream);
-    for (token, remaining_secs) in grants.snapshot_live() {
-        if !slot.push(&token, remaining_secs) {
+    push_live(slot, grants);
+}
+fn push_live(slot: &FeedSlot, grants: &Grants) {
+    for (mut token, remaining_secs) in grants.snapshot_live() {
+        let delivered = slot.push(&token, remaining_secs);
+        token.zeroize();
+        if !delivered {
             return;
         }
     }

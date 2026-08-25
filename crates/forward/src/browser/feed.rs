@@ -15,6 +15,8 @@ use zeroize::Zeroize as _;
 
 /// More live grants than this is not a workflow; evict the oldest.
 const MAX_LIVE_TOKENS: usize = 64;
+/// A laptop mirror is a renewed cache, never an independent 12-hour authority.
+const LEASE: Duration = Duration::from_secs(5 * 60);
 
 trait Clock: Send + Sync {
     fn now(&self) -> BootTime;
@@ -74,7 +76,7 @@ impl RelayTokens {
 
     pub fn insert(&self, mut token: Vec<u8>, ttl: Duration) {
         let now = self.clock.now();
-        let Some(deadline) = now.checked_add(ttl) else {
+        let Some(deadline) = now.checked_add(clamp_wire_ttl(ttl).min(LEASE)) else {
             token.zeroize();
             return;
         };
@@ -91,8 +93,15 @@ impl RelayTokens {
     fn insert_until(&self, token: Vec<u8>, deadline: BootTime, now: BootTime) {
         let mut inner = self.inner.lock();
         inner.entries.retain(|entry| entry.deadline > now);
+        inner.entries.retain_mut(|entry| {
+            let replaced = hygiene::constant_time_eq(&entry.token, &token);
+            if replaced {
+                entry.token.zeroize();
+            }
+            !replaced
+        });
         if inner.entries.len() == MAX_LIVE_TOKENS {
-            inner.entries.remove(0);
+            drop(inner.entries.remove(0));
         }
         inner.entries.push(TokenEntry { token, deadline });
     }
@@ -137,6 +146,10 @@ impl RelayTokens {
     pub fn is_connected(&self) -> bool {
         self.inner.lock().connected
     }
+}
+
+fn clamp_wire_ttl(ttl: Duration) -> Duration {
+    ttl.min(super::LONGEST_TTL)
 }
 
 fn boottime_now() -> BootTime {
