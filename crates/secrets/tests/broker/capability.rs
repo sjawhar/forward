@@ -31,10 +31,48 @@ fn authorize_grants_and_the_receipt_redeems_exactly_once() {
     let receipt = receipt_from(&header);
 
     let (redeemed, _) = harness.send(&format!("REDEEM\treceipt={receipt}\tcap=browser"));
-    assert_eq!(redeemed.trim_end(), "OK\tstatus=redeemed cap=browser");
+    assert_eq!(
+        redeemed.trim_end(),
+        "OK\tstatus=redeemed cap=browser epoch=0"
+    );
 
     let (again, _) = harness.send(&format!("REDEEM\treceipt={receipt}\tcap=browser"));
     assert!(again.contains("DENIED"), "second redeem must fail: {again}");
+}
+
+#[test]
+fn hello_and_redeem_report_the_lock_epoch() {
+    let harness = Harness::start(&["CAP_BROWSER"]);
+    harness.send(&format!(
+        "REGISTER\ttoken={}\tsession=ses_a\tpid=1",
+        token(TOKEN_A)
+    ));
+    let (hello_before, _) = harness.send(&format!(
+        "HELLO\tversion={}",
+        secrets::proto::PROTOCOL_VERSION
+    ));
+    let (header, _) = harness.send(&format!("AUTHORIZE\tcap=browser\ttoken={}", token(TOKEN_A)));
+    let receipt = receipt_from(&header);
+    let (redeemed, _) = harness.send(&format!("REDEEM\treceipt={receipt}\tcap=browser"));
+
+    harness.send("LOCK");
+
+    let (hello_after, _) = harness.send(&format!(
+        "HELLO\tversion={}",
+        secrets::proto::PROTOCOL_VERSION
+    ));
+
+    assert_eq!(epoch_from(&hello_before), Some(0));
+    assert_eq!(epoch_from(&redeemed), Some(0));
+    assert_eq!(epoch_from(&hello_after), Some(1));
+}
+
+fn epoch_from(header: &str) -> Option<u64> {
+    header
+        .trim_end()
+        .split(' ')
+        .find_map(|field| field.strip_prefix("epoch="))
+        .and_then(|epoch| epoch.parse().ok())
 }
 
 #[test]
@@ -51,7 +89,10 @@ fn redeem_refuses_a_mismatched_capability_without_consuming_the_receipt() {
     assert!(mismatched.contains("DENIED"));
 
     let (redeemed, _) = harness.send(&format!("REDEEM\treceipt={receipt}\tcap=browser"));
-    assert_eq!(redeemed.trim_end(), "OK\tstatus=redeemed cap=browser");
+    assert_eq!(
+        redeemed.trim_end(),
+        "OK\tstatus=redeemed cap=browser epoch=0"
+    );
 }
 
 #[test]
@@ -112,7 +153,10 @@ fn authorization_and_redemption_never_log_credentials() {
     let receipt = receipt_from(&header);
     let (redeemed, _) = harness.send(&format!("REDEEM\treceipt={receipt}\tcap=browser"));
 
-    assert_eq!(redeemed.trim_end(), "OK\tstatus=redeemed cap=browser");
+    assert_eq!(
+        redeemed.trim_end(),
+        "OK\tstatus=redeemed cap=browser epoch=0"
+    );
     let (replayed, _) = harness.send(&format!("REDEEM\treceipt={receipt}\tcap=browser"));
     assert!(replayed.contains("DENIED"));
     let captured = match request_log().lock() {

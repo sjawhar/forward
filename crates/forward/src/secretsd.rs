@@ -62,6 +62,7 @@ pub enum BrokerError {
 enum Verb<'a> {
     Authorize { cap: &'a str },
     Redeem,
+    Hello,
 }
 
 /// `SECRETSD_SOCK`, else `$XDG_RUNTIME_DIR/secretsd.sock`, else
@@ -87,9 +88,11 @@ pub fn authorize(cap: &str) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
     Ok(Zeroizing::new(receipt.as_bytes().to_vec()))
 }
 
-/// Redeem a receipt with the broker; `Ok(())` only when the broker confirms
-/// this exact capability. One receipt redeems exactly once.
-pub fn redeem(path: &Path, receipt: &[u8], cap: &str) -> Result<(), BrokerError> {
+/// Redeem a receipt with the broker and return its authority epoch.
+///
+/// One receipt redeems exactly once. The epoch is captured at redemption and
+/// must be rechecked before forward records a grant.
+pub fn redeem(path: &Path, receipt: &[u8], cap: &str) -> Result<u64, BrokerError> {
     if !valid_hex_bytes(receipt, 64) {
         return Err(BrokerError::Protocol(
             "receipt is not lowercase ASCII hex".to_owned(),
@@ -105,6 +108,18 @@ pub fn redeem(path: &Path, receipt: &[u8], cap: &str) -> Result<(), BrokerError>
     let frame = Zeroizing::new(format!("REDEEM\treceipt={receipt}\tcap={cap}"));
     let fields = call(path, &frame, Verb::Redeem)?;
     redeemed_cap(&fields, cap)
+}
+
+/// Read the broker authority epoch through a fresh, version-checked `HELLO`.
+pub fn lock_epoch(path: &Path) -> Result<u64, BrokerError> {
+    let fields = BrokerClient::new(path)
+        .hello_fields()
+        .map_err(|error| map_error(error, path, Verb::Hello))?;
+    fields
+        .required("epoch")
+        .map_err(|_| BrokerError::Protocol("broker HELLO reply has no usable epoch".to_owned()))?
+        .parse()
+        .map_err(|_| BrokerError::Protocol("broker HELLO reply has no usable epoch".to_owned()))
 }
 
 /// Send one request over the shared transport and map its reply.
@@ -132,6 +147,7 @@ fn map_error(error: ClientError, path: &Path, verb: Verb<'_>) -> BrokerError {
         ClientError::ApprovalTimeout => match verb {
             Verb::Authorize { .. } => BrokerError::Timeout,
             Verb::Redeem => BrokerError::Protocol("redeem timed out".to_owned()),
+            Verb::Hello => BrokerError::Protocol("HELLO timed out".to_owned()),
         },
         // A version disagreement and an unknown verb are different failures: the
         // first means the broker speaks another protocol, the second that this
@@ -244,14 +260,22 @@ fn authorized_receipt(fields: &str) -> Result<Zeroizing<String>, BrokerError> {
     }
 }
 
-fn redeemed_cap(fields: &str, cap: &str) -> Result<(), BrokerError> {
-    let parsed = expected_fields(fields, &["status", "cap"])?;
-    match (value(&parsed, "status"), value(&parsed, "cap")) {
-        (Some("redeemed"), Some(returned)) if returned == cap => Ok(()),
+fn redeemed_cap(fields: &str, cap: &str) -> Result<u64, BrokerError> {
+    let parsed = expected_fields(fields, &["status", "cap", "epoch"])?;
+    match (
+        value(&parsed, "status"),
+        value(&parsed, "cap"),
+        value(&parsed, "epoch"),
+    ) {
+        (Some("redeemed"), Some(returned), Some(epoch)) if returned == cap => {
+            epoch.parse().map_err(|_| {
+                BrokerError::Protocol("broker redeem reply has no usable epoch".to_owned())
+            })
+        }
         // A reply naming this capability under a status REDEEM never produces
         // is malformed, not a refusal: treating an AUTHORIZE-shaped success as
         // "receipt rejected" would hide a broker that answered the wrong verb.
-        (Some(status), _) if status != "redeemed" => Err(BrokerError::Protocol(
+        (Some(status), _, _) if status != "redeemed" => Err(BrokerError::Protocol(
             "broker success reply has an unexpected status".to_owned(),
         )),
         _ => Err(BrokerError::ReceiptRejected),

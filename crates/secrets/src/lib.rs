@@ -16,6 +16,8 @@ use crate::store::HumanSource;
 pub mod audit;
 /// Capability names and their backing human-store key namespace.
 pub mod capability;
+/// Broker-owned capability grants, separate from secret release grants.
+pub mod capability_grants;
 /// Shared Unix-socket protocol client used by the `secrets` CLI.
 pub mod client;
 /// Shared source-root configuration carrying directory paths, never secret values.

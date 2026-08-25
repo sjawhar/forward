@@ -67,6 +67,35 @@ impl AsRef<Path> for SocketPath {
     }
 }
 
+/// Successful `HELLO` fields after the protocol version has been validated.
+///
+/// The broker may add fields without a protocol-version bump. Callers needing
+/// one extension use [`HelloFields::required`] instead of reparsing a `HELLO`
+/// frame or rejecting unrelated future fields.
+#[derive(Debug)]
+pub struct HelloFields(String);
+
+impl HelloFields {
+    /// Return exactly one non-empty named field from this handshake.
+    ///
+    /// Unknown fields remain tolerated. A missing, empty, or duplicate required
+    /// field makes the broker response malformed.
+    pub fn required(&self, name: &str) -> Result<&str, ClientError> {
+        let mut value = None;
+        for field in self.0.split(' ') {
+            let Some((field_name, field_value)) = field.split_once('=') else {
+                continue;
+            };
+            if field_name == name
+                && (field_value.is_empty() || value.replace(field_value).is_some())
+            {
+                return Err(ClientError::InvalidResponse);
+            }
+        }
+        value.ok_or(ClientError::InvalidResponse)
+    }
+}
+
 /// Typed client for the broker's versioned Unix-socket protocol.
 #[derive(Debug, Clone)]
 pub struct BrokerClient {
@@ -117,6 +146,14 @@ impl BrokerClient {
 
     /// Verify that the connected broker speaks exactly this protocol version.
     pub fn hello(&self) -> Result<(), ClientError> {
+        self.hello_fields().map(drop)
+    }
+
+    /// Complete a version handshake and return its additive response fields.
+    ///
+    /// The protocol version is checked exactly as [`BrokerClient::hello`] does;
+    /// callers may then require a named extension through [`HelloFields`].
+    pub fn hello_fields(&self) -> Result<HelloFields, ClientError> {
         let version = PROTOCOL_VERSION.to_string();
         let request = format!("HELLO\tversion={version}");
         let BrokerResponse::Fields(fields) = self.request(&request)? else {
@@ -129,7 +166,7 @@ impl BrokerClient {
             .split(' ')
             .any(|field| field.strip_prefix("version=") == Some(version.as_str()))
         {
-            Ok(())
+            Ok(HelloFields(fields))
         } else {
             Err(ClientError::VersionHandshake)
         }

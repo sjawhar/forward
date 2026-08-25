@@ -89,6 +89,32 @@ fn client_rejects_wrong_hello_field_name() {
 }
 
 #[test]
+fn client_returns_validated_hello_fields_and_tolerates_unknown_extensions() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("broker.sock");
+    let listener = UnixListener::bind(&path).unwrap();
+    let worker = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream);
+        let mut hello = String::new();
+        reader.read_line(&mut hello).unwrap();
+        assert_eq!(hello, format!("HELLO\tversion={PROTOCOL_VERSION}\n"));
+        let mut stream = reader.into_inner();
+        stream
+            .write_all(
+                format!("OK\tversion={PROTOCOL_VERSION} instance=broker epoch=7 future=value\n")
+                    .as_bytes(),
+            )
+            .unwrap();
+    });
+
+    let fields = BrokerClient::new(path).hello_fields().unwrap();
+    worker.join().unwrap();
+
+    assert_eq!(fields.required("epoch"), Ok("7"));
+}
+
+#[test]
 fn client_handshakes_before_sending_a_request() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("broker.sock");

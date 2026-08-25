@@ -39,6 +39,7 @@ pub(super) fn worker(shared: &Shared) {
             state.grants.revoke_missing_ttys();
             state.queue.prune(now);
             state.receipts.sweep(now);
+            state.capability_grants.sweep(now);
             let failures = std::mem::take(&mut state.failures);
             state.failures = failures
                 .into_iter()

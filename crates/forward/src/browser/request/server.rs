@@ -17,7 +17,8 @@ use crate::config::Config;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 pub type SessionResolver = Arc<dyn Fn(u32) -> Option<String> + Send + Sync>;
-pub type Redeemer = Arc<dyn Fn(&[u8]) -> Result<(), crate::secretsd::BrokerError> + Send + Sync>;
+pub type Redeemer = Arc<dyn Fn(&[u8]) -> Result<u64, crate::secretsd::BrokerError> + Send + Sync>;
+pub type EpochReader = Arc<dyn Fn() -> Result<u64, crate::secretsd::BrokerError> + Send + Sync>;
 #[doc(hidden)]
 pub type Binder =
     Arc<dyn Fn(Grants, SocketAddr) -> Result<proxy::BoundProxy, proxy::ProxyError> + Send + Sync>;
@@ -26,12 +27,13 @@ pub type Binder =
 ///
 /// Bundled rather than passed individually: they are one stable dependency
 /// set, every one of them is needed on the grant path, and the alternative is
-/// a seven-parameter signature that grows again with each new authority check.
+/// an eight-parameter signature that grows again with each new authority check.
 pub struct Deps {
     pub grants: Grants,
     pub slot: crate::browser::push::FeedSlot,
     pub resolver: SessionResolver,
     pub redeemer: Redeemer,
+    pub epoch_reader: EpochReader,
     pub binder: Binder,
 }
 pub fn socket_path() -> PathBuf {
@@ -56,33 +58,16 @@ pub fn parse(line: &[u8]) -> Option<(u64, Vec<u8>)> {
 
 pub fn serve(grants: Grants, cfg: Config, path: PathBuf, slot: crate::browser::push::FeedSlot) {
     let socket = crate::secretsd::socket_path();
-    serve_with(
-        grants,
-        cfg,
-        path,
-        slot,
-        Arc::new(session_label),
-        Arc::new(move |receipt: &[u8]| {
-            crate::secretsd::redeem(&socket, receipt, crate::secretsd::CAP_BROWSER)
-        }),
-    );
-}
-
-#[doc(hidden)]
-pub fn serve_with(
-    grants: Grants,
-    cfg: Config,
-    path: PathBuf,
-    slot: crate::browser::push::FeedSlot,
-    resolver: SessionResolver,
-    redeemer: Redeemer,
-) {
+    let redeem_socket = socket.clone();
     serve_with_binder(
         Deps {
             grants,
             slot,
-            resolver,
-            redeemer,
+            resolver: Arc::new(session_label),
+            redeemer: Arc::new(move |receipt: &[u8]| {
+                crate::secretsd::redeem(&redeem_socket, receipt, crate::secretsd::CAP_BROWSER)
+            }),
+            epoch_reader: Arc::new(move || crate::secretsd::lock_epoch(&socket)),
             binder: Arc::new(proxy::bind),
         },
         cfg,
@@ -161,22 +146,36 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
-    if let Err(error) = (deps.redeemer)(receipt.as_slice()) {
-        eprintln!("forward: grant refused: receipt not redeemed: {error}");
-        let _ = stream.write_all(b"REFUSED RECEIPT\n");
-        return;
-    }
+    let redeemed_epoch = match (deps.redeemer)(receipt.as_slice()) {
+        Ok(epoch) => epoch,
+        Err(error) => {
+            eprintln!("forward: grant refused: receipt not redeemed: {error}");
+            let _ = stream.write_all(b"REFUSED RECEIPT\n");
+            return;
+        }
+    };
     let Ok(token) = crate::browser::push::mint_token() else {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
+    let mut token = Zeroizing::new(token);
     let Ok(proxy) = (deps.binder)(deps.grants.clone(), upstream) else {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
-    if !deps.slot.push(&token, ttl) {
+    if !epoch_is_current(deps, redeemed_epoch) {
+        let _ = stream.write_all(b"REFUSED\n");
+        return;
+    }
+    if !deps.slot.push(token.as_slice(), ttl) {
         eprintln!("forward: grant refused: laptop feed unavailable");
         let _ = stream.write_all(b"REFUSED LAPTOP\n");
+        return;
+    }
+    // The feed acknowledgement can wait five seconds. Recheck again immediately
+    // before insertion so a lock during that wait cannot cross this boundary.
+    if !epoch_is_current(deps, redeemed_epoch) {
+        let _ = stream.write_all(b"REFUSED\n");
         return;
     }
     let port = proxy.port();
@@ -186,7 +185,7 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
         Grant {
             session: session.clone(),
             anchor,
-            token,
+            token: std::mem::take(&mut *token),
             deadline,
         },
     );
@@ -196,6 +195,22 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
         "forward: granted browser access to session {session} on 127.0.0.1:{port} for {ttl}s"
     );
     let _ = writeln!(stream, "{port}");
+}
+
+fn epoch_is_current(deps: &Deps, redeemed_epoch: u64) -> bool {
+    match (deps.epoch_reader)() {
+        Ok(epoch) if epoch <= redeemed_epoch => true,
+        Ok(epoch) => {
+            eprintln!(
+                "forward: grant refused: broker epoch advanced from {redeemed_epoch} to {epoch}"
+            );
+            false
+        }
+        Err(error) => {
+            eprintln!("forward: grant refused: could not recheck broker epoch: {error}");
+            false
+        }
+    }
 }
 
 fn answer_status(grants: &Grants, caller: Option<ProcessAnchor>, mut stream: UnixStream) {

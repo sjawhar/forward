@@ -7,7 +7,8 @@ use std::time::{Duration, Instant};
 
 use forward::browser::push::FeedSlot;
 use forward::browser::request::{
-    GrantStatus, Redeemer, SessionResolver, parse, parse_status, parse_ttl, request, serve_with,
+    Deps, EpochReader, GrantStatus, Redeemer, SessionResolver, parse, parse_status, parse_ttl,
+    request, serve_with_binder,
 };
 use forward::secretsd::BrokerError;
 
@@ -27,7 +28,11 @@ fn await_socket(path: &std::path::Path) {
 }
 
 fn accepting_redeemer() -> Redeemer {
-    Arc::new(|_receipt: &[u8]| Ok(()))
+    Arc::new(|_receipt: &[u8]| Ok(0))
+}
+
+fn accepting_epoch_reader() -> EpochReader {
+    Arc::new(|| Ok(0))
 }
 
 fn rejecting_redeemer() -> Redeemer {
@@ -79,7 +84,20 @@ fn spawn_server(
     resolver: SessionResolver,
     redeemer: Redeemer,
 ) {
-    thread::spawn(move || serve_with(grants, cfg, path, slot, resolver, redeemer));
+    thread::spawn(move || {
+        serve_with_binder(
+            Deps {
+                grants,
+                slot,
+                resolver,
+                redeemer,
+                epoch_reader: accepting_epoch_reader(),
+                binder: Arc::new(forward::browser::proxy::bind),
+            },
+            cfg,
+            path,
+        )
+    });
 }
 
 fn request_reply(path: &std::path::Path, ttl_secs: u64, receipt: &[u8]) -> String {

@@ -113,7 +113,11 @@ fn a_reply_must_carry_exactly_the_expected_fields() {
     // A receipt that is not 64 lowercase hex bytes is refused.
     assert!(authorized_receipt("status=authorized receipt=NOTHEX").is_err());
 
-    assert!(redeemed_cap("status=redeemed cap=browser", "browser").is_ok());
+    assert!(matches!(
+        redeemed_cap("status=redeemed cap=browser epoch=7", "browser"),
+        Ok(7)
+    ));
+    assert!(redeemed_cap("status=redeemed cap=browser", "browser").is_err());
     // A reply naming a different capability must not authorize this one.
-    assert!(redeemed_cap("status=redeemed cap=other", "browser").is_err());
+    assert!(redeemed_cap("status=redeemed cap=other epoch=7", "browser").is_err());
 }

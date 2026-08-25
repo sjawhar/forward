@@ -22,6 +22,7 @@ use crate::Config;
 #[cfg(test)]
 use crate::audit::MAX_AUDIT_VALUE_BYTES;
 use crate::audit::sanitize_audit_value;
+use crate::capability_grants::CapabilityGrantTable;
 use crate::decrypt::Decryptor;
 use crate::grants::{GrantTable, Registry, SessionToken};
 use crate::proto::{ErrCode, MAX_FRAME_BYTES, Request, Response, format_response, parse_request};
@@ -56,6 +57,7 @@ struct State {
     registry: Registry,
     grants: GrantTable,
     receipts: ReceiptTable,
+    capability_grants: CapabilityGrantTable,
     queue: Queue,
     store: HumanStore,
     decryptor: Decryptor,
@@ -82,6 +84,7 @@ impl State {
             registry: Registry::new(boot_id),
             grants: GrantTable::default(),
             receipts: ReceiptTable::default(),
+            capability_grants: CapabilityGrantTable::default(),
             queue: Queue::new(QueueLimits {
                 cooldown: config.cooldown,
                 ttl: config.request_ttl,

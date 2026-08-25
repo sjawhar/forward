@@ -257,7 +257,12 @@ fn authorize(
     finish_authorization(shared, &cap, epoch_before, decision)
 }
 
-fn redeem(shared: &Shared, receipt_hex: &str, expected_cap: &str) -> Decision {
+fn redeem(
+    shared: &Shared,
+    receipt_hex: &str,
+    expected_cap: &str,
+    caller: crate::peer::PeerIdentity,
+) -> Decision {
     let expected_cap = match crate::capability::Capability::parse(expected_cap) {
         Ok(cap) => cap,
         Err(error) => {
@@ -270,9 +275,20 @@ fn redeem(shared: &Shared, receipt_hex: &str, expected_cap: &str) -> Decision {
         }
     };
     let (mutex, _) = &**shared;
-    let redeemed = lock_state(mutex)
-        .receipts
-        .redeem(receipt_hex, &expected_cap, Instant::now());
+    let mut state = lock_state(mutex);
+    let now = Instant::now();
+    let Some(deadline) = now.checked_add(state.config.max_grant) else {
+        return Decision {
+            outcome: Outcome::Failed(
+                ErrCode::Internal,
+                "capability grant deadline is out of range",
+            ),
+            scope_kind: None,
+            source: None,
+            request_id: None,
+        };
+    };
+    let redeemed = state.receipts.redeem(receipt_hex, &expected_cap, now);
     tracing::info!(
         cap = %expected_cap.as_str(),
         redeemed = redeemed.is_some(),
@@ -280,8 +296,17 @@ fn redeem(shared: &Shared, receipt_hex: &str, expected_cap: &str) -> Decision {
     );
     let outcome = redeemed.map_or(
         Outcome::Failed(ErrCode::Denied, "receipt is not redeemable"),
-        |cap| Outcome::Fields(format!("status=redeemed cap={}", cap.as_str())),
+        |cap| {
+            let outcome = Outcome::Fields(format!(
+                "status=redeemed cap={} epoch={}",
+                cap.as_str(),
+                state.lock_epoch
+            ));
+            state.capability_grants.insert(cap, caller, deadline);
+            outcome
+        },
     );
+    drop(state);
     Decision {
         outcome,
         scope_kind: None,
@@ -295,6 +320,7 @@ fn lock(shared: &Shared) -> Decision {
     let mut state = lock_state(mutex);
     state.grants.revoke_all();
     state.receipts.clear();
+    state.capability_grants.clear();
     state.lock_epoch = state.lock_epoch.saturating_add(1);
     if let Some(active) = state.active_decrypt.take() {
         state.queue.deny(active.id);
@@ -324,8 +350,13 @@ pub(super) fn dispatch(
                 // Reported so a harness can tell "same daemon" from "restarted
                 // daemon" and re-register before its requests start failing.
                 let (mutex, _) = &**shared;
-                let instance = lock_state(mutex).instance.clone();
-                Outcome::Fields(format!("version={PROTOCOL_VERSION} instance={instance}"))
+                let state = lock_state(mutex);
+                let fields = format!(
+                    "version={PROTOCOL_VERSION} instance={} epoch={}",
+                    state.instance, state.lock_epoch
+                );
+                drop(state);
+                Outcome::Fields(fields)
             } else {
                 Outcome::Failed(ErrCode::VersionMismatch, "unsupported protocol version")
             },
@@ -384,7 +415,7 @@ pub(super) fn dispatch(
             token_hex,
             tty,
         } => authorize(shared, &cap, token_hex, tty, caller),
-        Request::Redeem { receipt_hex, cap } => redeem(shared, &receipt_hex, &cap),
+        Request::Redeem { receipt_hex, cap } => redeem(shared, &receipt_hex, &cap, caller.clone()),
     }
 }
 
@@ -437,7 +468,11 @@ mod tests {
     }
 
     #[test]
-    fn lock_between_completed_authorization_and_mint_refuses_the_receipt() {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "this lock-race regression needs one complete broker state fixture"
+    )]
+    fn lock_between_authorization_and_mint_clears_capability_grants_and_refuses_the_receipt() {
         use std::os::unix::fs::PermissionsExt;
         use std::path::PathBuf;
         use std::sync::{Arc, Condvar};
@@ -504,6 +539,13 @@ mod tests {
             token_hex: Some(Zeroizing::new(token_hex)),
             tty: None,
         };
+        super::super::lock_state(&shared.0)
+            .capability_grants
+            .insert(
+                cap.clone(),
+                caller.clone(),
+                Instant::now() + Duration::from_secs(1),
+            );
         let epoch_before = super::super::lock_state(&shared.0).lock_epoch;
         let worker_shared = Arc::clone(&shared);
         let _worker = std::thread::spawn(move || super::super::worker(&worker_shared));
@@ -527,6 +569,10 @@ mod tests {
         });
         assert!(entered_rx.recv_timeout(Duration::from_secs(1)).is_ok());
         lock(&shared);
+        assert_eq!(
+            super::super::lock_state(&shared.0).capability_grants.len(),
+            0
+        );
         let _ = resume_tx.send(());
         let result = authorizer.join();
         assert!(result.is_ok());
