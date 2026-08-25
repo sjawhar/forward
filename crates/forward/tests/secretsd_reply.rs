@@ -78,7 +78,7 @@ fn a_trickled_reply_cannot_extend_the_control_deadline() {
     });
 
     let started = Instant::now();
-    let result = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
+    let result = secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
     let elapsed = started.elapsed();
     broker.finish();
     assert!(elapsed < Duration::from_secs(6));
@@ -97,7 +97,8 @@ fn an_invalid_utf8_reply_is_a_sanitized_protocol_error() {
     bytes.push(b'\n');
     let broker = FakeBroker::start(Reply::Bytes(bytes));
 
-    let error = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
+    let error =
+        secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
     broker.finish();
     assert!(matches!(error, BrokerError::Protocol(_)));
     assert!(!error.to_string().contains(MARKER));

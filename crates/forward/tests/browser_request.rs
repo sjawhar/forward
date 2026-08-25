@@ -7,13 +7,16 @@ use std::time::{Duration, Instant};
 
 use forward::browser::push::FeedSlot;
 use forward::browser::request::{
-    Deps, GrantStatus, IdentityReader, Redeemer, SessionResolver, parse, parse_status, parse_ttl,
-    request, serve_with_binder,
+    Deps, IdentityReader, Redeemer, SessionResolver, serve_with_binder,
 };
-use forward::secretsd::{BrokerError, BrokerIdentity};
+use forward::secretsd::{BrokerError, BrokerIdentity, RedeemedGrant};
 
 #[path = "browser_request/failures.rs"]
 mod failures;
+#[path = "browser_request/grant.rs"]
+mod grant;
+#[path = "browser_request/parsing.rs"]
+mod parsing;
 #[path = "browser_request/session.rs"]
 mod session;
 
@@ -35,7 +38,16 @@ fn authority() -> BrokerIdentity {
 }
 
 fn accepting_redeemer() -> Redeemer {
-    Arc::new(|_receipt: &[u8]| Ok(authority()))
+    redeemer_with_ttl(60)
+}
+
+fn redeemer_with_ttl(ttl_secs: u64) -> Redeemer {
+    Arc::new(move |_receipt: &[u8]| {
+        Ok(RedeemedGrant {
+            authority: authority(),
+            ttl_secs,
+        })
+    })
 }
 
 fn accepting_identity_reader() -> IdentityReader {
@@ -48,7 +60,9 @@ fn rejecting_redeemer() -> Redeemer {
 
 /// A laptop-side feed acceptor: accepts one feed attachment and ACKs every
 /// TOKEN line, recording tokens so tests can assert what was pushed.
-fn feed_acceptor() -> (FeedSlot, mpsc::Receiver<Vec<u8>>) {
+/// A laptop-side feed acceptor that acknowledges tokens and records their
+/// value and requested lifetime.
+fn feed_acceptor() -> (FeedSlot, mpsc::Receiver<(Vec<u8>, u64)>) {
     let slot = FeedSlot::new();
     let (sender, receiver) = mpsc::channel();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -63,13 +77,13 @@ fn feed_acceptor() -> (FeedSlot, mpsc::Receiver<Vec<u8>>) {
             if reader.read_line(&mut line).unwrap_or(0) == 0 {
                 return;
             }
-            let token = line
+            let (token, ttl) = line
                 .trim_end()
                 .strip_prefix("TOKEN ")
                 .and_then(|rest| rest.split_once(' '))
-                .map(|(token, _)| token.as_bytes().to_vec())
+                .map(|(token, ttl)| (token.as_bytes().to_vec(), ttl.parse().unwrap()))
                 .unwrap();
-            sender.send(token).unwrap();
+            sender.send((token, ttl)).unwrap();
             stream.write_all(b"OK\n").unwrap();
         }
     });
@@ -118,155 +132,4 @@ fn request_reply(path: &std::path::Path, ttl_secs: u64, receipt: &[u8]) -> Strin
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).unwrap();
     reply
-}
-
-#[test]
-fn a_well_formed_request_parses() {
-    assert!(matches!(
-        parse(b"GRANT 1800 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        Some((1800, receipt)) if receipt.len() == RECEIPT.len()
-    ));
-}
-
-#[test]
-fn a_request_without_the_verb_is_rejected() {
-    assert!(
-        parse(b"1800 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_none()
-    );
-    assert!(parse(b"STATUS").is_none());
-}
-
-#[test]
-fn a_non_numeric_ttl_is_rejected() {
-    assert!(
-        parse(b"GRANT soon aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .is_none()
-    );
-}
-
-#[test]
-fn a_missing_receipt_is_rejected() {
-    assert!(parse(b"GRANT 1800").is_none());
-    assert!(parse(b"GRANT 1800 ").is_none());
-}
-
-#[test]
-fn a_malformed_receipt_is_rejected() {
-    assert!(parse(b"GRANT 1800 correct-horse").is_none());
-    assert!(
-        parse(b"GRANT 1800 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-            .is_none()
-    );
-    assert!(
-        parse(b"GRANT 1800 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ")
-            .is_none()
-    );
-}
-
-#[test]
-fn a_zero_or_overlong_ttl_is_rejected() {
-    assert!(
-        parse(b"GRANT 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .is_none()
-    );
-    assert!(
-        parse(b"GRANT 43201 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .is_none()
-    );
-}
-
-#[test]
-fn ttl_shorthand_parses() {
-    assert_eq!(parse_ttl("45s"), Some(45));
-    assert_eq!(parse_ttl("30m"), Some(1_800));
-    assert_eq!(parse_ttl("2h"), Some(7_200));
-    assert_eq!(parse_ttl("0m"), None);
-    assert_eq!(parse_ttl("5x"), None);
-    assert_eq!(parse_ttl("m"), None);
-    assert_eq!(parse_ttl(""), None);
-}
-
-#[test]
-fn a_status_reply_parses() {
-    assert_eq!(parse_status("NONE"), GrantStatus::None);
-    assert_eq!(
-        parse_status("LIVE 12811 1799"),
-        GrantStatus::Live {
-            port: 12_811,
-            remaining_secs: 1_799,
-        }
-    );
-    assert_eq!(parse_status("LIVE nonsense"), GrantStatus::Unreachable);
-}
-
-#[test]
-fn a_redeemed_receipt_grants_a_port_and_pushes_a_fresh_token() {
-    // This fails if the receipt is not verified, the token is not minted
-    // server-side, or the laptop is not told before the port is returned.
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("grant.sock");
-    let grants = forward::browser::grant::Grants::new();
-    let (slot, receiver) = feed_acceptor();
-    spawn_server(
-        grants.clone(),
-        grant_config(),
-        path.clone(),
-        slot,
-        Arc::new(|_pid| Some("session-a".to_owned())),
-        accepting_redeemer(),
-    );
-    await_socket(&path);
-
-    let port = request(&path, 60, RECEIPT).expect("the grant request must succeed");
-    let token = receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-
-    assert_eq!(token.len(), 43);
-    assert!(
-        grants
-            .live(port)
-            .is_some_and(|grant| grant.token.as_slice() == token.as_slice())
-    );
-}
-
-#[test]
-fn a_rejected_receipt_is_refused_without_granting() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("grant.sock");
-    let grants = forward::browser::grant::Grants::new();
-    let (slot, receiver) = feed_acceptor();
-    spawn_server(
-        grants.clone(),
-        grant_config(),
-        path.clone(),
-        slot,
-        Arc::new(|_pid| Some("session-a".to_owned())),
-        rejecting_redeemer(),
-    );
-    await_socket(&path);
-
-    assert_eq!(request_reply(&path, 60, RECEIPT), "REFUSED RECEIPT\n");
-    assert!(matches!(
-        receiver.try_recv(),
-        Err(mpsc::TryRecvError::Empty)
-    ));
-    assert!(grants.snapshot_live().is_empty());
-}
-
-#[test]
-fn an_unreachable_laptop_feed_refuses_the_grant() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("grant.sock");
-    let grants = forward::browser::grant::Grants::new();
-    spawn_server(
-        grants.clone(),
-        grant_config(),
-        path.clone(),
-        FeedSlot::new(),
-        Arc::new(|_pid| Some("session-a".to_owned())),
-        accepting_redeemer(),
-    );
-    await_socket(&path);
-
-    assert_eq!(request_reply(&path, 60, RECEIPT), "REFUSED LAPTOP\n");
-    assert!(grants.snapshot_live().is_empty());
 }

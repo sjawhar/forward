@@ -4,6 +4,7 @@ use std::thread;
 use std::time::Duration;
 
 use forward::browser::feed::RelayTokens;
+use zeroize::Zeroizing;
 
 fn socket_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -14,7 +15,10 @@ fn socket_pair() -> (TcpStream, TcpStream) {
 
 fn cfg_with_token(token: &str) -> (forward::config::Config, RelayTokens) {
     let tokens = RelayTokens::new();
-    tokens.insert(token.as_bytes().to_vec(), Duration::from_secs(60));
+    tokens.insert(
+        Zeroizing::new(token.as_bytes().to_vec()),
+        Duration::from_secs(60),
+    );
     tokens.set_connected(true);
     let mut cfg = forward::config::Config::default_values_for_test();
     cfg.peer = "100.64.0.9".to_owned();
@@ -45,6 +49,7 @@ fn an_authorized_peer_is_told_when_the_laptop_has_no_grant_feed() {
         &tokens,
         SocketAddr::from(([127, 0, 0, 9], 1)),
         "100.64.0.9".parse().unwrap(),
+        "127.0.0.1".parse().unwrap(),
         server,
     );
 
@@ -71,6 +76,7 @@ fn an_untokened_authorized_peer_receives_the_upstream_extension_state() {
             &tokens,
             upstream_address,
             "100.64.0.9".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
             server,
         );
     });
@@ -103,6 +109,7 @@ fn a_same_length_wrong_relay_token_with_feed_attached_reports_extension_state() 
             &tokens,
             upstream_address,
             "100.64.0.9".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
             server,
         );
     });

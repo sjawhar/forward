@@ -2,28 +2,35 @@ use std::net::IpAddr;
 
 use crate::config::Config;
 
-/// Whether an inbound connection may be served.
+/// Whether a non-sensitive listener may serve an inbound connection.
 ///
-/// Loopback is always allowed: it is the same machine, and refusing it would
-/// break `forward doctor`, local tooling, and the bridge's own final hop to a
-/// loopback-bound callback listener. Anything else must equal the configured
-/// counterpart exactly. A missing or malformed `peer` denies every remote
-/// address rather than defaulting open — `Config::validate` refuses that
-/// combination at startup, and this is the second line of defence for a
-/// process that reached a listener some other way.
+/// Loopback is allowed only for listeners whose response contains no sensitive
+/// material. It keeps `forward doctor`, local tooling, and the bridge's final
+/// hop to a loopback callback listener working. Token-bearing and file-serving
+/// listeners must instead use `authorized_sensitive` or `authorized_remote`:
+/// a local process can originate a connection from loopback to a tailnet-bound
+/// socket, so loopback does not prove that WireGuard authenticated the peer.
 ///
-/// Address equality is an identity check only because `Config::validate`
-/// guarantees that the listener is bound to a specific tailnet address rather
-/// than a wildcard address. On that listener, WireGuard authenticates inbound
-/// packets against a peer's key and its `AllowedIPs`, and Tailscale addresses
-/// are unique within the tailnet. This check alone is not safe on an arbitrary
-/// listener, where an on-link host could own a CGNAT address.
+/// A configured remote is accepted only when its source address equals the
+/// configured counterpart. `Config::validate` requires a specific listener
+/// address, so WireGuard authenticates the peer address on inbound tailnet
+/// packets. A missing or malformed `peer` denies every remote address.
 pub fn authorized(cfg: &Config, remote: IpAddr) -> bool {
+    remote.to_canonical().is_loopback() || authorized_remote(cfg, remote)
+}
+
+/// Whether the configured remote peer originated a connection.
+pub(crate) fn authorized_remote(cfg: &Config, remote: IpAddr) -> bool {
     let remote = remote.to_canonical();
-    if remote.is_loopback() {
-        return true;
-    }
     matches!(cfg.peer_ip(), Ok(Some(peer)) if peer.to_canonical() == remote)
+}
+
+/// Whether a sensitive listener received a connection on its configured
+/// address from its configured peer. Neither endpoint gets a loopback
+/// exemption: a local process can otherwise impersonate the remote peer.
+pub(crate) fn authorized_sensitive(cfg: &Config, remote: IpAddr, local: IpAddr) -> bool {
+    authorized_remote(cfg, remote)
+        && matches!(cfg.listen_ip(), Ok(listen) if listen.to_canonical() == local.to_canonical())
 }
 
 #[cfg(test)]
@@ -57,6 +64,28 @@ mod tests {
         // When: the counterpart connects.
         // Then: it is allowed.
         assert!(authorized(&cfg, "100.64.0.2".parse().unwrap()));
+    }
+
+    #[test]
+    fn sensitive_listener_requires_the_configured_local_and_remote_addresses() {
+        let mut cfg = cfg_with_peer("100.64.0.2");
+        cfg.listen = "100.64.0.1".to_owned();
+
+        assert!(authorized_sensitive(
+            &cfg,
+            "100.64.0.2".parse().unwrap(),
+            "100.64.0.1".parse().unwrap()
+        ));
+        assert!(!authorized_sensitive(
+            &cfg,
+            "127.0.0.1".parse().unwrap(),
+            "100.64.0.1".parse().unwrap()
+        ));
+        assert!(!authorized_sensitive(
+            &cfg,
+            "100.64.0.2".parse().unwrap(),
+            "127.0.0.1".parse().unwrap()
+        ));
     }
 
     #[test]

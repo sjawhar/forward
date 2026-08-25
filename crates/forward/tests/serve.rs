@@ -21,7 +21,12 @@ fn raw_status(host: &str, port: u16, request: &[u8]) -> [u8; 12] {
 }
 
 fn spawn_serve(config_root: &std::path::Path) -> (std::process::Child, u16) {
-    spawn_serve_with_config(config_root, "")
+    // Test clients originate from loopback, so configure that exact peer just
+    // as deployed preview service config names its laptop counterpart.
+    spawn_serve_with_config(
+        config_root,
+        "listen = \"127.0.0.1\"\npeer = \"127.0.0.1\"\n",
+    )
 }
 
 fn spawn_serve_with_config(

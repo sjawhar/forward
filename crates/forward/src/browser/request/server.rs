@@ -18,7 +18,7 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 pub type SessionResolver = Arc<dyn Fn(u32) -> Option<String> + Send + Sync>;
 pub type Redeemer = Arc<
-    dyn Fn(&[u8]) -> Result<crate::secretsd::BrokerIdentity, crate::secretsd::BrokerError>
+    dyn Fn(&[u8]) -> Result<crate::secretsd::RedeemedGrant, crate::secretsd::BrokerError>
         + Send
         + Sync,
 >;
@@ -152,14 +152,15 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
-    let redeemed_authority = match (deps.redeemer)(receipt.as_slice()) {
-        Ok(authority) => authority,
+    let redeemed = match (deps.redeemer)(receipt.as_slice()) {
+        Ok(redeemed) => redeemed,
         Err(error) => {
             eprintln!("forward: grant refused: receipt not redeemed: {error}");
             let _ = stream.write_all(b"REFUSED RECEIPT\n");
             return;
         }
     };
+    let ttl = ttl.min(redeemed.ttl_secs);
     let Ok(token) = crate::browser::push::mint_token() else {
         let _ = stream.write_all(b"REFUSED\n");
         return;
@@ -169,7 +170,7 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
-    if !authority_is_current(deps, &redeemed_authority) {
+    if !authority_is_current(deps, &redeemed.authority) {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     }
@@ -182,15 +183,16 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
     // before insertion so a lock or broker restart during that wait cannot
     // cross this boundary. A refusal leaves the already-pushed laptop token
     // bounded by the five-minute lease and never renewed.
-    if !authority_is_current(deps, &redeemed_authority) {
+    if !authority_is_current(deps, &redeemed.authority) {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     }
+
     let port = proxy.port();
     let deadline = Instant::now() + Duration::from_secs(ttl);
     if !deps.grants.insert_if_authority(
         port,
-        &redeemed_authority,
+        &redeemed.authority,
         Grant {
             session: session.clone(),
             anchor,

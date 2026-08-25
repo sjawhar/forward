@@ -5,6 +5,7 @@ use std::thread;
 use std::time::Duration;
 
 use forward::browser::feed::RelayTokens;
+use zeroize::Zeroizing;
 
 fn cfg_with_peer(peer: &str) -> forward::config::Config {
     let mut cfg = forward::config::Config::default_values_for_test();
@@ -14,7 +15,10 @@ fn cfg_with_peer(peer: &str) -> forward::config::Config {
 
 fn cfg_with_token(peer: &str, token: &str) -> (forward::config::Config, RelayTokens) {
     let tokens = RelayTokens::new();
-    tokens.insert(token.as_bytes().to_vec(), Duration::from_secs(60));
+    tokens.insert(
+        Zeroizing::new(token.as_bytes().to_vec()),
+        Duration::from_secs(60),
+    );
     tokens.set_connected(true);
     (cfg_with_peer(peer), tokens)
 }
@@ -84,6 +88,7 @@ fn an_unauthorized_peer_is_refused_and_its_payload_never_reaches_the_upstream() 
         &tokens,
         upstream.local_addr().unwrap(),
         "100.64.0.7".parse().unwrap(),
+        "127.0.0.1".parse().unwrap(),
         server,
     );
 
@@ -108,6 +113,7 @@ fn an_unknown_token_with_no_feed_attached_is_refused_as_feed_down() {
         &tokens,
         SocketAddr::from(([127, 0, 0, 1], 1)),
         "100.64.0.9".parse().unwrap(),
+        "127.0.0.1".parse().unwrap(),
         server,
     );
 
@@ -126,6 +132,7 @@ fn the_configured_peer_is_proxied_bidirectionally() {
             &tokens,
             spawn_pong_upstream(),
             "100.64.0.9".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
             server,
         );
     });
@@ -150,6 +157,7 @@ fn a_mapped_ipv6_peer_matches_the_configured_ipv4_peer() {
             &tokens,
             spawn_pong_upstream(),
             "::ffff:100.64.0.9".parse::<IpAddr>().unwrap(),
+            "127.0.0.1".parse().unwrap(),
             server,
         );
     });
@@ -162,15 +170,18 @@ fn a_mapped_ipv6_peer_matches_the_configured_ipv4_peer() {
 }
 
 #[test]
-fn a_loopback_client_stays_authorized_for_local_tooling() {
-    // Given: a real listener and a configuration naming only a remote peer.
+fn a_loopback_source_cannot_relay_a_stolen_token_to_a_tailnet_listener() {
+    // Given: a relay that is configured for a remote laptop peer, a valid token,
+    // and a local process connecting through loopback.
     let (cfg, tokens) = cfg_with_token("100.64.0.9", "correct-horse");
     let relay = spawn_relay(cfg, tokens, spawn_pong_upstream());
     let mut client = TcpStream::connect(("127.0.0.1", relay)).unwrap();
 
-    // When/Then: the local doctor-style client is still proxied end to end.
+    // When: the local process presents the token.
     client.write_all(b"RELAY correct-horse\nping").unwrap();
-    read_pong(&mut client);
+
+    // Then: loopback cannot impersonate the configured laptop peer.
+    assert_refused(&mut client, "REFUSED PEER\n");
 }
 
 #[test]
@@ -187,7 +198,7 @@ fn half_close_propagates_in_each_direction() {
         stream.write_all(b"gone").unwrap();
         stream.shutdown(Shutdown::Write).unwrap();
     });
-    let (cfg, tokens) = cfg_with_token("100.64.0.9", "correct-horse");
+    let (cfg, tokens) = cfg_with_token("127.0.0.1", "correct-horse");
     let relay = spawn_relay(cfg, tokens, upstream_address);
     let mut client = TcpStream::connect(("127.0.0.1", relay)).unwrap();
 
@@ -214,7 +225,7 @@ fn an_absent_upstream_closes_the_connection_without_killing_the_accept_loop() {
     let probe = TcpListener::bind("127.0.0.1:0").unwrap();
     let upstream = probe.local_addr().unwrap();
     drop(probe);
-    let (cfg, tokens) = cfg_with_token("100.64.0.9", "correct-horse");
+    let (cfg, tokens) = cfg_with_token("127.0.0.1", "correct-horse");
     let relay = spawn_relay(cfg, tokens, upstream);
 
     // When: the first tokened client reaches the absent upstream. The token

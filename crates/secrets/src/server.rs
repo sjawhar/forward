@@ -32,9 +32,11 @@ use crate::store::HumanStore;
 
 mod approval;
 mod dispatch;
+mod subscribers;
 mod worker;
 
 use dispatch::{Outcome, dispatch, request_key};
+use subscribers::{SubscriberHub, publish_current_authority};
 use worker::worker;
 
 type Shared = Arc<(Mutex<State>, Condvar)>;
@@ -51,8 +53,7 @@ const SUBSCRIPTION_CONNECTION_QUEUE_DEPTH: usize = 8;
 const CONNECTION_CAPACITY: usize = CONNECTION_WORKERS + CONNECTION_QUEUE_DEPTH;
 const CONNECTION_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const CONNECTION_CAPACITY_RESPONSE: &[u8] = b"ERR\tINTERNAL\tconnection capacity reached\n";
-const SUBSCRIBER_CAPACITY: usize = 8;
-const SUBSCRIBER_CAPACITY_RESPONSE: &[u8] = b"ERR\tINTERNAL\tsubscription capacity reached\n";
+pub(super) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
 struct State {
@@ -132,68 +133,6 @@ fn wait_state<'a>(
         .wait_timeout(guard, duration)
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .0
-}
-
-#[derive(Debug)]
-struct Subscriber {
-    peer: crate::peer::PeerIdentity,
-    stream: UnixStream,
-}
-
-#[derive(Debug, Default)]
-struct SubscriberHub {
-    subscribers: Mutex<Vec<Subscriber>>,
-}
-
-impl SubscriberHub {
-    fn attach(
-        &self,
-        shared: &Shared,
-        mut stream: UnixStream,
-        peer: crate::peer::PeerIdentity,
-    ) -> std::io::Result<()> {
-        // Writes never wait under the attachment/publication mutex. A peer
-        // whose socket cannot accept its attach event is not a subscriber.
-        stream.set_nonblocking(true)?;
-        // This lock serializes attach with publication. If LOCK wins the state
-        // mutex first, attach observes its epoch; if attach wins first, LOCK
-        // publishes the next epoch after this initial line.
-        let mut subscribers = self
-            .subscribers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        subscribers.retain(|subscriber| subscriber.peer.is_alive());
-        if subscribers.len() >= SUBSCRIBER_CAPACITY {
-            return stream.write_all(SUBSCRIBER_CAPACITY_RESPONSE);
-        }
-        let (instance, epoch) = {
-            let (mutex, _) = &**shared;
-            let state = lock_state(mutex);
-            (state.instance.clone(), state.lock_epoch)
-        };
-        let line = format!("EPOCH {epoch} instance={instance}\n");
-        if stream.write(line.as_bytes())? != line.len() {
-            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
-        }
-        subscribers.push(Subscriber { peer, stream });
-        drop(subscribers);
-        Ok(())
-    }
-
-    fn publish(&self, instance: &str, epoch: u64) {
-        let line = format!("EPOCH {epoch} instance={instance}\n");
-        let mut subscribers = self
-            .subscribers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        subscribers.retain_mut(|subscriber| {
-            subscriber.peer.is_alive()
-                && matches!(
-                    subscriber.stream.write(line.as_bytes()),
-                    Ok(written) if written == line.len()
-                )
-        });
-    }
 }
 
 /// Generate an identifier unique to this daemon process.
@@ -397,11 +336,11 @@ fn handle(mut stream: UnixStream, shared: &Shared) -> std::io::Result<()> {
         return subscribers.attach(shared, stream, caller);
     }
     let decision = request.map_or_else(
-        |_| dispatch::Decision {
-            outcome: Outcome::Failed(ErrCode::BadRequest, "invalid request frame"),
-            scope_kind: None,
-            source: None,
-            request_id: None,
+        |_| {
+            dispatch::Decision::new(Outcome::Failed(
+                ErrCode::BadRequest,
+                "invalid request frame",
+            ))
         },
         |request| {
             let audit = audit_context(&request, shared);
@@ -607,7 +546,6 @@ pub fn serve(config: Config) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::{BufRead as _, BufReader};
     use std::os::fd::AsFd;
     use std::path::Path;
 
@@ -659,7 +597,7 @@ mod tests {
         }
     }
 
-    fn test_config(directory: &Path) -> Config {
+    pub(super) fn test_config(directory: &Path) -> Config {
         Config {
             socket_path: directory.join("secretsd.sock"),
             human_sources: vec![HumanSource {
@@ -696,142 +634,6 @@ mod tests {
             request_lane(&Request::Subscribe),
             ConnectionLane::Subscription
         ));
-    }
-
-    #[test]
-    fn subscription_reports_the_current_epoch_and_does_not_hold_the_lock_lane() {
-        // This fails if SUBSCRIBE is handled as an ordinary one-shot request,
-        // if it does not publish the attach epoch, or if its held connection
-        // can monopolize LOCK's dedicated worker.
-        let directory = tempfile::tempdir().unwrap();
-        let config = test_config(directory.path());
-        let socket_path = config.socket_path.clone();
-        let server_listener = listener(&config).unwrap();
-        let _server = thread::spawn(move || serve_listener(&server_listener, config).unwrap());
-
-        let mut subscriber = UnixStream::connect(&socket_path).unwrap();
-        subscriber
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        subscriber.write_all(b"SUBSCRIBE\n").unwrap();
-        let mut reader = BufReader::new(subscriber.try_clone().unwrap());
-        let mut attached = String::new();
-        reader.read_line(&mut attached).unwrap();
-        let instance = attached
-            .strip_prefix("EPOCH 0 instance=")
-            .and_then(|line| line.strip_suffix('\n'))
-            .expect("attach must identify the broker instance")
-            .to_owned();
-
-        let mut control = UnixStream::connect(socket_path).unwrap();
-        control
-            .set_read_timeout(Some(Duration::from_secs(5)))
-            .unwrap();
-        control.write_all(b"LOCK\n").unwrap();
-        let mut response = String::new();
-        BufReader::new(control).read_line(&mut response).unwrap();
-        assert_eq!(response, "OK\n");
-
-        let mut after_lock = String::new();
-        reader.read_line(&mut after_lock).unwrap();
-        assert_eq!(after_lock, format!("EPOCH 1 instance={instance}\n"));
-    }
-
-    #[test]
-    fn lock_drops_blocked_subscribers_without_waiting_for_write_timeouts() {
-        // This fails if subscription streams remain blocking: eight full send
-        // buffers serialize their 250ms write timeouts on LOCK's response path.
-        let directory = tempfile::tempdir().unwrap();
-        let shared = Arc::new((
-            Mutex::new(State::new(test_config(directory.path())).unwrap()),
-            Condvar::new(),
-        ));
-        let subscribers = Arc::clone(&lock_state(&shared.0).subscribers);
-        let mut clients = Vec::with_capacity(SUBSCRIBER_CAPACITY);
-        for _ in 0..SUBSCRIBER_CAPACITY {
-            let (server, client) = UnixStream::pair().unwrap();
-            subscribers
-                .attach(&shared, server, crate::peer::current_for_test())
-                .unwrap();
-            clients.push(client);
-        }
-        let buffered = [0_u8; 4_096];
-        let entries = subscribers
-            .subscribers
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for subscriber in entries.iter() {
-            loop {
-                match send(
-                    subscriber.stream.as_raw_fd(),
-                    &buffered,
-                    MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL,
-                ) {
-                    Ok(_) => {}
-                    Err(Errno::EAGAIN) => break,
-                    Err(error) => panic!("could not fill subscriber buffer: {error}"),
-                }
-            }
-        }
-        drop(entries);
-
-        let started = Instant::now();
-        assert!(matches!(
-            dispatch(Request::Lock, &shared, &crate::peer::current_for_test()).outcome,
-            Outcome::Ok
-        ));
-        assert!(started.elapsed() < Duration::from_millis(500));
-        assert!(
-            subscribers
-                .subscribers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .is_empty()
-        );
-        drop(clients);
-    }
-
-    #[test]
-    fn a_dead_subscriber_does_not_consume_the_attachment_cap() {
-        // This fails if the cap is checked before PinnedPeer::is_alive: the
-        // fresh subscriber receives the capacity refusal instead of EPOCH 0.
-        let directory = tempfile::tempdir().unwrap();
-        let shared = Arc::new((
-            Mutex::new(State::new(test_config(directory.path())).unwrap()),
-            Condvar::new(),
-        ));
-        let subscribers = Arc::clone(&lock_state(&shared.0).subscribers);
-        {
-            let mut entries = subscribers
-                .subscribers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            for _ in 0..SUBSCRIBER_CAPACITY {
-                let (stream, _) = UnixStream::pair().unwrap();
-                let fd = std::fs::File::open("/dev/null").unwrap().into();
-                entries.push(Subscriber {
-                    peer: crate::peer::PeerIdentity::from_owned_fd(fd),
-                    stream,
-                });
-            }
-        }
-        let (server, client) = UnixStream::pair().unwrap();
-
-        subscribers
-            .attach(&shared, server, crate::peer::current_for_test())
-            .unwrap();
-
-        let mut epoch = String::new();
-        BufReader::new(client).read_line(&mut epoch).unwrap();
-        assert!(epoch.starts_with("EPOCH 0 instance="));
-        assert_eq!(
-            subscribers
-                .subscribers
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .len(),
-            1
-        );
     }
 
     #[test]

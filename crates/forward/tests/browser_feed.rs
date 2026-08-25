@@ -5,13 +5,24 @@ use std::time::{Duration, Instant};
 use forward::browser::feed::RelayTokens;
 use forward::browser::grant::{Grant, Grants, ProcessAnchor};
 use forward::browser::push::{FeedSlot, spawn_listener};
+use forward::secretsd::BrokerIdentity;
+use zeroize::Zeroizing;
+
+#[path = "browser_feed/acl.rs"]
+mod acl;
 
 #[test]
 fn tokens_are_accepted_until_their_deadline_and_never_after() {
     // This fails if expiry does not revoke, or if an unknown value passes.
     let tokens = RelayTokens::new();
-    tokens.insert(b"live-token".to_vec(), Duration::from_secs(60));
-    tokens.insert(b"dead-token".to_vec(), Duration::from_millis(1));
+    tokens.insert(
+        Zeroizing::new(b"live-token".to_vec()),
+        Duration::from_secs(60),
+    );
+    tokens.insert(
+        Zeroizing::new(b"dead-token".to_vec()),
+        Duration::from_millis(1),
+    );
     std::thread::sleep(Duration::from_millis(20));
 
     assert!(tokens.accepts(b"live-token"));
@@ -88,24 +99,31 @@ fn live_grants_are_re_pushed_on_the_renewal_tick() {
     cfg.peer = "127.0.0.1".to_owned();
     cfg.grant_port = port;
     let grants = Grants::new();
-    grants.insert(
+    let authority = BrokerIdentity {
+        instance: "broker".to_owned(),
+        epoch: 1,
+    };
+    grants.observe_authority(authority.clone());
+    assert!(grants.insert_if_authority(
         12811,
+        &authority,
         Grant {
             session: "live".to_owned(),
             anchor: ProcessAnchor::new(1, 1),
             token: b"renewed-token".to_vec(),
             deadline: Instant::now() + Duration::from_secs(5 * 60),
         },
-    );
-    grants.insert(
+    ));
+    assert!(grants.insert_if_authority(
         12812,
+        &authority,
         Grant {
             session: "expired".to_owned(),
             anchor: ProcessAnchor::new(1, 1),
             token: b"expired-token".to_vec(),
             deadline: Instant::now() - Duration::from_secs(1),
         },
-    );
+    ));
 
     spawn_listener(&cfg, FeedSlot::new(), grants).unwrap();
     let mut feed = TcpStream::connect(("127.0.0.1", port)).unwrap();

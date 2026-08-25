@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use super::{Shared, lock_state, wait_state};
+use super::{HEARTBEAT_INTERVAL, Shared, lock_state, publish_current_authority, wait_state};
 use crate::audit::sanitize_audit_value;
 use crate::decrypt::Decryptor;
 use crate::grants::{GrantOrigin, Scope};
@@ -25,7 +25,14 @@ struct Job {
     reason = "one worker owns the security-sensitive approval lifecycle"
 )]
 pub(super) fn worker(shared: &Shared) {
+    let mut last_heartbeat = Instant::now();
     loop {
+        // Measured as elapsed time rather than a stored future deadline:
+        // adding to an `Instant` can overflow, and this loop runs forever.
+        if last_heartbeat.elapsed() >= HEARTBEAT_INTERVAL {
+            publish_current_authority(shared);
+            last_heartbeat = Instant::now();
+        }
         let job = {
             let (mutex, condvar) = &**shared;
             let mut state = lock_state(mutex);

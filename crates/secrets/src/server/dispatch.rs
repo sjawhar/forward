@@ -70,6 +70,17 @@ pub(super) struct Decision {
     pub(super) request_id: Option<RequestId>,
 }
 
+impl Decision {
+    pub(super) const fn new(outcome: Outcome) -> Self {
+        Self {
+            outcome,
+            scope_kind: None,
+            source: None,
+            request_id: None,
+        }
+    }
+}
+
 fn register(
     shared: &Shared,
     token_hex: &str,
@@ -97,20 +108,13 @@ fn register(
                         request_id: None,
                     }
                 }
-                Err(error) => Decision {
-                    outcome: Outcome::Failed(error, "token is already bound to another session"),
-                    scope_kind: None,
-                    source: None,
-                    request_id: None,
-                },
+                Err(error) => Decision::new(Outcome::Failed(
+                    error,
+                    "token is already bound to another session",
+                )),
             }
         }
-        Err(error) => Decision {
-            outcome: Outcome::Failed(error, "invalid session token"),
-            scope_kind: None,
-            source: None,
-            request_id: None,
-        },
+        Err(error) => Decision::new(Outcome::Failed(error, "invalid session token")),
     }
 }
 
@@ -121,23 +125,15 @@ fn unregister(shared: &Shared, session: &str) -> Decision {
     state.grants.revoke_tokens(&tokens);
     drop(state);
     condvar.notify_all();
-    Decision {
-        outcome: Outcome::Ok,
-        scope_kind: None,
-        source: None,
-        request_id: None,
-    }
+    Decision::new(Outcome::Ok)
 }
 
 fn grants(shared: &Shared) -> Decision {
     let (mutex, _) = &**shared;
     let state = lock_state(mutex);
-    Decision {
-        outcome: Outcome::Payload(state.grants.render(Instant::now()).into_bytes()),
-        scope_kind: None,
-        source: None,
-        request_id: None,
-    }
+    Decision::new(Outcome::Payload(
+        state.grants.render(Instant::now()).into_bytes(),
+    ))
 }
 
 fn receipt_mint_failure(error: &std::io::Error) -> Outcome {
@@ -220,12 +216,7 @@ fn deny(shared: &Shared, id: u64) -> Decision {
     };
     drop(state);
     condvar.notify_all();
-    Decision {
-        outcome,
-        scope_kind: None,
-        source: None,
-        request_id: None,
-    }
+    Decision::new(outcome)
 }
 
 fn authorize(
@@ -237,14 +228,7 @@ fn authorize(
 ) -> Decision {
     let cap = match crate::capability::Capability::parse(cap) {
         Ok(cap) => cap,
-        Err(error) => {
-            return Decision {
-                outcome: Outcome::Failed(error, "invalid capability name"),
-                scope_kind: None,
-                source: None,
-                request_id: None,
-            };
-        }
+        Err(error) => return Decision::new(Outcome::Failed(error, "invalid capability name")),
     };
     let access = Access {
         key: cap.key_name(),
@@ -257,36 +241,19 @@ fn authorize(
     finish_authorization(shared, &cap, epoch_before, decision)
 }
 
-fn redeem(
-    shared: &Shared,
-    receipt_hex: &str,
-    expected_cap: &str,
-    caller: crate::peer::PeerIdentity,
-) -> Decision {
+fn redeem(shared: &Shared, receipt_hex: &str, expected_cap: &str) -> Decision {
     let expected_cap = match crate::capability::Capability::parse(expected_cap) {
         Ok(cap) => cap,
-        Err(error) => {
-            return Decision {
-                outcome: Outcome::Failed(error, "invalid capability name"),
-                scope_kind: None,
-                source: None,
-                request_id: None,
-            };
-        }
+        Err(error) => return Decision::new(Outcome::Failed(error, "invalid capability name")),
     };
     let (mutex, _) = &**shared;
     let mut state = lock_state(mutex);
     let now = Instant::now();
     let Some(deadline) = now.checked_add(state.config.max_grant) else {
-        return Decision {
-            outcome: Outcome::Failed(
-                ErrCode::Internal,
-                "capability grant deadline is out of range",
-            ),
-            scope_kind: None,
-            source: None,
-            request_id: None,
-        };
+        return Decision::new(Outcome::Failed(
+            ErrCode::Internal,
+            "capability grant deadline is out of range",
+        ));
     };
     let redeemed = state.receipts.redeem(receipt_hex, &expected_cap, now);
     tracing::info!(
@@ -297,23 +264,20 @@ fn redeem(
     let outcome = redeemed.map_or(
         Outcome::Failed(ErrCode::Denied, "receipt is not redeemable"),
         |cap| {
-            let outcome = Outcome::Fields(format!(
-                "status=redeemed cap={} instance={} epoch={}",
+            let grant = state.capability_grants.insert(deadline);
+            let Some(ttl) = state.capability_grants.remaining_secs(grant, now) else {
+                return Outcome::Failed(ErrCode::Internal, "capability grant record missing");
+            };
+            Outcome::Fields(format!(
+                "status=redeemed cap={} instance={} epoch={} ttl={ttl}",
                 cap.as_str(),
                 state.instance,
                 state.lock_epoch
-            ));
-            state.capability_grants.insert(cap, caller, deadline);
-            outcome
+            ))
         },
     );
     drop(state);
-    Decision {
-        outcome,
-        scope_kind: None,
-        source: None,
-        request_id: None,
-    }
+    Decision::new(outcome)
 }
 
 fn lock(shared: &Shared) -> Decision {
@@ -323,8 +287,6 @@ fn lock(shared: &Shared) -> Decision {
     state.receipts.clear();
     state.capability_grants.clear();
     state.lock_epoch = state.lock_epoch.saturating_add(1);
-    let epoch = state.lock_epoch;
-    let instance = state.instance.clone();
     let subscribers = std::sync::Arc::clone(&state.subscribers);
     if let Some(active) = state.active_decrypt.take() {
         state.queue.deny(active.id);
@@ -338,13 +300,8 @@ fn lock(shared: &Shared) -> Decision {
     // The authority pair changes before any subscriber write. Attachment and
     // publication serialize their event ordering; nonblocking publication
     // drops a blocked subscriber instead of delaying LOCK.
-    subscribers.publish(&instance, epoch);
-    Decision {
-        outcome: Outcome::Ok,
-        scope_kind: None,
-        source: None,
-        request_id: None,
-    }
+    subscribers.publish_current(shared);
+    Decision::new(Outcome::Ok)
 }
 
 pub(super) fn dispatch(
@@ -353,25 +310,20 @@ pub(super) fn dispatch(
     caller: &crate::peer::PeerIdentity,
 ) -> Decision {
     match request {
-        Request::Hello { version } => Decision {
-            outcome: if version == PROTOCOL_VERSION {
-                // Reported so a harness can tell "same daemon" from "restarted
-                // daemon" and re-register before its requests start failing.
-                let (mutex, _) = &**shared;
-                let state = lock_state(mutex);
-                let fields = format!(
-                    "version={PROTOCOL_VERSION} instance={} epoch={}",
-                    state.instance, state.lock_epoch
-                );
-                drop(state);
-                Outcome::Fields(fields)
-            } else {
-                Outcome::Failed(ErrCode::VersionMismatch, "unsupported protocol version")
-            },
-            scope_kind: None,
-            source: None,
-            request_id: None,
-        },
+        Request::Hello { version } => Decision::new(if version == PROTOCOL_VERSION {
+            // Reported so a harness can tell "same daemon" from "restarted
+            // daemon" and re-register before its requests start failing.
+            let (mutex, _) = &**shared;
+            let state = lock_state(mutex);
+            let fields = format!(
+                "version={PROTOCOL_VERSION} instance={} epoch={}",
+                state.instance, state.lock_epoch
+            );
+            drop(state);
+            Outcome::Fields(fields)
+        } else {
+            Outcome::Failed(ErrCode::VersionMismatch, "unsupported protocol version")
+        }),
         Request::Register {
             token_hex,
             session,
@@ -381,15 +333,10 @@ pub(super) fn dispatch(
         Request::Get { key, .. } | Request::RequestGrant { key, .. }
             if key.starts_with(crate::capability::CAPABILITY_KEY_PREFIX) =>
         {
-            Decision {
-                outcome: Outcome::Failed(
-                    ErrCode::NotHumanKey,
-                    "capability keys hold no retrievable value",
-                ),
-                scope_kind: None,
-                source: None,
-                request_id: None,
-            }
+            Decision::new(Outcome::Failed(
+                ErrCode::NotHumanKey,
+                "capability keys hold no retrievable value",
+            ))
         }
         Request::Get {
             key,
@@ -418,18 +365,16 @@ pub(super) fn dispatch(
         Request::Grants => grants(shared),
         Request::Deny { id } => deny(shared, id),
         Request::Lock => lock(shared),
-        Request::Subscribe => Decision {
-            outcome: Outcome::Failed(ErrCode::BadRequest, "subscription is connection-scoped"),
-            scope_kind: None,
-            source: None,
-            request_id: None,
-        },
+        Request::Subscribe => Decision::new(Outcome::Failed(
+            ErrCode::BadRequest,
+            "subscription is connection-scoped",
+        )),
         Request::Authorize {
             cap,
             token_hex,
             tty,
         } => authorize(shared, &cap, token_hex, tty, caller),
-        Request::Redeem { receipt_hex, cap } => redeem(shared, &receipt_hex, &cap, caller.clone()),
+        Request::Redeem { receipt_hex, cap } => redeem(shared, &receipt_hex, &cap),
     }
 }
 
@@ -556,11 +501,7 @@ mod tests {
         };
         super::super::lock_state(&shared.0)
             .capability_grants
-            .insert(
-                cap.clone(),
-                caller.clone(),
-                Instant::now() + Duration::from_secs(1),
-            );
+            .insert(Instant::now() + Duration::from_secs(1));
         let epoch_before = super::super::lock_state(&shared.0).lock_epoch;
         let worker_shared = Arc::clone(&shared);
         let _worker = std::thread::spawn(move || super::super::worker(&worker_shared));

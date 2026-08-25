@@ -5,17 +5,7 @@
 
 use std::time::Instant;
 
-use crate::capability::Capability;
-use crate::peer::PeerIdentity;
-
-#[allow(
-    dead_code,
-    reason = "the subscription task is the first consumer of these authority fields"
-)]
 struct Entry {
-    id: u64,
-    name: Capability,
-    root: PeerIdentity,
     deadline: Instant,
 }
 
@@ -26,7 +16,6 @@ struct Entry {
 #[derive(Default)]
 pub struct CapabilityGrantTable {
     entries: Vec<Entry>,
-    next_id: u64,
 }
 
 impl std::fmt::Debug for CapabilityGrantTable {
@@ -34,28 +23,23 @@ impl std::fmt::Debug for CapabilityGrantTable {
         formatter
             .debug_struct("CapabilityGrantTable")
             .field("active", &self.entries.len())
-            .field("next_id", &self.next_id)
             .finish()
     }
 }
 
 impl CapabilityGrantTable {
     /// Record a redeemed capability until the broker's authoritative deadline.
-    pub(crate) fn insert(
-        &mut self,
-        name: Capability,
-        root: PeerIdentity,
-        deadline: Instant,
-    ) -> u64 {
-        let id = self.next_id;
-        self.next_id = self.next_id.wrapping_add(1);
-        self.entries.push(Entry {
-            id,
-            name,
-            root,
-            deadline,
-        });
-        id
+    pub(crate) fn insert(&mut self, deadline: Instant) -> usize {
+        self.entries.push(Entry { deadline });
+        self.entries.len().saturating_sub(1)
+    }
+
+    /// Return the broker-owned remaining lifetime for the just-recorded grant.
+    pub(crate) fn remaining_secs(&self, index: usize, now: Instant) -> Option<u64> {
+        self.entries
+            .get(index)
+            .filter(|entry| is_live(entry.deadline, now))
+            .map(|entry| entry.deadline.saturating_duration_since(now).as_secs())
     }
 
     /// Remove grants whose broker-owned deadline has passed.
@@ -86,24 +70,15 @@ mod tests {
 
     #[test]
     #[cfg_attr(miri, ignore)]
-    fn grants_keep_roots_and_expire_at_their_deadlines() {
+    fn grants_expire_at_their_authoritative_deadlines() {
         let now = Instant::now();
-        let root = crate::peer::current_for_test();
         let mut grants = CapabilityGrantTable::default();
 
-        let first = grants.insert(
-            Capability::parse("browser").unwrap(),
-            root.clone(),
-            now + Duration::from_secs(1),
-        );
-        let second = grants.insert(
-            Capability::parse("admin").unwrap(),
-            root,
-            now + Duration::from_secs(2),
-        );
+        grants.insert(now + Duration::from_secs(1));
+        let second = grants.insert(now + Duration::from_secs(2));
+        assert_eq!(grants.remaining_secs(second, now), Some(2));
         grants.sweep(now + Duration::from_secs(1));
 
-        assert_eq!((first, second), (0, 1));
         assert_eq!(grants.len(), 1);
     }
 
@@ -112,11 +87,7 @@ mod tests {
     fn clear_forgets_live_capability_grants() {
         let now = Instant::now();
         let mut grants = CapabilityGrantTable::default();
-        grants.insert(
-            Capability::parse("browser").unwrap(),
-            crate::peer::current_for_test(),
-            now + Duration::from_secs(1),
-        );
+        grants.insert(now + Duration::from_secs(1));
 
         grants.clear();
 

@@ -6,7 +6,7 @@
 //! the CLI maps these errors to its exit codes and messages, forward maps them
 //! to its own refusal strings.
 
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -14,7 +14,7 @@ use std::time::Duration;
 use zeroize::Zeroize as _;
 
 use crate::response::{BrokerResponse, ClientError};
-use crate::{MAX_FRAME_BYTES, PROTOCOL_VERSION};
+mod stream;
 
 /// How long to wait on a verb that blocks for a human decision.
 ///
@@ -154,22 +154,7 @@ impl BrokerClient {
     /// The protocol version is checked exactly as [`BrokerClient::hello`] does;
     /// callers may then require a named extension through [`HelloFields`].
     pub fn hello_fields(&self) -> Result<HelloFields, ClientError> {
-        let version = PROTOCOL_VERSION.to_string();
-        let request = format!("HELLO\tversion={version}");
-        let BrokerResponse::Fields(fields) = self.request(&request)? else {
-            return Err(ClientError::VersionHandshake);
-        };
-        // Fields this client does not consume are tolerated -- the daemon also
-        // reports its instance id, which only a registering harness needs -- but
-        // a missing or differing version must fail rather than degrade.
-        if fields
-            .split(' ')
-            .any(|field| field.strip_prefix("version=") == Some(version.as_str()))
-        {
-            Ok(HelloFields(fields))
-        } else {
-            Err(ClientError::VersionHandshake)
-        }
+        self.connect().and_then(|stream| self.hello_on(stream))
     }
 
     /// Complete a version handshake, then send one request and parse its typed response.
@@ -178,54 +163,19 @@ impl BrokerClient {
         self.request(request)
     }
 
+    /// Open a Unix connection to the configured broker.
+    pub fn connect(&self) -> Result<UnixStream, ClientError> {
+        UnixStream::connect(&self.socket_path).map_err(ClientError::Io)
+    }
+
     /// Send one request on a fresh connection, without a version handshake.
     ///
     /// [`BrokerClient::call`] is the usual entry point; this is for a caller
     /// that has already handshaked, or that is sending `HELLO` itself.
     pub fn request(&self, request: &str) -> Result<BrokerResponse, ClientError> {
-        let mut stream = UnixStream::connect(&self.socket_path).map_err(ClientError::Io)?;
-        let waits_for_approval = APPROVAL_VERBS.iter().any(|verb| request.starts_with(verb));
-        let timeout = if waits_for_approval {
-            self.get_timeout
-        } else {
-            self.control_timeout
-        };
-        stream
-            .set_read_timeout(Some(timeout))
-            .map_err(ClientError::Io)?;
-        stream
-            .set_write_timeout(Some(timeout))
-            .map_err(ClientError::Io)?;
-        write_request(&mut stream, request)?;
-        // The deadline covers the whole reply, not each read of it.
-        let deadline = std::time::Instant::now().checked_add(timeout);
-        match crate::response::read_response_by(stream, deadline) {
-            Err(ClientError::Io(error))
-                if waits_for_approval
-                    && matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-            {
-                Err(ClientError::ApprovalTimeout)
-            }
-            other => other,
-        }
+        self.connect()
+            .and_then(|stream| self.request_on(stream, request))
     }
-}
-
-fn write_request(stream: &mut UnixStream, request: &str) -> Result<(), ClientError> {
-    let request_is_valid = !request.is_empty()
-        && request.len() <= MAX_FRAME_BYTES
-        && request.is_ascii()
-        && !request.contains(['\n', '\r', '\0']);
-    if !request_is_valid {
-        return Err(ClientError::InvalidRequest);
-    }
-    stream
-        .write_all(request.as_bytes())
-        .map_err(ClientError::Io)?;
-    stream.write_all(b"\n").map_err(ClientError::Io)
 }
 
 /// Read a session token from an inherited token file without exposing its bytes in errors.

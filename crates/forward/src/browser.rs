@@ -10,10 +10,12 @@ use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use zeroize::Zeroizing;
+
 use crate::bridge::limit::ConnectionLimit;
 use crate::callback::RELAY_TARGET_PORT;
 use crate::config::Config;
-use crate::peer::authorized;
+use crate::peer::authorized_sensitive;
 use crate::pipe::bidirectional;
 use crate::refusal::refuse;
 /// The devbox's maximum requested grant lifetime, enforced on both peers.
@@ -126,25 +128,27 @@ fn accept_loop(
     }
 }
 fn handle(cfg: &Config, tokens: &feed::RelayTokens, upstream: SocketAddr, mut stream: TcpStream) {
-    let remote = match stream.peer_addr() {
-        Ok(remote) => remote,
-        Err(_) => {
+    let (remote, local) = match (stream.peer_addr(), stream.local_addr()) {
+        (Ok(remote), Ok(local)) => (remote, local),
+        _ => {
             refuse(&mut stream, GENERIC_REFUSAL);
             return;
         }
     };
-    handle_from(cfg, tokens, upstream, remote.ip(), stream);
+    handle_from(cfg, tokens, upstream, remote.ip(), local.ip(), stream);
 }
-/// Test seam: handle a connection whose peer address is supplied by the caller.
+/// Test seam: handle a connection whose peer and local addresses are supplied
+/// by the caller.
 #[doc(hidden)]
 pub fn handle_from(
     cfg: &Config,
     tokens: &feed::RelayTokens,
     upstream: SocketAddr,
     remote: IpAddr,
+    local: IpAddr,
     mut stream: TcpStream,
 ) {
-    if !authorized(cfg, remote) {
+    if !authorized_sensitive(cfg, remote, local) {
         eprintln!("forward: browser relay refused peer {remote}");
         refuse(&mut stream, PEER_REFUSAL);
         return;
@@ -203,27 +207,32 @@ fn token_refusal(upstream: SocketAddr) -> &'static [u8] {
         TOKEN_UPSTREAM_DOWN_REFUSAL
     }
 }
-/// Read `RELAY <token>\n` one byte at a time from the piped stream.
-fn read_relay_token(stream: &mut TcpStream, timeout: Duration) -> Option<Vec<u8>> {
+/// Read `RELAY <token>\n` one byte at a time without creating an unzeroized
+/// copy of the bearer token.
+fn read_relay_token(stream: &mut TcpStream, timeout: Duration) -> Option<Zeroizing<Vec<u8>>> {
+    const PREFIX: &[u8] = b"RELAY ";
     let deadline = Instant::now().checked_add(timeout)?;
-    let mut line = Vec::with_capacity(MAX_REQUEST_LINE);
-    let mut byte = [0_u8; 1];
-    while line.len() < MAX_REQUEST_LINE {
+    let mut token = Zeroizing::new(Vec::with_capacity(MAX_REQUEST_LINE - PREFIX.len()));
+    let mut byte = Zeroizing::new([0_u8; 1]);
+    for position in 0..MAX_REQUEST_LINE {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
             return None;
         }
-        match stream.read(&mut byte) {
+        match stream.read(&mut *byte) {
             Ok(1) => {}
             Ok(_) => return None,
             Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
             Err(_) => return None,
         }
-        let [received] = byte;
-        if received == b'\n' {
-            return line.strip_prefix(b"RELAY ".as_slice()).map(<[u8]>::to_vec);
+        let received = *byte.first()?;
+        if let Some(expected) = PREFIX.get(position) {
+            (received == *expected).then_some(())?;
+        } else if received == b'\n' {
+            return Some(token);
+        } else {
+            token.push(received);
         }
-        line.push(received);
     }
     None
 }

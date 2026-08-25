@@ -45,12 +45,18 @@ fn the_daemon_serves_the_channel_it_announces_when_the_feed_is_down() {
     // Given: an ephemeral browser relay listener. Nothing listens on
     // 127.0.0.1:9224 here: omp-browser-relay never runs on the devbox or CI, so
     // this dials only the daemon's ephemeral listener and never binds 9224.
+    // The peer is the loopback address the test dials from: the relay carries
+    // bearer tokens, so it authorizes the exact configured pair rather than
+    // exempting loopback, and an unset peer would refuse before the feed check.
     let dir = tempfile::tempdir().unwrap();
     let relay_port = test_port();
 
     // When: the daemon announces the channel and a client dials it locally
     // while no devbox feed has attached.
-    let (daemon, port) = start(dir.path(), &format!("relay_port = {relay_port}\n"));
+    let (daemon, port) = start(
+        dir.path(),
+        &format!("relay_port = {relay_port}\npeer = \"127.0.0.1\"\n"),
+    );
     daemon.wait_for_log(&format!("browser relay channel on 127.0.0.1:{relay_port}"));
     let mut relay = connect(relay_port);
     relay.write_all(b"RELAY daemon-relay-token\n").unwrap();

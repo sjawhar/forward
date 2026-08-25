@@ -52,6 +52,7 @@ fn a_flooding_unauthorized_peer_still_gets_the_refusal_and_frees_its_slot() {
             &tokens,
             upstream.local_addr().unwrap(),
             "100.64.0.7".parse().unwrap(),
+            "127.0.0.1".parse().unwrap(),
             server,
         );
     });

@@ -10,12 +10,13 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use parking_lot::Mutex;
-use zeroize::Zeroize as _;
+use zeroize::Zeroizing;
 
+use crate::bridge::limit::ConnectionLimit;
 use crate::browser::BrowserError;
 use crate::browser::grant::Grants;
 use crate::config::Config;
-use crate::peer::authorized;
+use crate::peer::authorized_sensitive;
 use crate::pipe::keepalive;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
@@ -23,6 +24,7 @@ const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_UNHEALTHY_LISTENER: Duration = Duration::from_secs(30);
 const TOKEN_BYTES: usize = 32;
 const RENEW: Duration = Duration::from_secs(60);
+const MAX_FEED_GREETING: u64 = 128;
 
 /// The one attached feed connection, if any. Grants fail while empty: a token
 /// the laptop never acknowledged would be a dead grant sold as live.
@@ -85,10 +87,10 @@ impl FeedSlot {
 /// bytes). Returned, never logged; its only destinations are the grant table
 /// and the feed.
 pub(crate) fn mint_token() -> std::io::Result<Vec<u8>> {
-    let mut raw = [0_u8; TOKEN_BYTES];
-    std::fs::File::open("/dev/urandom")?.read_exact(&mut raw)?;
+    let mut raw = Zeroizing::new([0_u8; TOKEN_BYTES]);
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut *raw)?;
     Ok(base64::engine::general_purpose::STANDARD_NO_PAD
-        .encode(raw)
+        .encode(*raw)
         .into_bytes())
 }
 
@@ -154,11 +156,23 @@ impl AcceptBudget {
 
 fn accept_loop(cfg: Config, listener: TcpListener, slot: FeedSlot, grants: Grants) {
     let mut failures = AcceptBudget::default();
+    let limit = ConnectionLimit::standard();
     loop {
         match listener.accept() {
             Ok((stream, _)) => {
                 failures.restored();
-                attach_if_feed(&cfg, &slot, &grants, stream);
+                let Some(permit) = limit.acquire() else {
+                    eprintln!("forward: grant feed refused connection: concurrency limit reached");
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                };
+                let cfg = cfg.clone();
+                let slot = slot.clone();
+                let grants = grants.clone();
+                drop(thread::spawn(move || {
+                    let _permit = permit;
+                    attach_if_feed(&cfg, &slot, &grants, stream);
+                }));
             }
             Err(error) => {
                 eprintln!("forward: grant feed accept failed: {error}");
@@ -181,12 +195,13 @@ fn renewal_loop(slot: FeedSlot, grants: Grants) -> ! {
 }
 
 /// A connection becomes the feed only after identifying itself with `FEED`:
-/// a doctor probe that connects and closes must never displace a live feed.
+/// an empty health probe cannot displace a live feed or receive a token.
 fn attach_if_feed(cfg: &Config, slot: &FeedSlot, grants: &Grants, stream: TcpStream) {
-    let Ok(remote) = stream.peer_addr() else {
-        return;
+    let (remote, local) = match (stream.peer_addr(), stream.local_addr()) {
+        (Ok(remote), Ok(local)) => (remote, local),
+        _ => return,
     };
-    if !authorized(cfg, remote.ip()) {
+    if !authorized_sensitive(cfg, remote.ip(), local.ip()) {
         eprintln!("forward: grant feed refused peer {}", remote.ip());
         return;
     }
@@ -198,7 +213,10 @@ fn attach_if_feed(cfg: &Config, slot: &FeedSlot, grants: &Grants, stream: TcpStr
     };
     let mut reader = BufReader::new(clone);
     let mut line = String::new();
-    if reader.read_line(&mut line).is_err() || line.trim_end() != "FEED" {
+    let Ok(bytes) = reader.by_ref().take(MAX_FEED_GREETING).read_line(&mut line) else {
+        return;
+    };
+    if bytes == 0 || line.trim_end() != "FEED" {
         return;
     }
     eprintln!("forward: grant feed attached from {}", remote.ip());
@@ -206,10 +224,8 @@ fn attach_if_feed(cfg: &Config, slot: &FeedSlot, grants: &Grants, stream: TcpStr
     push_live(slot, grants);
 }
 fn push_live(slot: &FeedSlot, grants: &Grants) {
-    for (mut token, remaining_secs) in grants.snapshot_live() {
-        let delivered = slot.push(&token, remaining_secs);
-        token.zeroize();
-        if !delivered {
+    for (token, remaining_secs) in grants.snapshot_live() {
+        if !slot.push(token.as_slice(), remaining_secs) {
             return;
         }
     }

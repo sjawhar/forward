@@ -214,9 +214,7 @@ pub fn read_process(pid: u32) -> Option<Process> {
         .map(|part| String::from_utf8_lossy(part).into_owned())
         .collect();
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    // Fields start at stat field 3: PPID is index 1 and start time is 19.
-    let fields_begin = stat.rfind(')')?.checked_add(2)?;
-    let tail = stat.get(fields_begin..)?;
+    let tail = crate::stat_fields(&stat)?;
     let parent = tail.split_whitespace().nth(1)?.parse().ok()?;
     let started = tail.split_whitespace().nth(19)?.parse().ok()?;
     Some(Process {

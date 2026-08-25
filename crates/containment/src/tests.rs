@@ -164,7 +164,10 @@ fn over_deep_ancestry_does_not_reach_a_session() {
     );
 }
 
+// A resolver front-end: spawns a process and reads /proc, neither of which
+// miri's isolation can execute (spec §9).
 #[test]
+#[cfg_attr(miri, ignore)]
 fn a_real_child_process_resolves_as_a_descendant_of_this_process() {
     // The injected-table tests above pin the policy; this one pins that the
     // production `/proc` reader agrees with it on a real process tree.
@@ -186,7 +189,9 @@ fn a_real_child_process_resolves_as_a_descendant_of_this_process() {
     assert!(authorized, "a spawned child must descend from this process");
 }
 
+// Also a resolver front-end: reads the live /proc process table.
 #[test]
+#[cfg_attr(miri, ignore)]
 fn process_start_reads_the_live_process_table() {
     let first = process_start(std::process::id()).expect("start time");
     let second = process_start(std::process::id()).expect("start time");
@@ -292,11 +297,30 @@ mod pinned_peer {
     }
 
     #[test]
-    fn parses_proc_status_fields() {
+    fn parses_kernel_written_fdinfo_fields() {
         let status = "Name:\tbash\nPid:\t4242\nPPid:\t99\n";
 
         assert_eq!(status_field(status, "Pid:"), Some(4242));
-        assert_eq!(status_field(status, "PPid:"), Some(99));
         assert_eq!(status_field(status, "Absent:"), None);
+    }
+
+    #[test]
+    fn a_forged_comm_cannot_supply_the_parent_pid() {
+        // A process controls its own comm. In `status` the comm precedes
+        // `PPid:`, so a prefix match would read a forged line — the parse
+        // must come from `stat`, positionally, after the last `)`.
+        let forged = "Name:\tx\nPPid:\t1\nPid:\t4242\nPPid:\t99\n";
+        assert_eq!(status_field(forged, "PPid:"), Some(1));
+
+        // The same forgery inside a real stat line cannot move the field:
+        // comm is `x) 1 1 1 1 1 1 1` and the true ppid is 99.
+        let stat = "4242 (x) 1 1 1 1 1 1 1) S 99 4242 4242 0";
+        let tail = crate::stat_fields(stat).expect("fields after the comm");
+        assert_eq!(tail.split_whitespace().nth(1), Some("99"));
+    }
+
+    #[test]
+    fn stat_fields_needs_a_closing_comm_paren() {
+        assert_eq!(crate::stat_fields("4242 (truncated"), None);
     }
 }

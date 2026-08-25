@@ -75,14 +75,41 @@ fn an_accepted_grant_expiring_before_registration_leaves_no_pipe() {
     let grants = Grants::new();
     let port = 12811;
     grants.insert(port, grant("session-a", Duration::from_secs(60)));
-    let _accepted_grant = grants.live(port).expect("grant is live at accept");
+    let (grant_id, _accepted_grant) = grants.live_with_id(port).expect("grant is live at accept");
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
     let (laptop, _) = listener.accept().unwrap();
 
     grants.expire(port);
 
-    assert!(grants.register_pipe(port, &client, &laptop).is_err());
+    assert!(
+        grants
+            .register_pipe(port, grant_id, &client, &laptop)
+            .is_err()
+    );
+    assert!(grants.pipes.lock().is_empty());
+}
+#[test]
+fn a_reused_port_rejects_a_handler_accepted_under_the_prior_grant() {
+    // This fails if registration looks only at port liveness: a handler that
+    // captured grant A could otherwise register beneath replacement grant B.
+    let grants = Grants::new();
+    let port = 12811;
+    grants.insert(port, grant("session-a", Duration::from_secs(60)));
+    let (grant_id, _accepted_grant) = grants.live_with_id(port).expect("grant A is live");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (laptop, _) = listener.accept().unwrap();
+
+    grants.expire(port);
+    grants.insert(port, grant("session-b", Duration::from_secs(60)));
+
+    assert!(
+        grants
+            .register_pipe(port, grant_id, &client, &laptop)
+            .is_err()
+    );
+    assert_eq!(grants.live(port).unwrap().session, "session-b");
     assert!(grants.pipes.lock().is_empty());
 }
 
@@ -91,19 +118,25 @@ fn expiring_a_grant_overwrites_its_removed_token() {
     let mut ports = HashMap::new();
     let original = grant("session-a", Duration::from_secs(60));
     let token_len = original.token.len();
-    ports.insert(12811, original);
+    ports.insert(
+        12811,
+        GrantEntry {
+            id: 0,
+            grant: original,
+        },
+    );
 
     let expired = scrub(&mut ports, 12811).expect("the grant is removed");
 
     assert!(ports.is_empty());
     // SAFETY: `zeroize` clears the Vec length but keeps its allocation;
     // `token_len` bytes are initialized and within that allocation.
-    let wiped = unsafe { std::slice::from_raw_parts(expired.token.as_ptr(), token_len) };
+    let wiped = unsafe { std::slice::from_raw_parts(expired.grant.token.as_ptr(), token_len) };
     assert!(
         wiped.iter().all(|byte| *byte == 0),
         "removed token buffer was not overwritten"
     );
-    assert!(expired.token.is_empty());
+    assert!(expired.grant.token.is_empty());
 }
 
 #[test]

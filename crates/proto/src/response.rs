@@ -259,10 +259,11 @@ fn parse_header(header: &[u8]) -> Result<Header, ClientError> {
         if !length_is_valid {
             return Err(ClientError::InvalidResponse);
         }
-        return length
-            .parse()
-            .map(Header::Bytes)
-            .map_err(|_| ClientError::InvalidResponse);
+        let length = length.parse().map_err(|_| ClientError::InvalidResponse)?;
+        if length > MAX_FRAME_BYTES {
+            return Err(ClientError::InvalidResponse);
+        }
+        return Ok(Header::Bytes(length));
     }
     if let Some(fields) = text.strip_prefix("OK\t") {
         return Ok(Header::Fields(fields.to_owned()));

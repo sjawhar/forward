@@ -51,27 +51,25 @@ fn untrusted_host_precedes_malformed_target_validation() {
 
 #[test]
 fn accepts_the_configured_listen_address_and_refuses_a_mismatch() {
-    // Given: a file server told to listen on a specific address rather than the
-    // default, standing in for the devbox's tailnet address, with a counterpart
-    // configured. 127.0.0.2 is a loopback address, so no peer is required to
-    // validate and the test can genuinely bind it.
+    // Given: a file server told to listen on a specific address with loopback
+    // as its configured test counterpart. 127.0.0.2 can bind locally while
+    // preserving the production rule that a preview source equals `peer`.
     let config_root = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("file.txt"), "alive").unwrap();
     let (child, port) = spawn_serve_with_config(
         config_root.path(),
-        "listen = \"127.0.0.2\"\npeer = \"100.64.0.2\"\n",
+        "listen = \"127.0.0.2\"\npeer = \"127.0.0.1\"\n",
     );
     let _guard = Guard(child);
 
-    // When: a request arrives from loopback naming the configured address.
+    // When: the configured source names the configured listener address.
     let configured = format!(
         "GET {}/file.txt HTTP/1.1\r\nHost: 127.0.0.2:{port}\r\n\r\n",
         dir.path().display()
     );
 
-    // Then: it is served — Host validation follows the configured address, and
-    // naming a counterpart does not replace loopback acceptance.
+    // Then: peer and Host validation both follow their configured addresses.
     assert_eq!(
         raw_status("127.0.0.2", port, configured.as_bytes()),
         *b"HTTP/1.1 200"

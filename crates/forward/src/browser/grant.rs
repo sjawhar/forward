@@ -28,22 +28,21 @@ impl Drop for Grant {
         self.token.zeroize();
     }
 }
-/// Live pipe handles per port: duplicated descriptors for both ends of every
-/// connection the port's grant is currently serving.
-type PipeTable = HashMap<u16, Vec<(u64, (std::net::TcpStream, std::net::TcpStream))>>;
-type PipeHandles = Vec<(u64, (std::net::TcpStream, std::net::TcpStream))>;
+struct GrantEntry {
+    id: u64,
+    grant: Grant,
+}
+mod pipes;
+pub use pipes::PipeGuard;
+use pipes::{PipeHandles, PipeTable};
 
-/// Live grants, keyed by the loopback port each one owns.
-///
-/// Clones share one map so the request socket and the proxy listeners can hold
-/// a handle each, matching `bridge::Armed`. `Armed` is deliberately not reused:
-/// it keys on port with a port-safety policy, and a grant keys on session.
+/// Live grants keyed by their loopback port.
 #[derive(Clone, Default)]
 pub struct Grants {
-    ports: Arc<Mutex<HashMap<u16, Grant>>>,
+    ports: Arc<Mutex<HashMap<u16, GrantEntry>>>,
     pipes: Arc<Mutex<PipeTable>>,
     authority: Arc<Mutex<Option<crate::secretsd::BrokerIdentity>>>,
-    next_pipe_id: Arc<std::sync::atomic::AtomicU64>,
+    next_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Grants {
@@ -51,17 +50,17 @@ impl Grants {
         Self::default()
     }
 
-    pub fn insert(&self, port: u16, grant: Grant) {
+    fn insert(&self, port: u16, grant: Grant) {
         let mut ports = self.ports.lock();
         drop(scrub(&mut ports, port));
-        ports.insert(port, grant);
+        let id = self
+            .next_id
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        ports.insert(port, GrantEntry { id, grant });
     }
 
-    /// Insert only when the broker instance and epoch that redeemed this
-    /// receipt are still the subscription's current authority.
-    ///
-    /// Keeping the authority lock through insertion closes the last interval
-    /// between the request handler's HELLO recheck and this registry update.
+    /// Insert only under the current broker authority, closing the final
+    /// redeem-to-registry race.
     pub fn insert_if_authority(
         &self,
         port: u16,
@@ -76,17 +75,13 @@ impl Grants {
         true
     }
 
-    /// Record a subscription authority and revoke every grant if it changed.
-    ///
-    /// The first observation merely establishes authority. Every later broker
-    /// instance or epoch change is unprovable continuity and therefore fails
-    /// closed.
+    /// Observe broker authority; a changed pair revokes every live grant.
     pub fn observe_authority(&self, authority: crate::secretsd::BrokerIdentity) -> bool {
         let mut observed = self.authority.lock();
         let changed = observed.as_ref().is_some_and(|seen| seen != &authority);
         *observed = Some(authority);
         if changed {
-            shutdown(self.drain_all());
+            pipes::shutdown(self.drain_all());
         }
         changed
     }
@@ -95,38 +90,41 @@ impl Grants {
     pub fn invalidate_authority(&self) {
         let mut authority = self.authority.lock();
         *authority = None;
-        shutdown(self.drain_all());
+        pipes::shutdown(self.drain_all());
     }
 
-    /// The grant for `port` if it has not expired.
-    ///
-    /// The returned `Grant` is a clone; see the type docs for what expiry
-    /// does and does not zero. Expired entries are scrubbed here as a
-    /// backstop — the proxy's reaper normally beats this path.
+    /// Return the unexpired grant for `port`, scrubbing a stale backstop entry.
     pub fn live(&self, port: u16) -> Option<Grant> {
+        self.live_with_id(port).map(|(_, grant)| grant)
+    }
+
+    pub(crate) fn live_with_id(&self, port: u16) -> Option<(u64, Grant)> {
         let mut ports = self.ports.lock();
         let expired = ports
             .get(&port)
-            .is_some_and(|grant| grant.deadline <= Instant::now());
+            .is_some_and(|entry| entry.grant.deadline <= Instant::now());
         if expired {
             drop(scrub(&mut ports, port));
             return None;
         }
-        ports.get(&port).cloned()
+        ports
+            .get(&port)
+            .map(|entry| (entry.id, entry.grant.clone()))
     }
 
     /// Live tokens with their remaining lifetimes for feed re-push after the
     /// laptop reconnects. Expired grants are excluded; the reaper owns removal.
-    pub fn snapshot_live(&self) -> Vec<(Vec<u8>, u64)> {
+    pub fn snapshot_live(&self) -> Vec<(zeroize::Zeroizing<Vec<u8>>, u64)> {
         let now = Instant::now();
         self.ports
             .lock()
             .values()
-            .filter(|grant| grant.deadline > now)
-            .map(|grant| {
+            .filter(|entry| entry.grant.deadline > now)
+            .map(|entry| {
                 (
-                    grant.token.clone(),
-                    grant
+                    zeroize::Zeroizing::new(entry.grant.token.clone()),
+                    entry
+                        .grant
                         .deadline
                         .saturating_duration_since(now)
                         .as_secs()
@@ -149,43 +147,10 @@ impl Grants {
         self.ports
             .lock()
             .iter()
-            .find(|(_, grant)| grant.deadline > now && grant.anchor.contains(caller.pid))
-            .map(|(port, grant)| (*port, grant.clone()))
-    }
-
-    /// Register a live pipe's socket pair under `port`, so ending the grant
-    /// ends the pipe.
-    ///
-    /// CDP multiplexes a whole session over one long-lived websocket, so a
-    /// grant that only refuses *new* connections leaves an established session
-    /// driving the browser for as long as it likes. The handles are duplicated
-    /// descriptors: shutting them down wakes the blocked copies inside the
-    /// pipe threads, and the returned guard removes the entry when the pipe
-    /// ends on its own, so a finished pipe does not leak two descriptors.
-    pub fn register_pipe(
-        &self,
-        port: u16,
-        client: &std::net::TcpStream,
-        laptop: &std::net::TcpStream,
-    ) -> std::io::Result<PipeGuard> {
-        // Lock pipes before ports, as `expire` does below: this keeps its
-        // removal from falling between the live-grant check and registration.
-        let mut pipes = self.pipes.lock();
-        let ports = self.ports.lock();
-        if !ports.contains_key(&port) {
-            return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
-        }
-        let handles = (client.try_clone()?, laptop.try_clone()?);
-        let id = self
-            .next_pipe_id
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        pipes.entry(port).or_default().push((id, handles));
-        drop(ports);
-        Ok(PipeGuard {
-            pipes: Arc::clone(&self.pipes),
-            port,
-            id,
-        })
+            .find(|(_, entry)| {
+                entry.grant.deadline > now && entry.grant.anchor.contains(caller.pid)
+            })
+            .map(|(port, entry)| (*port, entry.grant.clone()))
     }
 
     /// Drop `port`'s grant now, zeroing the registry's token copy in place and
@@ -199,13 +164,15 @@ impl Grants {
             drop(scrub(&mut ports, port));
             pipes.remove(&port).unwrap_or_default()
         };
-        shutdown(severed);
+        pipes::shutdown(severed);
     }
 
     fn drain_all(&self) -> PipeHandles {
         let mut pipes = self.pipes.lock();
         let mut ports = self.ports.lock();
-        ports.values_mut().for_each(|grant| grant.token.zeroize());
+        ports
+            .values_mut()
+            .for_each(|entry| entry.grant.token.zeroize());
         ports.clear();
         std::mem::take(&mut *pipes)
             .into_values()
@@ -214,35 +181,11 @@ impl Grants {
     }
 }
 
-fn shutdown(severed: PipeHandles) {
-    for (_, (client, laptop)) in severed {
-        // Both directions of both sockets: the pipe threads block on reads of
-        // either end, and a one-sided shutdown leaves the other blocked.
-        let _ = client.shutdown(std::net::Shutdown::Both);
-        let _ = laptop.shutdown(std::net::Shutdown::Both);
-    }
-}
-
-/// Removes its pipe's handles when the pipe ends of its own accord.
-pub struct PipeGuard {
-    pipes: Arc<Mutex<PipeTable>>,
-    port: u16,
-    id: u64,
-}
-
-impl Drop for PipeGuard {
-    fn drop(&mut self) {
-        if let Some(entries) = self.pipes.lock().get_mut(&self.port) {
-            entries.retain(|(id, _)| *id != self.id);
-        }
-    }
-}
-
 /// Remove `port`'s grant, overwriting its token before releasing the buffer.
-fn scrub(ports: &mut HashMap<u16, Grant>, port: u16) -> Option<Grant> {
-    let mut grant = ports.remove(&port)?;
-    grant.token.zeroize();
-    Some(grant)
+fn scrub(ports: &mut HashMap<u16, GrantEntry>, port: u16) -> Option<GrantEntry> {
+    let mut entry = ports.remove(&port)?;
+    entry.grant.token.zeroize();
+    Some(entry)
 }
 
 #[cfg(test)]

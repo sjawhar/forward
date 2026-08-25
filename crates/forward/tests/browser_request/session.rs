@@ -10,8 +10,8 @@ use forward::browser::request::{GrantStatus, SessionResolver, request, status};
 use parking_lot::Mutex;
 
 use super::{
-    RECEIPT, accepting_redeemer, await_socket, feed_acceptor, grant_config, request_reply,
-    spawn_server,
+    RECEIPT, accepting_redeemer, authority, await_socket, feed_acceptor, grant_config,
+    request_reply, spawn_server,
 };
 
 #[test]
@@ -75,7 +75,7 @@ fn sibling_children_of_a_session_can_use_its_grant() {
     let upstream_port = upstream.local_addr().unwrap().port();
     let (slot, token_receiver) = feed_acceptor();
     let upstream_task = thread::spawn(move || {
-        let token = token_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (token, _) = token_receiver.recv_timeout(Duration::from_secs(5)).unwrap();
         let (mut stream, _) = upstream.accept().unwrap();
         let mut line = Vec::new();
         let mut byte = [0_u8; 1];
@@ -175,15 +175,18 @@ fn status_does_not_disclose_a_grant_for_a_forged_session_string() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("grant.sock");
     let grants = forward::browser::grant::Grants::new();
-    grants.insert(
+    let authority = authority();
+    grants.observe_authority(authority.clone());
+    assert!(grants.insert_if_authority(
         12811,
+        &authority,
         Grant {
             session: "target-session".to_owned(),
             anchor: ProcessAnchor::new(u32::MAX, 0),
             token: b"test-only".to_vec(),
             deadline: Instant::now() + Duration::from_secs(60),
         },
-    );
+    ));
     let (slot, _receiver) = feed_acceptor();
     spawn_server(
         grants,

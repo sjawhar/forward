@@ -3,6 +3,8 @@ use std::net::{SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use zeroize::Zeroizing;
+
 use super::super::BrowserError;
 use super::{RelayTokens, clamp_wire_ttl};
 use crate::config::Config;
@@ -113,7 +115,7 @@ fn run_once(
     tokens.set_connected(true);
     let mut reader = BufReader::new(stream.try_clone()?);
     loop {
-        let mut line = String::new();
+        let mut line = Zeroizing::new(String::new());
         let bytes = match reader.by_ref().take(MAX_FEED_LINE).read_line(&mut line) {
             Ok(bytes) => bytes,
             Err(error) => {
@@ -138,7 +140,7 @@ fn run_once(
     }
 }
 
-fn parse_token_line(line: &str) -> Option<(Vec<u8>, u64)> {
+fn parse_token_line(line: &str) -> Option<(Zeroizing<Vec<u8>>, u64)> {
     let rest = line.strip_prefix("TOKEN ")?;
     let (token, ttl) = rest.split_once(' ')?;
     if token.is_empty() || token.contains(' ') {
@@ -147,7 +149,7 @@ fn parse_token_line(line: &str) -> Option<(Vec<u8>, u64)> {
     let ttl: u64 = ttl.parse().ok()?;
     (ttl != 0).then(|| {
         (
-            token.as_bytes().to_vec(),
+            Zeroizing::new(token.as_bytes().to_vec()),
             clamp_wire_ttl(Duration::from_secs(ttl)).as_secs(),
         )
     })

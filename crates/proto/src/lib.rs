@@ -11,8 +11,36 @@
 /// Protocol version. A mismatch is a hard error, never a downgrade.
 pub const PROTOCOL_VERSION: u32 = 3;
 
-/// Maximum accepted request frame. Requests never carry secret values.
+/// Maximum accepted request frame and response payload. Requests never carry
+/// secret values, but replies must be bounded before allocating their payload.
 pub const MAX_FRAME_BYTES: usize = 4096;
+
+/// The sole input-free request verb that holds a broker connection open.
+pub const SUBSCRIBE_VERB: &str = "SUBSCRIBE";
+/// A subscription was refused before it could prove broker authority.
+pub const SUBSCRIBER_CAPACITY_RESPONSE: &str = "ERR SUBSCRIBER_CAPACITY\n";
+
+/// Render one complete broker authority event.
+#[must_use]
+pub fn authority_event(instance: &str, epoch: u64) -> String {
+    format!("EPOCH {epoch} instance={instance}\n")
+}
+
+/// Parse exactly one complete broker authority event.
+#[must_use]
+pub fn parse_authority_event(line: &str) -> Option<(&str, u64)> {
+    let body = line.strip_prefix("EPOCH ")?;
+    let (epoch, instance) = body.split_once(" instance=")?;
+    let instance = instance.strip_suffix('\n')?;
+    if epoch.is_empty()
+        || !epoch.bytes().all(|byte| byte.is_ascii_digit())
+        || instance.is_empty()
+        || !instance.bytes().all(|byte| byte.is_ascii_graphic())
+    {
+        return None;
+    }
+    Some((instance, epoch.parse().ok()?))
+}
 
 /// Machine-readable failure reasons. The wire form is stable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,3 +132,21 @@ pub mod response;
 
 pub use client::{BrokerClient, SocketPath, caller_tty, read_token_file};
 pub use response::{BrokerResponse, ClientError, parse_response};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn authority_events_round_trip_through_the_shared_grammar() {
+        let line = authority_event("6e57b1e32c564c4ca0c53d9fc5983a14", 42);
+
+        assert_eq!(line, "EPOCH 42 instance=6e57b1e32c564c4ca0c53d9fc5983a14\n");
+        assert_eq!(
+            parse_authority_event(&line),
+            Some(("6e57b1e32c564c4ca0c53d9fc5983a14", 42))
+        );
+        assert_eq!(SUBSCRIBE_VERB, "SUBSCRIBE");
+        assert_eq!(SUBSCRIBER_CAPACITY_RESPONSE, "ERR SUBSCRIBER_CAPACITY\n");
+    }
+}

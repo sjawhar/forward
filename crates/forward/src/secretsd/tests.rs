@@ -115,10 +115,13 @@ fn a_reply_must_carry_exactly_the_expected_fields() {
 
     assert!(matches!(
         redeemed_cap(
-            "status=redeemed cap=browser instance=broker-a epoch=7",
+            "status=redeemed cap=browser instance=broker-a epoch=7 ttl=60",
             "browser"
         ),
-        Ok(BrokerIdentity { instance, epoch }) if instance == "broker-a" && epoch == 7
+        Ok(RedeemedGrant {
+            authority: BrokerIdentity { instance, epoch },
+            ttl_secs: 60,
+        }) if instance == "broker-a" && epoch == 7
     ));
     assert!(redeemed_cap("status=redeemed cap=browser", "browser").is_err());
     // A reply naming a different capability must not authorize this one.

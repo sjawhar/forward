@@ -21,14 +21,8 @@ done
 # over-cap files, or growth beyond a listed ceiling, fails the gate until the
 # file is split.
 readonly -A grandfathered_limits=(
-  [crates/containment/src/tests.rs]=302
-  [crates/forward/src/secretsd.rs]=390
-  [crates/forward/tests/browser_grant.rs]=340
-  [crates/forward/tests/browser_grant/subscription.rs]=312
-  [crates/forward/tests/browser_request.rs]=272
-  [crates/forward/tests/secretsd_client.rs]=265
-  [crates/proto/src/client.rs]=251
-  [crates/proto/src/response.rs]=337
+  [crates/containment/src/tests.rs]=326
+  [crates/proto/src/response.rs]=338
   [crates/secrets/src/client/edit/new.rs]=377
   [crates/secrets/src/client/error.rs]=278
   [crates/secrets/src/config.rs]=288
@@ -37,17 +31,14 @@ readonly -A grandfathered_limits=(
   [crates/secrets/src/decrypt/tests.rs]=386
   [crates/secrets/src/grants.rs]=891
   [crates/secrets/src/lib.rs]=331
-  [crates/secrets/src/proto.rs]=418
-  [crates/secrets/src/receipts.rs]=363
+  [crates/secrets/src/receipts.rs]=339
   [crates/secrets/src/requests.rs]=492
   [crates/secrets/src/secret.rs]=337
-  [crates/secrets/src/server.rs]=1116
-  [crates/secrets/src/server/dispatch.rs]=602
+  [crates/secrets/src/server.rs]=918
+  [crates/secrets/src/server/dispatch.rs]=543
   [crates/secrets/src/store.rs]=261
   [crates/secrets/tests/broker.rs]=432
-  [crates/secrets/tests/broker/capability.rs]=313
   [crates/secrets/tests/broker/sources.rs]=268
-  [crates/secrets/tests/client.rs]=272
   [crates/secrets/tests/client/broker_transport.rs]=279
   [crates/secrets/tests/client/edit.rs]=439
   [crates/secrets/tests/client/edit_human.rs]=556

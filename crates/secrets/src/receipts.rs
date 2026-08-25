@@ -8,6 +8,7 @@
 use std::io::Read as _;
 use std::time::{Duration, Instant};
 
+use hygiene::hex;
 use subtle::ConstantTimeEq as _;
 use zeroize::Zeroizing;
 
@@ -68,7 +69,7 @@ impl ReceiptTable {
                     found | stored.ct_eq(candidate)
                 });
             if !bool::from(duplicate) {
-                let receipt = hex(id.as_ref());
+                let receipt = hex::encode(id.as_ref());
                 self.entries.push(Entry {
                     id,
                     cap: cap.clone(),
@@ -87,7 +88,7 @@ impl ReceiptTable {
         now: Instant,
     ) -> Option<Capability> {
         self.sweep(now);
-        let presented = parse_hex(receipt_hex)?;
+        let presented = hex::decode_exact(receipt_hex, RECEIPT_LEN)?;
         let presented: &[u8] = presented.as_ref();
         let mut position = 0;
         let mut found = subtle::Choice::from(0);
@@ -125,31 +126,6 @@ impl ReceiptTable {
     }
 }
 
-const HEX_DIGITS: &[u8; 16] = b"0123456789abcdef";
-
-#[allow(
-    clippy::indexing_slicing,
-    reason = "each masked nibble is in 0..16 before the static lookup"
-)]
-fn hex(bytes: &[u8]) -> Zeroizing<String> {
-    let mut rendered = Zeroizing::new(String::with_capacity(RECEIPT_LEN * 2));
-    for &byte in bytes {
-        rendered.push(char::from(HEX_DIGITS[usize::from(byte >> 4)]));
-        rendered.push(char::from(HEX_DIGITS[usize::from(byte & 0x0f)]));
-    }
-    rendered
-}
-
-fn parse_hex(raw: &str) -> Option<Zeroizing<Box<[u8]>>> {
-    if raw.len() != RECEIPT_LEN * 2 || !raw.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        return None;
-    }
-    let mut parsed = Zeroizing::new(vec![0_u8; RECEIPT_LEN].into_boxed_slice());
-    for (slot, chunk) in parsed.iter_mut().zip(raw.as_bytes().chunks_exact(2)) {
-        *slot = u8::from_str_radix(std::str::from_utf8(chunk).ok()?, 16).ok()?;
-    }
-    Some(parsed)
-}
 #[cfg(test)]
 mod tests {
     use std::time::Instant;
@@ -255,7 +231,7 @@ mod tests {
 
     #[test]
     fn rendered_receipt_is_a_zeroizing_string() {
-        let mut receipt: Zeroizing<String> = hex(&[0xab; RECEIPT_LEN]);
+        let mut receipt: Zeroizing<String> = hex::encode(&[0xab; RECEIPT_LEN]);
 
         assert_eq!(receipt.len(), RECEIPT_LEN * 2);
         receipt.zeroize();

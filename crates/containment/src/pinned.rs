@@ -15,7 +15,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use crate::{Step, status_field, walk};
+use crate::{Step, stat_fields, status_field, walk};
 
 /// `SO_PEERPIDFD`, added in Linux 6.5 and not surfaced by nix 0.29.
 const SO_PEERPIDFD: libc::c_int = 77;
@@ -149,7 +149,10 @@ pub(crate) fn descends_from_pid(caller: i32, ancestor: i32) -> bool {
 }
 
 /// The parent pid recorded for `pid`, or `None` if it cannot be read.
+///
+/// Read positionally out of `stat`, not by key out of `status`: a process
+/// controls its own comm, and in `status` that comm precedes `PPid:`.
 pub(crate) fn parent_of(pid: i32) -> Option<i32> {
-    let info = std::fs::read_to_string(format!("/proc/{pid}/status")).ok()?;
-    status_field(&info, "PPid:")
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat_fields(&stat)?.split_whitespace().nth(1)?.parse().ok()
 }

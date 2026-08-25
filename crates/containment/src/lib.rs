@@ -60,7 +60,13 @@ pub(crate) fn walk(start: u32, max_hops: usize, mut visit: impl FnMut(u32) -> St
     false
 }
 
-/// Parse a `key:\tvalue` line out of a `/proc` status-style file.
+/// Parse a `key:\tvalue` line out of a kernel-generated `key: value` file.
+///
+/// Only for files whose every field is written by the kernel, such as a
+/// pidfd's `fdinfo`. A prefix match is not safe on `/proc/<pid>/status`,
+/// where the process-controlled `Name:` comm line precedes `PPid:`: that
+/// would make the result depend on the kernel escaping newlines in comm.
+/// Use [`stat_fields`] for anything a process can influence.
 pub(crate) fn status_field(contents: &str, key: &str) -> Option<i32> {
     contents
         .lines()
@@ -68,6 +74,17 @@ pub(crate) fn status_field(contents: &str, key: &str) -> Option<i32> {
         .trim()
         .parse()
         .ok()
+}
+
+/// The positional fields of a `/proc/<pid>/stat` line, starting at field 3.
+///
+/// Field 2 is the comm, parenthesised, and a process controls its contents —
+/// including `)` and whitespace. The fields therefore begin after the *last*
+/// `)`, which is unforgeable no matter what the comm holds. Index into the
+/// result: state 0, ppid 1, starttime 19.
+pub(crate) fn stat_fields(stat: &str) -> Option<&str> {
+    let begin = stat.rfind(')')?.checked_add(2)?;
+    stat.get(begin..)
 }
 
 #[cfg(test)]

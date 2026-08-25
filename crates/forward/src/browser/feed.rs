@@ -11,7 +11,7 @@ use std::time::Duration;
 pub use client::spawn_client;
 use hygiene::clock::BootTime;
 use parking_lot::Mutex;
-use zeroize::Zeroize as _;
+use zeroize::Zeroizing;
 
 /// More live grants than this is not a workflow; evict the oldest.
 const MAX_LIVE_TOKENS: usize = 64;
@@ -31,14 +31,8 @@ impl Clock for BoottimeClock {
 }
 
 struct TokenEntry {
-    token: Vec<u8>,
+    token: Zeroizing<Vec<u8>>,
     deadline: BootTime,
-}
-
-impl Drop for TokenEntry {
-    fn drop(&mut self) {
-        self.token.zeroize();
-    }
 }
 
 #[derive(Default)]
@@ -74,10 +68,9 @@ impl RelayTokens {
         }
     }
 
-    pub fn insert(&self, mut token: Vec<u8>, ttl: Duration) {
+    pub fn insert(&self, token: Zeroizing<Vec<u8>>, ttl: Duration) {
         let now = self.clock.now();
         let Some(deadline) = now.checked_add(clamp_wire_ttl(ttl).min(LEASE)) else {
-            token.zeroize();
             return;
         };
         self.insert_until(token, deadline, now);
@@ -90,15 +83,11 @@ impl RelayTokens {
         self.accepts_at(presented, self.clock.now())
     }
 
-    fn insert_until(&self, token: Vec<u8>, deadline: BootTime, now: BootTime) {
+    fn insert_until(&self, token: Zeroizing<Vec<u8>>, deadline: BootTime, now: BootTime) {
         let mut inner = self.inner.lock();
         inner.entries.retain(|entry| entry.deadline > now);
         inner.entries.retain_mut(|entry| {
-            let replaced = hygiene::constant_time_eq(&entry.token, &token);
-            if replaced {
-                entry.token.zeroize();
-            }
-            !replaced
+            !hygiene::constant_time_eq(entry.token.as_slice(), token.as_slice())
         });
         if inner.entries.len() == MAX_LIVE_TOKENS {
             drop(inner.entries.remove(0));

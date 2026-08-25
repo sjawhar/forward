@@ -104,7 +104,7 @@ fn accept_loop(grants: Grants, listener: TcpListener, upstream: SocketAddr, reso
     for connection in listener.incoming() {
         match connection {
             Ok(mut stream) => {
-                let Some(grant) = grants.live(port) else {
+                let Some(accepted) = grants.live_with_id(port) else {
                     refuse(&mut stream, UNGRANTED_REFUSAL);
                     return;
                 };
@@ -116,7 +116,7 @@ fn accept_loop(grants: Grants, listener: TcpListener, upstream: SocketAddr, reso
                 let grants = grants.clone();
                 drop(thread::spawn(move || {
                     let _permit = permit;
-                    handle(&grants, grant, port, upstream, &resolver, stream);
+                    handle(&grants, accepted, port, upstream, &resolver, stream);
                 }));
             }
             Err(error) => {
@@ -129,12 +129,16 @@ fn accept_loop(grants: Grants, listener: TcpListener, upstream: SocketAddr, reso
 
 fn handle(
     grants: &Grants,
-    grant: Grant,
+    // The id travels with the grant it identifies: `register_pipe` uses it to
+    // prove the port still carries this same grant and not a replacement that
+    // reused the port.
+    accepted: (u64, Grant),
     port: u16,
     upstream: SocketAddr,
     resolver: &Resolver,
     mut stream: TcpStream,
 ) {
+    let (grant_id, grant) = accepted;
     let (Ok(SocketAddr::V4(peer)), Ok(SocketAddr::V4(local))) =
         (stream.peer_addr(), stream.local_addr())
     else {
@@ -170,7 +174,7 @@ fn handle(
     // Register before piping: from here, ending the grant ends this session,
     // whether the ending is `secrets lock`, TTL expiry, or anything later.
     // A registration failure refuses rather than serving an unseverable pipe.
-    let Ok(_pipe) = grants.register_pipe(port, &stream, &laptop) else {
+    let Ok(_pipe) = grants.register_pipe(port, grant_id, &stream, &laptop) else {
         refuse(&mut stream, UNGRANTED_REFUSAL);
         return;
     };
