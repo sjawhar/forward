@@ -1,0 +1,22 @@
+[package]
+name = "containment"
+version.workspace = true
+edition.workspace = true
+# Both binaries depend on this crate, and forward holds a 1.88 floor.
+rust-version = "1.88"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+# `SO_PEERPIDFD` is not surfaced by nix 0.29, so the pinned resolver reaches for
+# libc directly. Pinned to the version crates/secrets uses; the 0.31 move is its
+# own change and deletes that unsafe block outright.
+libc = "0.2"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"

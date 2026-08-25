@@ -1,2 +1,8 @@
-/target
+# Local scratch
+*.tar.gz
+.omo/
+.sisyphus/
 /.omo
+/ignore/
+/target
+node_modules/

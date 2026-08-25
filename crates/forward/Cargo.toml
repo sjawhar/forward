@@ -1,0 +1,30 @@
+[package]
+name = "forward"
+version.workspace = true
+edition.workspace = true
+rust-version = "1.88"
+publish = false
+
+[dependencies]
+proto = { path = "../proto", version = "2.6.0" }
+containment = { path = "../containment", version = "2.6.0" }
+hygiene = { path = "../hygiene", version = "2.6.0" }
+anyhow = "1.0.104"
+base64 = "0.23.0"
+clap = { version = "4.6.4", features = ["derive"] }
+comrak = { version = "0.54.0", default-features = false }
+mime_guess = "2.0.5"
+nix = { version = "0.31", features = ["socket", "net", "fs", "time", "user"] }
+parking_lot = "0.12.5"
+percent-encoding = "2.3.2"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.19"
+tiny_http = "0.12.0"
+toml = "1.1.3"
+url = "2.5.8"
+zeroize = "1.9"
+
+[dev-dependencies]
+socket2 = "0.6.5"
+tempfile = "3.27.0"
+ureq = "2"

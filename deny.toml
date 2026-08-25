@@ -1,17 +1,29 @@
+# Merged from the two pre-consolidation configs. Rule: stricter wins per
+# field, union only on the license allow-list.
+#   confidence-threshold -> 0.93 (secretsd)
+#   unknown-git          -> deny  (forward)
+#   [bans] deny          -> secretsd's list, kept in full
 [advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 ignore = []
 
 [licenses]
 allow = [
     "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
     "MIT",
+    "MPL-2.0",
     "Unicode-3.0",
     "Unicode-DFS-2016",
     "Zlib",
 ]
-confidence-threshold = 0.8
+confidence-threshold = 0.93
 exceptions = []
 private = { ignore = true }
 
@@ -19,6 +31,14 @@ private = { ignore = true }
 multiple-versions = "warn"
 wildcards = "deny"
 highlight = "all"
+deny = [
+    { name = "async-std", reason = "use tokio" },
+    { name = "actix-web", reason = "use axum" },
+    { name = "chrono", reason = "use jiff" },
+    # The secrets daemon holds plaintext. A general-purpose deserializer would
+    # copy it into buffers we cannot zeroize; the wire protocol is hand-rolled.
+    { name = "serde_json", reason = "no serde on the plaintext path (see crates/secrets/Cargo.toml note)" },
+]
 
 [sources]
 unknown-registry = "deny"
