@@ -6,9 +6,10 @@ rust-version = "1.88"
 publish = false
 
 [dependencies]
-proto = { path = "../proto", version = "2.6.0" }
-containment = { path = "../containment", version = "2.6.0" }
-hygiene = { path = "../hygiene", version = "2.6.0" }
+# No version fields on internal path deps: see deny.toml [bans] allow-wildcard-paths.
+proto = { path = "../proto" }
+containment = { path = "../containment" }
+hygiene = { path = "../hygiene" }
 anyhow = "1.0.104"
 base64 = "0.23.0"
 clap = { version = "4.6.4", features = ["derive"] }
