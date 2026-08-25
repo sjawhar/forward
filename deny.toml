@@ -44,6 +44,11 @@ skip = [
     { name = "winnow", version = "0.7.15", reason = "transitive from the secrets TOML 0.8 parser" },
 ]
 wildcards = "deny"
+# Internal path deps carry no version field on purpose: every crate here is
+# publish = false, and a version requirement on a path dep breaks the release
+# workflow's `cargo update --workspace` at each MAJOR bump (3.0.0 release
+# failure, PR #30). Registry deps are still denied wildcards.
+allow-wildcard-paths = true
 highlight = "all"
 deny = [
     { name = "async-std", reason = "use tokio" },
