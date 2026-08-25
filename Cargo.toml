@@ -9,6 +9,15 @@ resolver = "3"
 version = "2.6.0"
 edition = "2024"
 
+# One `nix` for the whole workspace. Two majors used to link into one binary:
+# forward on 0.31 while the credential-path crates sat on 0.29, so a RUSTSEC
+# fix against 0.29 would have looked resolved after bumping forward alone.
+# 0.31 also surfaces `SO_PEERPIDFD`, which is what let containment delete its
+# hand-rolled `getsockopt` block. Crates keep their own feature lists: those
+# document what each one actually uses, and the MSRV job builds them alone.
+[workspace.dependencies]
+nix = { version = "0.31", default-features = false }
+
 # Profiles are workspace-root-only in Cargo, and `panic` cannot be overridden
 # per package. Abort is deliberate: secretsd swallows mutex poisoning
 # (`PoisonError::into_inner`) across its worker pool, which is only sound while

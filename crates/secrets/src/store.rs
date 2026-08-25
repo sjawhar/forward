@@ -5,7 +5,6 @@
 
 use std::collections::BTreeSet;
 use std::ffi::OsString;
-use std::os::fd::{AsRawFd, FromRawFd};
 use std::path::{Path, PathBuf};
 
 use nix::fcntl::{OFlag, openat};
@@ -176,18 +175,17 @@ impl HumanStore {
             [..] => return Err(ErrCode::AmbiguousKey),
         };
         let dir = std::fs::File::open(&candidate.dir).map_err(|_| ErrCode::NotHumanKey)?;
-        let raw_fd = openat(
-            Some(dir.as_raw_fd()),
+        let owned_fd = openat(
+            &dir,
             candidate.file_name.as_str(),
             OFlag::O_RDONLY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
             Mode::empty(),
         )
         .map_err(|_| ErrCode::NotHumanKey)?;
-        // SAFETY: `openat` returned a new, valid file descriptor exclusively
-        // owned by this call. No other owner is created before this conversion,
-        // and the resulting `File` takes exactly one close-on-drop obligation.
-        let file = unsafe { std::fs::File::from_raw_fd(raw_fd) };
-        let stat = fstat(file.as_raw_fd()).map_err(|_| ErrCode::NotHumanKey)?;
+        // nix 0.31 hands back an `OwnedFd`, so the close obligation transfers
+        // by type and this needs no unsafe conversion.
+        let file = std::fs::File::from(owned_fd);
+        let stat = fstat(&file).map_err(|_| ErrCode::NotHumanKey)?;
         if !SFlag::from_bits_truncate(stat.st_mode).contains(SFlag::S_IFREG) {
             return Err(ErrCode::NotHumanKey);
         }

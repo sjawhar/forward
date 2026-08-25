@@ -11,9 +11,7 @@ path = "src/lib.rs"
 
 [dependencies]
 # Syscalls for the process-hardening helpers and the boot-time clock.
-# Pinned to 0.29 to match crates/secrets for now. The 0.31 unification is its
-# own change: it lets the broker delete its hand-rolled SO_PEERPIDFD block.
-nix = { version = "0.29", features = ["mman", "process", "resource", "time"] }
+nix = { workspace = true, features = ["mman", "process", "resource", "time"] }
 # Constant-time comparison. Audited, and it replaces a hand-rolled loop that
 # previously lived in forward.
 subtle = "2"

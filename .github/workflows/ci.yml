@@ -94,7 +94,11 @@ jobs:
             local ran
 
             cargo +nightly miri nextest run --all-features -p "$package" -E "$filter" 2>&1 | tee "$log"
-            ran="$(grep -oE '[0-9]+ tests run' "$log" | tail -n 1 | cut -d' ' -f1)"
+            # The workflow sets CARGO_TERM_COLOR=always, so nextest's summary
+            # reads `<esc>[1m83<esc>[0m tests run`. Strip the escapes before
+            # matching, or the count never parses and this gate fails on a
+            # passing run — which is how it was caught.
+            ran="$(sed 's/\x1b\[[0-9;]*m//g' "$log" | grep -oE '[0-9]+ tests run' | tail -n 1 | cut -d' ' -f1)"
             if [[ ! "$ran" =~ ^[1-9][0-9]*$ ]]; then
               printf 'error: miri executed no %s tests\n' "$package" >&2
               exit 1

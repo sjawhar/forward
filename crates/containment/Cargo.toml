@@ -10,10 +10,9 @@ publish = false
 path = "src/lib.rs"
 
 [dependencies]
-# `SO_PEERPIDFD` is not surfaced by nix 0.29, so the pinned resolver reaches for
-# libc directly. Pinned to the version crates/secrets uses; the 0.31 move is its
-# own change and deletes that unsafe block outright.
-libc = "0.2"
+# `SO_PEERPIDFD`, which pins the peer process, is surfaced by nix 0.31 as a
+# typed sockopt returning an `OwnedFd`, so the resolver needs no unsafe block.
+nix = { workspace = true, features = ["socket"] }
 
 [lints]
 workspace = true

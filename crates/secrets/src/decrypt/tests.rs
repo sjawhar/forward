@@ -85,7 +85,7 @@ fn duplicate_fd_avoids_standard_descriptors_when_stdin_is_closed() {
         let validated = std::fs::File::open(ciphertext).unwrap();
         nix::unistd::close(0).unwrap();
 
-        let inherited = duplicate_ciphertext_fd(validated.as_raw_fd()).unwrap();
+        let inherited = duplicate_ciphertext_fd(&validated).unwrap();
 
         assert!(inherited.as_raw_fd() >= 3);
         return;

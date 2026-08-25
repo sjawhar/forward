@@ -1,7 +1,7 @@
 //! Running sops to decrypt one key.
 
 use std::io::Read;
-use std::os::fd::{AsRawFd, FromRawFd, RawFd};
+use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
@@ -87,9 +87,9 @@ fn failure_code(label: &str) -> ErrCode {
     }
 }
 
-fn duplicate_ciphertext_fd(validated_raw_fd: RawFd) -> Result<std::fs::File, ErrCode> {
-    let inherited_raw_fd =
-        fcntl(validated_raw_fd, FcntlArg::F_DUPFD(3)).map_err(|_| ErrCode::Internal)?;
+fn duplicate_ciphertext_fd(validated: &std::fs::File) -> Result<std::fs::File, ErrCode> {
+    // `F_DUPFD`, not `_CLOEXEC`: the sops child reads the ciphertext through it.
+    let inherited_raw_fd = fcntl(validated, FcntlArg::F_DUPFD(3)).map_err(|_| ErrCode::Internal)?;
     // SAFETY: `F_DUPFD` returned a fresh non-CLOEXEC descriptor with a unique close-on-drop
     // obligation, which this `File` assumes and discharges.
     Ok(unsafe { std::fs::File::from_raw_fd(inherited_raw_fd) })
@@ -246,7 +246,7 @@ impl Decryptor {
             identity,
             file: validated,
         } = store.open(key)?;
-        let inherited = duplicate_ciphertext_fd(validated.as_raw_fd())?;
+        let inherited = duplicate_ciphertext_fd(&validated)?;
         let fd_path = format!("/proc/self/fd/{}", inherited.as_raw_fd());
         let mut child = Command::new(&self.sops_bin)
             .arg("-d")

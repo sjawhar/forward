@@ -225,7 +225,7 @@ fn audit_context(request: &Request, shared: &Shared) -> AuditContext {
 }
 
 fn validate_activated_listener(fd: BorrowedFd<'_>) -> std::io::Result<()> {
-    let stat = fstat(fd.as_raw_fd()).map_err(std::io::Error::other)?;
+    let stat = fstat(fd).map_err(std::io::Error::other)?;
     if !SFlag::from_bits_truncate(stat.st_mode).contains(SFlag::S_IFSOCK) {
         return Err(std::io::Error::other("activation fd is not a socket"));
     }

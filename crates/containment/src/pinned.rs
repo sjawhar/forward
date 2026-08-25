@@ -11,14 +11,11 @@
 //! that pid stable for as long as the descriptor is held, so this resolver uses
 //! it rather than the pid from `SO_PEERCRED`.
 
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
 use crate::{Step, stat_fields, status_field, walk};
-
-/// `SO_PEERPIDFD`, added in Linux 6.5 and not surfaced by nix 0.29.
-const SO_PEERPIDFD: libc::c_int = 77;
 
 /// Upper bound on a `/proc` parent walk, so a pathological tree cannot spin the
 /// daemon. Deeper than the anchored cap because a broker caller may sit far
@@ -59,28 +56,8 @@ impl PinnedPeer {
     /// Returns [`UnidentifiedPeer`] when the kernel does not supply a peer
     /// pidfd.
     pub fn from_stream(stream: &UnixStream) -> Result<Self, UnidentifiedPeer> {
-        let mut raw: libc::c_int = -1;
-        let mut length: libc::socklen_t = size_of::<libc::c_int>()
-            .try_into()
+        let pidfd = nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerPidfd)
             .map_err(|_| UnidentifiedPeer)?;
-        // SAFETY: `raw` and `length` are live for the duration of the call and
-        // sized as `getsockopt` expects for an integer option, and the socket
-        // descriptor is kept open by the borrow of `stream`.
-        let outcome = unsafe {
-            libc::getsockopt(
-                stream.as_raw_fd(),
-                libc::SOL_SOCKET,
-                SO_PEERPIDFD,
-                (&raw mut raw).cast(),
-                &raw mut length,
-            )
-        };
-        if outcome != 0 || raw < 0 {
-            return Err(UnidentifiedPeer);
-        }
-        // SAFETY: a successful `SO_PEERPIDFD` installed a fresh descriptor that
-        // nothing else owns, so the close obligation is ours alone.
-        let pidfd = unsafe { OwnedFd::from_raw_fd(raw) };
         Ok(Self {
             pidfd: Arc::new(pidfd),
         })
