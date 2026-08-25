@@ -176,11 +176,19 @@ fn a_grant_redeemed_by_prior_instance_cannot_insert_at_matching_epoch() {
     let redeemed = crate::secretsd::BrokerIdentity {
         instance: "broker-a".to_owned(),
         epoch: 0,
+        socket: crate::secretsd::SocketIdentity {
+            device: 50,
+            inode: 283,
+        },
     };
     grants.observe_authority(redeemed.clone());
     grants.observe_authority(crate::secretsd::BrokerIdentity {
         instance: "broker-b".to_owned(),
         epoch: 0,
+        socket: crate::secretsd::SocketIdentity {
+            device: 50,
+            inode: 283,
+        },
     });
 
     assert!(!grants.insert_if_authority(

@@ -90,7 +90,7 @@ fn authorize(broker: &FakeBroker) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
     let token_file = broker.dir.path().join("token");
     std::fs::write(&token_file, TOKEN).unwrap();
     let _environment = AuthorizeEnvironment::set(&broker.path, &token_file);
-    secretsd::authorize_for_test(CAP_BROWSER)
+    secretsd::authorize(CAP_BROWSER)
 }
 
 #[test]

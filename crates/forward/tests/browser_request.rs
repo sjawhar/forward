@@ -34,6 +34,10 @@ fn authority() -> BrokerIdentity {
     BrokerIdentity {
         instance: "broker-a".to_owned(),
         epoch: 0,
+        socket: forward::secretsd::SocketIdentity {
+            device: 50,
+            inode: 283,
+        },
     }
 }
 

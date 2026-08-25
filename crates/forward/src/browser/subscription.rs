@@ -61,7 +61,6 @@ pub fn spawn(grants: Grants) -> std::io::Result<()> {
         crate::secretsd::socket_path(),
         SubscriptionTiming::STANDARD,
         None,
-        false,
     )
     .map(drop)
 }
@@ -74,7 +73,7 @@ pub fn spawn_with_socket(
     timing: SubscriptionTiming,
 ) -> std::io::Result<SubscriptionHandle> {
     let (stop, stopped) = mpsc::channel();
-    let worker = spawn_worker(grants, socket, timing, Some(stopped), true)?;
+    let worker = spawn_worker(grants, socket, timing, Some(stopped))?;
     Ok(SubscriptionHandle { stop, worker })
 }
 
@@ -83,11 +82,10 @@ fn spawn_worker(
     socket: PathBuf,
     timing: SubscriptionTiming,
     stop: Option<mpsc::Receiver<()>>,
-    test_broker: bool,
 ) -> std::io::Result<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name("broker-subscription".to_owned())
-        .spawn(move || worker(grants, socket, timing, stop, test_broker))
+        .spawn(move || worker(grants, socket, timing, stop))
 }
 
 fn worker(
@@ -95,7 +93,6 @@ fn worker(
     socket: PathBuf,
     timing: SubscriptionTiming,
     stop: Option<mpsc::Receiver<()>>,
-    test_broker: bool,
 ) {
     let mut budget = ReconnectBudget::default();
     let mut in_outage = false;
@@ -103,7 +100,7 @@ fn worker(
         if stopped(&stop) {
             return;
         }
-        let failure = match run_once(&grants, &socket, timing.read_timeout, test_broker) {
+        let failure = match run_once(&grants, &socket, timing.read_timeout) {
             Ok(()) => return,
             Err(failure) => failure,
         };
@@ -172,21 +169,15 @@ fn run_once(
     grants: &Grants,
     socket: &Path,
     read_timeout: Duration,
-    test_broker: bool,
 ) -> Result<(), SubscriptionFailure> {
-    let identity = if test_broker {
-        crate::secretsd::broker_identity_for_test(socket)
-    } else {
-        crate::secretsd::broker_identity(socket)
-    }
-    .map_err(SubscriptionFailure::Initial)?;
+    let identity =
+        crate::secretsd::broker_identity(socket).map_err(SubscriptionFailure::Initial)?;
     grants.observe_authority(identity);
-    let stream = if test_broker {
-        crate::secretsd::subscribe_for_test(socket, read_timeout)
-    } else {
-        crate::secretsd::subscribe(socket, read_timeout)
-    }
-    .map_err(SubscriptionFailure::Initial)?;
+    // The identity of the socket serving *this* subscription. Every event read
+    // below is attributed to it, so an event can never be credited to a socket
+    // other than the one that carried it.
+    let (stream, socket_identity) =
+        crate::secretsd::subscribe(socket, read_timeout).map_err(SubscriptionFailure::Initial)?;
     let mut reader = BufReader::new(stream);
     loop {
         let mut line = String::new();
@@ -218,6 +209,7 @@ fn run_once(
         grants.observe_authority(crate::secretsd::BrokerIdentity {
             instance: instance.to_owned(),
             epoch,
+            socket: socket_identity,
         });
     }
 }

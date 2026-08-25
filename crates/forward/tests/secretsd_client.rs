@@ -68,3 +68,13 @@ fn hello() -> Step {
 fn redeem() -> String {
     format!("REDEEM\treceipt={RECEIPT}\tcap=browser\n")
 }
+
+/// The real `(device, inode)` of a socket path, which is what forward records.
+fn socket_identity_of(path: &std::path::Path) -> forward::secretsd::SocketIdentity {
+    use std::os::linux::fs::MetadataExt as _;
+    let metadata = std::fs::metadata(path).expect("socket exists");
+    forward::secretsd::SocketIdentity {
+        device: metadata.st_dev(),
+        inode: metadata.st_ino(),
+    }
+}

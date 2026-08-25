@@ -1,5 +1,13 @@
 use super::*;
 
+/// A fixed socket identity: these tests only need it to be a stable value.
+fn probe_socket() -> super::SocketIdentity {
+    super::SocketIdentity {
+        device: 50,
+        inode: 283,
+    }
+}
+
 #[test]
 fn authorize_request_prefers_a_token_over_a_tty() {
     let request = authorize_request(
@@ -116,19 +124,21 @@ fn a_reply_must_carry_exactly_the_expected_fields() {
     assert!(matches!(
         redeemed_cap(
             "status=redeemed cap=browser instance=broker-a epoch=7 ttl=60",
-            "browser"
+            "browser",
+            probe_socket(),
         ),
         Ok(RedeemedGrant {
-            authority: BrokerIdentity { instance, epoch },
+            authority: BrokerIdentity { instance, epoch, socket },
             ttl_secs: 60,
-        }) if instance == "broker-a" && epoch == 7
+        }) if instance == "broker-a" && epoch == 7 && socket == probe_socket()
     ));
-    assert!(redeemed_cap("status=redeemed cap=browser", "browser").is_err());
+    assert!(redeemed_cap("status=redeemed cap=browser", "browser", probe_socket()).is_err());
     // A reply naming a different capability must not authorize this one.
     assert!(
         redeemed_cap(
             "status=redeemed cap=other instance=broker-a epoch=7",
-            "browser"
+            "browser",
+            probe_socket(),
         )
         .is_err()
     );

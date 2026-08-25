@@ -1,41 +1,50 @@
-use std::io::Write as _;
-use std::os::unix::net::UnixListener;
-use std::thread;
+use forward::secretsd::{self, BrokerIdentity, SocketIdentity};
 
-use forward::secretsd::{self, BrokerError, BrokerIdentity};
-
-use super::{FakeBroker, HELLO_OK, hello};
+use super::{FakeBroker, hello};
 
 #[test]
 fn broker_identity_reads_the_fresh_hello_extension() {
     let broker = FakeBroker::start(vec![hello()]);
+    let expected_socket = super::socket_identity_of(&broker.path);
 
-    let identity = secretsd::broker_identity_for_test(&broker.path);
+    let identity = secretsd::broker_identity(&broker.path);
     broker.finish();
 
+    // The socket identity comes from the bound path, not from the reply.
     assert_eq!(
         identity.ok(),
         Some(BrokerIdentity {
             instance: "abc123".to_owned(),
             epoch: 0,
+            socket: expected_socket,
         })
     );
 }
 
 #[test]
-fn a_same_uid_impostor_socket_is_rejected_before_its_valid_hello_is_trusted() {
-    // This fails if forward trusts the rebindable socket path: the test binary
-    // is the socket peer, not the installed `secrets` broker executable.
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("secretsd.sock");
-    let listener = UnixListener::bind(&path).unwrap();
-    let impostor = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().unwrap();
-        let _ = stream.write_all(HELLO_OK.as_bytes());
-    });
+fn an_impostor_replaying_a_valid_hello_yields_a_different_authority() {
+    // A same-uid impostor cannot be refused at connect: it owns the socket it
+    // bound, its uid is ours, and the broker sets PR_SET_DUMPABLE=0 so its
+    // executable is unreadable to a sibling process anyway. What it cannot
+    // reuse is the socket the real broker is bound to -- rebinding a path
+    // necessarily creates a new inode. So an impostor that replays the real
+    // instance and epoch verbatim still yields a different identity, which
+    // `Grants::observe_authority` treats as an authority change and revokes on.
+    //
+    // This fails if `socket` leaves BrokerIdentity: the two identities below
+    // would compare equal and a rebind would be invisible.
+    let impostor = FakeBroker::start(vec![hello()]);
 
-    let result = secretsd::broker_identity(&path);
+    let observed = secretsd::broker_identity(&impostor.path).expect("a valid HELLO");
+    impostor.finish();
 
-    impostor.join().unwrap();
-    assert!(matches!(result, Err(BrokerError::UntrustedPeer { .. })));
+    let same_fields_rebound_socket = BrokerIdentity {
+        instance: observed.instance.clone(),
+        epoch: observed.epoch,
+        socket: SocketIdentity {
+            device: observed.socket.device,
+            inode: observed.socket.inode.saturating_add(1),
+        },
+    };
+    assert_ne!(observed, same_fields_rebound_socket);
 }
