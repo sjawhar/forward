@@ -1,7 +1,9 @@
+use std::net::SocketAddr;
+
+use tiny_http::Request;
+
 use crate::config::Config;
 use crate::peer::authorized;
-use std::net::SocketAddr;
-use tiny_http::Request;
 
 /// Whether an inbound connection's source address may be served at all.
 ///
@@ -93,9 +95,11 @@ fn host_part(value: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use crate::config::Config;
     use std::net::SocketAddr;
+
     use tiny_http::TestRequest;
+
+    use crate::config::Config;
 
     fn cfg_listening_on(listen: &str, peer: &str) -> Config {
         let mut cfg = Config::default_values_for_test();

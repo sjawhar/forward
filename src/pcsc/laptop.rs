@@ -1,14 +1,15 @@
 //! Laptop side: accept the devbox on the tailnet, pipe to the local pcscd.
 
+use std::net::{IpAddr, TcpListener, TcpStream};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
+use std::thread;
+
 use super::{ACCEPT_ERROR_BACKOFF, PcscError};
 use crate::bridge::limit::ConnectionLimit;
 use crate::config::Config;
 use crate::peer::authorized;
 use crate::pipe::{bidirectional, keepalive};
-use std::net::{IpAddr, TcpListener, TcpStream};
-use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
-use std::thread;
 
 /// Where Debian/Ubuntu pcscd listens. Mode 0666, so connecting needs no
 /// privilege; authorization is polkit's, checked against this daemon's
@@ -137,9 +138,10 @@ pub fn handle_from(cfg: &Config, upstream: &Path, remote: IpAddr, stream: TcpStr
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+
     use super::listener_spawn_result;
     use crate::pcsc::PcscError;
-    use std::io;
 
     #[test]
     fn listener_thread_spawn_failure_is_reported() {

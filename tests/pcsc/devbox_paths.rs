@@ -1,4 +1,4 @@
-use super::{cfg, tempdir, with_home};
+use crate::pcsc_support::{cfg, tempdir, with_home};
 
 #[test]
 fn devbox_spawn_preserves_non_socket_paths() {

@@ -1,6 +1,7 @@
-use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+use percent_encoding::{AsciiSet, CONTROLS, percent_encode};
 use url::Url;
 
 const PATH_SEGMENT: &AsciiSet = &CONTROLS

@@ -1,8 +1,9 @@
-use super::PIPE_IDLE_TIMEOUT;
-use crate::pipe::bidirectional;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
+
+use super::PIPE_IDLE_TIMEOUT;
+use crate::pipe::bidirectional;
 
 pub(super) fn relay(bridge: SocketAddr, browser: TcpStream, port: u16) {
     let mut upstream = match TcpStream::connect(bridge) {
@@ -38,11 +39,13 @@ fn configure_pipe_timeouts(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use socket2::Socket;
     use std::net::{Shutdown, TcpListener};
     use std::sync::mpsc;
     use std::thread;
+
+    use socket2::Socket;
+
+    use super::*;
 
     fn tcp_pair() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

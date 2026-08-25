@@ -1,11 +1,12 @@
-use super::super::BrowserError;
-use super::RelayTokens;
-use crate::config::Config;
-use crate::pipe::keepalive;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use super::super::BrowserError;
+use super::RelayTokens;
+use crate::config::Config;
+use crate::pipe::keepalive;
 
 const RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
 /// Past the outage budget the peer is down, not blipping; keep dialing, but at

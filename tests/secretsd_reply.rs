@@ -1,9 +1,10 @@
-use forward::secretsd::{self, BrokerError, CAP_BROWSER};
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
+
+use forward::secretsd::{self, BrokerError, CAP_BROWSER};
 
 const RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HELLO_OK: &[u8] = b"OK\tversion=3 instance=abc123\n";

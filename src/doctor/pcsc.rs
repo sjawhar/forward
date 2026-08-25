@@ -1,5 +1,6 @@
-use crate::config::Config;
 use std::os::unix::net::UnixStream;
+
+use crate::config::Config;
 
 /// The devbox Unix leg lives at `~/.pcscd/pcscd.comm`. A successful probe
 /// reports only that the path accepted a connection; it cannot attribute the

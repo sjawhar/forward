@@ -5,12 +5,12 @@
 mod client;
 mod reaper;
 
-pub use client::spawn_client;
-
-use nix::time::ClockId;
-use parking_lot::Mutex;
 use std::sync::Arc;
 use std::time::Duration;
+
+pub use client::spawn_client;
+use nix::time::ClockId;
+use parking_lot::Mutex;
 use zeroize::Zeroize as _;
 
 /// More live grants than this is not a workflow; evict the oldest.

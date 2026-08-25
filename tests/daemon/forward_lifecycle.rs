@@ -1,5 +1,6 @@
-use super::daemon_support::{connect, connection_is_refused, send, spawn_bridge, start, test_port};
 use std::path::Path;
+
+use super::daemon_support::{connect, connection_is_refused, send, spawn_bridge, start, test_port};
 
 fn config(bridge_port: u16, ttl_secs: u64) -> String {
     format!(

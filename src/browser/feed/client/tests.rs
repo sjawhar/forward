@@ -1,5 +1,6 @@
-use super::*;
 use std::net::TcpListener;
+
+use super::*;
 
 #[test]
 fn a_parsed_feed_token_resets_a_prior_outage() {

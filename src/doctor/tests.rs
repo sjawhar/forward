@@ -1,9 +1,10 @@
+use std::net::TcpListener;
+use std::thread;
+
 use super::browser::{RelayEvidence, classify};
 use super::*;
 use crate::bridge::denied_port;
 use crate::config::Config;
-use std::net::TcpListener;
-use std::thread;
 
 #[test]
 fn the_bridge_probe_asks_for_a_permanently_denylisted_port() {

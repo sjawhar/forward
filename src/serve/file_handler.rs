@@ -1,7 +1,7 @@
-use super::{Reply, TEXT_CONTENT_TYPE, markdown_reply};
-use std::fs;
-use std::io;
 use std::path::Path;
+use std::{fs, io};
+
+use super::{Reply, TEXT_CONTENT_TYPE, markdown_reply};
 
 const MAX_FILE_SIZE: u64 = 64 * 1024 * 1024;
 

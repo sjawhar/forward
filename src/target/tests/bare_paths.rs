@@ -1,6 +1,7 @@
-use super::super::*;
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
+
+use super::super::*;
 
 #[test]
 fn existing_file_maps_to_files_url() {

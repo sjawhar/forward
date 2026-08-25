@@ -1,6 +1,7 @@
 use std::io::Read as _;
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
+
 use zeroize::Zeroizing;
 
 const MAX_REQUEST_LINE: usize = 128;

@@ -1,10 +1,11 @@
-use forward::secretsd::{self, BrokerError, CAP_BROWSER};
-use parking_lot::Mutex;
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::thread::{self, JoinHandle};
+
+use forward::secretsd::{self, BrokerError, CAP_BROWSER};
+use parking_lot::Mutex;
 use zeroize::Zeroizing;
 
 const TOKEN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";

@@ -2,18 +2,20 @@
 //! `TOKEN` pushes acknowledged by `OK`, and server-side token minting. The
 //! laptop dials us; whoever binds `grant_port` answers, which is this daemon.
 
-use crate::browser::BrowserError;
-use crate::browser::grant::Grants;
-use crate::config::Config;
-use crate::peer::authorized;
-use crate::pipe::keepalive;
-use base64::Engine as _;
-use parking_lot::Mutex;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use base64::Engine as _;
+use parking_lot::Mutex;
+
+use crate::browser::BrowserError;
+use crate::browser::grant::Grants;
+use crate::config::Config;
+use crate::peer::authorized;
+use crate::pipe::keepalive;
 
 const ACK_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);

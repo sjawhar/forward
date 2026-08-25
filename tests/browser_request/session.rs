@@ -1,16 +1,18 @@
-use super::{
-    RECEIPT, accepting_redeemer, await_socket, feed_acceptor, grant_config, request_reply,
-    spawn_server,
-};
-use forward::browser::grant::{Grant, ProcessAnchor};
-use forward::browser::request::{GrantStatus, SessionResolver, request, status};
-use parking_lot::Mutex;
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
 use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use forward::browser::grant::{Grant, ProcessAnchor};
+use forward::browser::request::{GrantStatus, SessionResolver, request, status};
+use parking_lot::Mutex;
+
+use super::{
+    RECEIPT, accepting_redeemer, await_socket, feed_acceptor, grant_config, request_reply,
+    spawn_server,
+};
 
 #[test]
 fn a_grant_request_with_a_malformed_receipt_is_refused() {

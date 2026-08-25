@@ -4,16 +4,17 @@ pub mod peer;
 pub mod proxy;
 pub mod push;
 pub mod request;
+use std::io::{self, BufRead, BufReader, Read, Write};
+use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
+use std::thread;
+use std::time::{Duration, Instant};
+
 use crate::bridge::limit::ConnectionLimit;
 use crate::callback::RELAY_TARGET_PORT;
 use crate::config::Config;
 use crate::peer::authorized;
 use crate::pipe::bidirectional;
 use crate::refusal::refuse;
-use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
-use std::thread;
-use std::time::{Duration, Instant};
 /// The maximum idle read or blocked-write interval for a proxied CDP session.
 /// The relay sends websocket keepalives every 30s, so this only reaps dead peers.
 const PIPE_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);

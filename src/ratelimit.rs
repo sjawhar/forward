@@ -1,5 +1,6 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
+
 use url::Url;
 
 const MAX_OPENS_PER_WINDOW: usize = 3;
@@ -53,9 +54,11 @@ impl RecentOpens {
 
 #[cfg(test)]
 mod tests {
-    use super::{OpenDecision, RecentOpens};
     use std::time::{Duration, Instant};
+
     use url::Url;
+
+    use super::{OpenDecision, RecentOpens};
 
     #[test]
     fn drops_fourth_open_for_same_url_within_window() {

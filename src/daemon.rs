@@ -1,13 +1,13 @@
-use crate::ratelimit::{OpenDecision, RecentOpens};
-use crate::request::read_url;
 use forward::callback::{Leases, MAX_DYNAMIC_FORWARDS, is_dynamic_port, request, spawn_reaper};
 use forward::config::Config;
 use forward::localhost::forward_ports;
 use forward::peer::authorized;
 use forward::policy::{Decision, decide};
 use forward::send::Outcome;
+
+use crate::ratelimit::{OpenDecision, RecentOpens};
+use crate::request::read_url;
 mod notification;
-use notification::notify_url;
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -15,6 +15,8 @@ use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Instant;
+
+use notification::notify_url;
 use thiserror::Error;
 use url::Url;
 

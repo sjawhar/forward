@@ -1,11 +1,12 @@
 mod evidence;
 
+use std::io::{Read, Write};
+
 pub(super) use evidence::{RelayEvidence, classify};
 
 use crate::callback::RELAY_TARGET_PORT;
 use crate::config::Config;
 use crate::target::url_host;
-use std::io::{Read, Write};
 
 type Request = dyn for<'host, 'path> FnMut(&'host str, u16, &'path str) -> Result<Vec<u8>, String>;
 

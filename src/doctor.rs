@@ -1,9 +1,10 @@
-use crate::config::Config;
-use crate::target::url_host;
 use std::fmt::Display;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
+
+use crate::config::Config;
+use crate::target::url_host;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const PREVIEW_PROBE_PATH: &str = "/etc/hostname";

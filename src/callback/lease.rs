@@ -1,9 +1,10 @@
-use parking_lot::{Condvar, Mutex};
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
+
+use parking_lot::{Condvar, Mutex};
 
 struct Lease {
     deadline: Instant,
@@ -103,9 +104,10 @@ impl Leases {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::net::TcpListener;
     use std::thread;
+
+    use super::*;
 
     #[test]
     fn a_removed_lease_is_immediately_rebindable() {

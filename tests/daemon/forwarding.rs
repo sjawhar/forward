@@ -1,5 +1,6 @@
-use super::daemon_support::{connect, send, spawn_bridge, start, stub, test_port, wait_for};
 use std::io::Write;
+
+use super::daemon_support::{connect, send, spawn_bridge, start, stub, test_port, wait_for};
 
 #[test]
 fn redirect_uri_port_is_forwarded() {

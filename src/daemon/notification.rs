@@ -1,10 +1,12 @@
-use crate::process::{WaitResult, run_command, stderr};
-use forward::config::Config;
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
+
+use forward::config::Config;
 use url::Url;
+
+use crate::process::{WaitResult, run_command, stderr};
 
 const NOTIFIER_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -144,8 +146,9 @@ fn notification_expired_message(url: &Url) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::notification_expired_message;
     use url::Url;
+
+    use super::notification_expired_message;
 
     #[test]
     fn notification_expiry_log_names_unapproved_url() {

@@ -10,10 +10,11 @@ pub use socket::pid_for_connection;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
     use std::net::{TcpListener, TcpStream};
     use std::process::Command;
+
+    use super::*;
 
     fn process(argv: &[&str], parent: u32) -> Process {
         process_with_start(argv, parent, 1)

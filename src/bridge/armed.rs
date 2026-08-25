@@ -1,9 +1,11 @@
-use super::port_policy::can_arm;
-use crate::config::Config;
-use parking_lot::Mutex;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+use parking_lot::Mutex;
+
+use super::port_policy::can_arm;
+use crate::config::Config;
 
 /// Callback ports the devbox will hop to, and until when.
 ///
@@ -58,9 +60,10 @@ impl Armed {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
     use super::*;
     use crate::config::Config;
-    use std::time::Duration;
 
     #[test]
     fn an_armed_port_is_reachable_until_it_expires() {

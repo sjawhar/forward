@@ -1,9 +1,10 @@
-use forward::browser::feed::RelayTokens;
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::{IpAddr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
+
+use forward::browser::feed::RelayTokens;
 
 fn cfg_with_peer(peer: &str) -> forward::config::Config {
     let mut cfg = forward::config::Config::default_values_for_test();

@@ -1,18 +1,20 @@
-use super::{
-    RECEIPT, accepting_redeemer, await_socket, feed_acceptor, grant_config, request_reply,
-};
-use forward::browser::grant::Grants;
-use forward::browser::proxy::ProxyError;
-use forward::browser::push::FeedSlot;
-use forward::browser::request::{
-    Binder, Redeemer, SessionResolver, read_line_with_timeout, serve_with_binder,
-};
 use std::io::{self, BufRead as _, BufReader, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use forward::browser::grant::Grants;
+use forward::browser::proxy::ProxyError;
+use forward::browser::push::FeedSlot;
+use forward::browser::request::{
+    Binder, Redeemer, SessionResolver, read_line_with_timeout, serve_with_binder,
+};
+
+use super::{
+    RECEIPT, accepting_redeemer, await_socket, feed_acceptor, grant_config, request_reply,
+};
 
 fn spawn_with_binder(
     grants: Grants,

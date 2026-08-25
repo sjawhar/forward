@@ -1,8 +1,3 @@
-use super::line;
-use crate::browser::grant::{Grant, Grants, ProcessAnchor};
-use crate::browser::peer::{grant_anchor_for_pid, session_for_pid};
-use crate::browser::proxy;
-use crate::config::Config;
 use std::io::Write as _;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt as _;
@@ -11,7 +6,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+
 use zeroize::Zeroizing;
+
+use super::line;
+use crate::browser::grant::{Grant, Grants, ProcessAnchor};
+use crate::browser::peer::{grant_anchor_for_pid, session_for_pid};
+use crate::browser::proxy;
+use crate::config::Config;
 const LONGEST_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);

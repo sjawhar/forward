@@ -1,9 +1,10 @@
-use forward::browser::feed::RelayTokens;
-use forward::browser::grant::Grants;
-use forward::browser::push::{FeedSlot, spawn_listener};
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::TcpListener;
 use std::time::{Duration, Instant};
+
+use forward::browser::feed::RelayTokens;
+use forward::browser::grant::Grants;
+use forward::browser::push::{FeedSlot, spawn_listener};
 
 #[test]
 fn tokens_are_accepted_until_their_deadline_and_never_after() {

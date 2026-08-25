@@ -1,7 +1,8 @@
-use super::daemon_support::{send_bytes, start, stub, wait_for};
 use std::io::Write as _;
 use std::thread;
 use std::time::Duration;
+
+use super::daemon_support::{send_bytes, start, stub, wait_for};
 
 #[test]
 fn url_line_at_the_byte_limit_is_processed() {

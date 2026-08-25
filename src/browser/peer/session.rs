@@ -113,8 +113,9 @@ fn is_session_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
+    use super::*;
 
     const SESSION: &str = "01a0223b-94d1-7000-bd0e-5038df7750b0";
 

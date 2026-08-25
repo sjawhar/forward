@@ -1,8 +1,9 @@
-use super::{handle_with_dial, listener_spawn_result};
-use crate::pcsc::{CONNECT_TIMEOUT, PcscError};
 use std::io::{self, Read as _};
 use std::net::SocketAddr;
 use std::os::unix::net::{UnixListener, UnixStream};
+
+use super::{handle_with_dial, listener_spawn_result};
+use crate::pcsc::{CONNECT_TIMEOUT, PcscError};
 
 #[test]
 fn listener_thread_spawn_failure_is_reported() {

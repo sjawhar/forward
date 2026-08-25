@@ -1,8 +1,10 @@
+use std::path::Path;
+
+use url::Url;
+
 use crate::callback::{MAX_DYNAMIC_FORWARDS, is_dynamic_port};
 use crate::config::Config;
 use crate::localhost::forward_ports;
-use std::path::Path;
-use url::Url;
 
 /// Devbox loopback ports an OAuth callback for this URL may arrive on.
 ///

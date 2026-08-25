@@ -89,9 +89,10 @@ fn join_reader(reader: thread::JoinHandle<std::io::Result<Vec<u8>>>) -> std::io:
 
 #[cfg(test)]
 mod tests {
-    use super::{WaitResult, run_command};
     use std::process::Command;
     use std::time::Duration;
+
+    use super::{WaitResult, run_command};
 
     #[test]
     fn captures_stdout_when_command_exits() {

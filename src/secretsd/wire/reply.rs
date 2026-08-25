@@ -1,11 +1,13 @@
 //! Broker reply deadline, parsing, and verb-aware error mapping.
 
-use super::super::BrokerError;
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::{Duration, Instant};
+
 use zeroize::Zeroizing;
+
+use super::super::BrokerError;
 
 const MAX_REPLY_LINE: usize = 256;
 

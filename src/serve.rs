@@ -1,19 +1,20 @@
 mod file_handler;
 mod security;
 
-use crate::config::Config;
-use crate::render::{MARKDOWN_HEAD, MARKDOWN_STYLE, MARKDOWN_TAIL, encode_path, escape_html};
+use std::ffi::OsString;
+use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+use std::path::{Path, PathBuf};
+use std::{fs, io};
+
 use comrak::Options;
 use file_handler::file_reply;
 use percent_encoding::percent_decode;
 use security::{host_allowed, peer_allowed};
-use std::ffi::OsString;
-use std::fs;
-use std::io;
-use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
-use std::path::{Path, PathBuf};
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use url::Url;
+
+use crate::config::Config;
+use crate::render::{MARKDOWN_HEAD, MARKDOWN_STYLE, MARKDOWN_TAIL, encode_path, escape_html};
 
 const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 const TEXT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";

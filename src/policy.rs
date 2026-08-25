@@ -1,5 +1,6 @@
-use crate::config::{Config, Mode};
 use url::Url;
+
+use crate::config::{Config, Mode};
 
 #[derive(Debug, PartialEq)]
 pub enum Decision {

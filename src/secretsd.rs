@@ -9,9 +9,9 @@ mod wire;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use zeroize::Zeroizing;
 
 pub use wire::authorize_frame;
+use zeroize::Zeroizing;
 
 pub const CAP_BROWSER: &str = "browser";
 /// Covers the broker's 90s approval window plus queueing behind another touch.

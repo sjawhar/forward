@@ -1,3 +1,8 @@
+use std::io::Read;
+use std::net::{TcpListener, TcpStream};
+use std::thread;
+use std::time::{Duration, Instant};
+
 use super::Armed;
 use super::limit::ConnectionLimit;
 use super::port_policy::denied_port;
@@ -5,10 +10,6 @@ use crate::config::Config;
 use crate::peer::authorized;
 use crate::pipe::bidirectional;
 use crate::refusal::refuse;
-use std::io::Read;
-use std::net::{TcpListener, TcpStream};
-use std::thread;
-use std::time::{Duration, Instant};
 
 /// How long a connection may take to send its request line.
 const REQUEST_LINE_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -191,8 +192,9 @@ fn read_port_with_timeout(stream: &mut TcpStream, timeout: Duration) -> Option<u
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io::Write;
+
+    use super::*;
 
     #[test]
     fn request_line_deadline_is_cumulative() {

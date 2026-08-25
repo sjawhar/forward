@@ -1,8 +1,9 @@
+use std::io::Write as _;
+
 use clap::{Parser, Subcommand};
 use forward::callback::CHANNEL_PORT;
 use forward::config::{self, Config};
 use forward::{bridge, doctor, send, serve, target};
-use std::io::Write as _;
 
 mod daemon;
 mod opener;

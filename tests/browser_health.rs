@@ -1,8 +1,9 @@
-use forward::browser::feed::RelayTokens;
 use std::io::{Read as _, Write as _};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::thread;
 use std::time::Duration;
+
+use forward::browser::feed::RelayTokens;
 
 fn socket_pair() -> (TcpStream, TcpStream) {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();

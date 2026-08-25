@@ -1,9 +1,9 @@
-use super::browser::{RelayEvidence, classify, evaluate_with};
-use crate::config::Config;
-use crate::config::{default_relay_port, load};
 use std::cell::RefCell;
 use std::net::TcpListener;
 use std::rc::Rc;
+
+use super::browser::{RelayEvidence, classify, evaluate_with};
+use crate::config::{Config, default_relay_port, load};
 
 fn ephemeral_port() -> u16 {
     TcpListener::bind("127.0.0.1:0")

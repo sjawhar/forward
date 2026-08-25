@@ -1,11 +1,12 @@
-use forward::browser::grant::{Grant, Grants, ProcessAnchor};
-use forward::browser::peer::process_start;
-use forward::browser::proxy::{self, Resolver};
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::{Shutdown, SocketAddr, SocketAddrV4, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+use forward::browser::grant::{Grant, Grants, ProcessAnchor};
+use forward::browser::peer::process_start;
+use forward::browser::proxy::{self, Resolver};
 
 const TOKEN: &[u8] = b"correct-horse";
 

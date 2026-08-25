@@ -2,17 +2,18 @@
 //! `PCSCLITE_CSOCK_NAME` and `age-plugin-yubikey` already use — and dial the
 //! laptop's pcsc channel per client connection.
 
-use super::{ACCEPT_ERROR_BACKOFF, CONNECT_TIMEOUT, PcscError};
-use crate::bridge::limit::ConnectionLimit;
-use crate::config::Config;
-use crate::pipe::{bidirectional, keepalive};
-use nix::sys::stat::{Mode, umask};
-use std::io;
 use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::FileTypeExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::thread;
+use std::{io, thread};
+
+use nix::sys::stat::{Mode, umask};
+
+use super::{ACCEPT_ERROR_BACKOFF, CONNECT_TIMEOUT, PcscError};
+use crate::bridge::limit::ConnectionLimit;
+use crate::config::Config;
+use crate::pipe::{bidirectional, keepalive};
 
 /// `$HOME/.pcscd/pcscd.comm`. Fixed contract with secretsd's drop-in
 /// (`PCSCLITE_CSOCK_NAME=%h/.pcscd/pcscd.comm`); never configurable.

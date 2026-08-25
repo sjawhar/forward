@@ -1,9 +1,10 @@
-use crate::config::Config;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
+
+use crate::config::Config;
 
 mod lease;
 mod listener;

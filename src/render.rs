@@ -1,6 +1,7 @@
-use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 use std::os::unix::ffi::OsStrExt as _;
 use std::path::Path;
+
+use percent_encoding::{NON_ALPHANUMERIC, percent_encode};
 
 pub(crate) const MARKDOWN_HEAD: &str = r#"<!DOCTYPE html>
 <html lang="en">

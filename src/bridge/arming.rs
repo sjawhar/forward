@@ -1,12 +1,12 @@
-use super::armed::Armed;
-use super::limit::ConnectionLimit;
 use std::io::{Read, Write};
-use std::os::unix::fs::MetadataExt as _;
-use std::os::unix::fs::PermissionsExt as _;
+use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use super::armed::Armed;
+use super::limit::ConnectionLimit;
 
 /// The longest arming request accepted, in bytes.
 ///

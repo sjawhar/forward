@@ -1,10 +1,12 @@
-use super::{BootTime, RelayTokens};
-use nix::sys::time::TimeSpec;
-use nix::sys::timerfd::{ClockId, Expiration, TimerFd, TimerFlags, TimerSetTimeFlags};
-use parking_lot::Mutex;
 use std::fmt::Display;
 use std::sync::Arc;
 use std::thread;
+
+use nix::sys::time::TimeSpec;
+use nix::sys::timerfd::{ClockId, Expiration, TimerFd, TimerFlags, TimerSetTimeFlags};
+use parking_lot::Mutex;
+
+use super::{BootTime, RelayTokens};
 
 #[derive(Default)]
 pub(super) struct Reaper {

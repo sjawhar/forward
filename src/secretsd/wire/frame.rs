@@ -1,9 +1,11 @@
 //! Scope discovery and request-frame validation for `AUTHORIZE`.
 
-use super::super::BrokerError;
 use std::io::IsTerminal as _;
 use std::os::unix::fs::MetadataExt as _;
+
 use zeroize::Zeroize as _;
+
+use super::super::BrokerError;
 
 /// Must match secretsd's `proto::MAX_FRAME_BYTES`.
 const MAX_FRAME_BYTES: usize = 4_096;

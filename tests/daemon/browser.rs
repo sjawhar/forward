@@ -1,6 +1,7 @@
-use super::daemon_support::{connect, start, start_expecting_failure, test_port};
 use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
+
+use super::daemon_support::{connect, start, start_expecting_failure, test_port};
 
 #[test]
 fn a_bind_failure_is_fatal_and_names_the_address() {

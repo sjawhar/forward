@@ -1,8 +1,11 @@
-use crate::config::{Config, ConfigError};
-use base64::{Engine as _, engine::general_purpose::STANDARD};
 use std::io::{BufRead as _, BufReader, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
 use std::time::Duration;
+
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD;
+
+use crate::config::{Config, ConfigError};
 
 /// How long to wait for the daemon to report what it did with a URL. The
 /// counterpart answers as soon as it has decided, before any browser has

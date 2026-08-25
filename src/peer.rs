@@ -1,5 +1,6 @@
-use crate::config::Config;
 use std::net::IpAddr;
+
+use crate::config::Config;
 
 /// Whether an inbound connection may be served.
 ///

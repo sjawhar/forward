@@ -1,10 +1,12 @@
-use super::*;
-use crate::browser::BrowserError;
-use nix::time::{ClockId, clock_gettime};
-use parking_lot::Mutex;
 use std::io;
 use std::sync::Arc;
 use std::time::Duration;
+
+use nix::time::{ClockId, clock_gettime};
+use parking_lot::Mutex;
+
+use super::*;
+use crate::browser::BrowserError;
 
 struct ManualClock(Mutex<BootTime>);
 

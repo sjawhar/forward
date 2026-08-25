@@ -1,12 +1,11 @@
-use forward::browser::feed::RelayTokens;
 use std::io::{Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, Ordering},
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
+use forward::browser::feed::RelayTokens;
 
 fn cfg_with_peer(peer: &str) -> forward::config::Config {
     let mut cfg = forward::config::Config::default_values_for_test();

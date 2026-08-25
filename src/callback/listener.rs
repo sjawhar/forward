@@ -1,10 +1,11 @@
-use super::relay::relay;
-use super::{AtomicBool, Leases, Ordering};
 use std::io::ErrorKind;
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+use super::relay::relay;
+use super::{AtomicBool, Leases, Ordering};
 
 /// How long an idle accept loop waits before re-checking its stop flag.
 const ACCEPT_POLL: Duration = Duration::from_millis(20);
@@ -89,10 +90,11 @@ impl AcceptLoop {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::config::Config;
     use std::io::{Read, Write};
     use std::time::Instant;
+
+    use super::*;
+    use crate::config::Config;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(1);
 

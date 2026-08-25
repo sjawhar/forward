@@ -1,6 +1,7 @@
 use std::io::{BufRead as _, BufReader, Read as _};
 use std::net::TcpStream;
 use std::time::{Duration, Instant};
+
 use url::Url;
 
 const MAX_URL_BYTES: usize = 8_192;

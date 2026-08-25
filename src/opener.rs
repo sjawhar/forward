@@ -1,7 +1,9 @@
-use crate::FILES_PORT;
+use std::io::Write as _;
+
 use forward::config::Config;
 use forward::{bridge, send, target};
-use std::io::Write as _;
+
+use crate::FILES_PORT;
 
 pub(crate) const OPENER_REENTRY_ERROR: &str = "forward: refusing to open URL because the configured opener is routing back into forward open; set opener to an absolute path such as /usr/bin/xdg-open";
 
@@ -54,8 +56,9 @@ fn hand_back(url: &url::Url) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, open_target};
     use std::io::{BufRead as _, Write as _};
+
+    use super::{Config, open_target};
 
     /// Accepts one connection on the opener channel, reads the URL line, and
     /// answers with `reply`.
