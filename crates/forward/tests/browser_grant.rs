@@ -36,6 +36,10 @@ fn insert_grant(grants: &Grants, port: u16, grant: Grant) {
     let authority = forward::secretsd::BrokerIdentity {
         instance: "broker-a".to_owned(),
         epoch: 0,
+        socket: forward::secretsd::SocketIdentity {
+            device: 50,
+            inode: 283,
+        },
     };
     grants.observe_authority(authority.clone());
     assert!(grants.insert_if_authority(port, &authority, grant));

@@ -14,7 +14,8 @@ fn redeem_accepts_matching_capability() {
         },
     ]);
 
-    let result = secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
+    let expected_socket = super::socket_identity_of(&broker.path);
+    let result = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
     broker.finish();
     assert_eq!(
         result.ok(),
@@ -22,6 +23,7 @@ fn redeem_accepts_matching_capability() {
             authority: BrokerIdentity {
                 instance: "abc123".to_owned(),
                 epoch: 7,
+                socket: expected_socket,
             },
             ttl_secs: 60,
         })
@@ -38,7 +40,7 @@ fn redeem_refuses_a_success_reply_without_an_epoch() {
         },
     ]);
 
-    let result = secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
+    let result = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
     broker.finish();
 
     assert!(matches!(result, Err(BrokerError::Protocol(_))));
@@ -55,7 +57,7 @@ fn redeem_refuses_a_success_reply_without_an_instance() {
         },
     ]);
 
-    let result = secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
+    let result = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
     broker.finish();
 
     assert!(matches!(result, Err(BrokerError::Protocol(_))));
@@ -71,8 +73,7 @@ fn redeem_maps_denied_to_receipt_rejected() {
         },
     ]);
 
-    let error =
-        secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
+    let error = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
     broker.finish();
     assert!(matches!(error, BrokerError::ReceiptRejected));
 }
@@ -87,8 +88,7 @@ fn an_old_daemon_maps_unknown_op_to_upgrade_guidance() {
         },
     ]);
 
-    let error =
-        secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
+    let error = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
     broker.finish();
     assert!(matches!(error, BrokerError::UnknownOp));
     assert!(error.to_string().contains("2.6.0"));
@@ -101,8 +101,7 @@ fn a_version_mismatch_is_a_protocol_error() {
         reply: Reply::Text("OK\tversion=2 instance=abc\n".to_owned()),
     }]);
 
-    let error =
-        secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
+    let error = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
     broker.finish();
     assert!(matches!(error, BrokerError::Protocol(_)));
 }
@@ -118,8 +117,7 @@ fn a_malformed_reply_is_a_sanitized_protocol_error() {
         },
     ]);
 
-    let error =
-        secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
+    let error = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
     broker.finish();
     assert!(matches!(error, BrokerError::Protocol(_)));
     assert!(!error.to_string().contains(SENSITIVE));
@@ -136,8 +134,7 @@ fn a_closed_socket_is_a_protocol_error() {
         },
     ]);
 
-    let error =
-        secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
+    let error = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
     broker.finish();
     assert!(matches!(error, BrokerError::Protocol(_)));
 }
@@ -152,8 +149,7 @@ fn a_reply_without_a_newline_is_a_protocol_error() {
         },
     ]);
 
-    let error =
-        secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
+    let error = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER).unwrap_err();
     broker.finish();
     assert!(matches!(error, BrokerError::Protocol(_)));
 }
@@ -168,7 +164,7 @@ fn redeem_rejects_an_authorize_shaped_success() {
         },
     ]);
 
-    let result = secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
+    let result = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
     broker.finish();
     assert!(matches!(result, Err(BrokerError::Protocol(_))));
 }
@@ -187,7 +183,7 @@ fn redeem_rejects_duplicate_or_unexpected_success_fields() {
             },
         ]);
 
-        let result = secretsd::redeem_for_test(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
+        let result = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
         broker.finish();
         assert!(matches!(result, Err(BrokerError::Protocol(_))));
     }

@@ -14,7 +14,13 @@ pub(super) fn authorized_receipt(fields: &str) -> Result<Zeroizing<String>, Brok
     }
 }
 
-pub(super) fn redeemed_cap(fields: &str, cap: &str) -> Result<RedeemedGrant, BrokerError> {
+/// `socket` comes from the connection that carried this reply, so the authority
+/// it establishes names the socket that actually answered.
+pub(super) fn redeemed_cap(
+    fields: &str,
+    cap: &str,
+    socket: super::SocketIdentity,
+) -> Result<RedeemedGrant, BrokerError> {
     let parsed = expected_fields(fields, &["status", "cap", "instance", "epoch", "ttl"])?;
     match (
         value(&parsed, "status"),
@@ -43,6 +49,7 @@ pub(super) fn redeemed_cap(fields: &str, cap: &str) -> Result<RedeemedGrant, Bro
                 })?;
             Ok(RedeemedGrant {
                 authority: BrokerIdentity {
+                    socket,
                     instance: instance.to_owned(),
                     epoch,
                 },

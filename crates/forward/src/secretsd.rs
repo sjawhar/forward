@@ -13,7 +13,6 @@
 //! belongs here and not in the shared crate. The broker's own CLI never sends
 //! either verb.
 
-use std::ffi::OsStr;
 use std::io::Write as _;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -28,7 +27,7 @@ mod validation;
 use reply::{authorized_receipt, redeemed_cap, valid_field, valid_hex_bytes};
 #[cfg(test)]
 use transport::map_code;
-use transport::{broker_identity_as, call_as, connect_as, test_peer_executable};
+use transport::{call, call_with_socket};
 pub use validation::authorize_request;
 use validation::{caller_tty, session_token};
 
@@ -37,11 +36,38 @@ const SUBSCRIPTION_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Browser capability namespace in the broker.
 pub const CAP_BROWSER: &str = "browser";
 
-/// The broker instance and authority epoch that jointly identify authority.
+/// The broker socket, instance, and authority epoch that jointly identify
+/// authority.
+///
+/// `socket` is the `(device, inode)` of the bound socket, read on the
+/// connection that established this identity. It is here because `instance`
+/// alone can be copied: any same-uid process may connect to the real broker,
+/// read its instance, unlink the socket path, bind its own, and answer with
+/// that same string. Rebinding necessarily creates a new inode, so a
+/// substituted socket is a different authority and revokes.
+///
+/// It is *not* the peer pid. Under systemd socket activation `SO_PEERPIDFD`
+/// names the process that owns the listening socket — systemd itself — so the
+/// pid is identical before and after a broker restart and proves nothing.
+/// Verified on this machine: the broker restarted to a new `MainPID` while the
+/// observed peer pid stayed 1304 across both.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrokerIdentity {
     pub instance: String,
     pub epoch: u64,
+    pub socket: SocketIdentity,
+}
+
+/// The identity of a bound unix socket: its device and inode.
+///
+/// Survives a broker restart, because systemd holds the socket across one, and
+/// changes when anything rebinds the path — the distinction that makes it
+/// useful. A `secretsd.socket` restart also changes it, and that correctly
+/// reads as a new authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SocketIdentity {
+    pub device: u64,
+    pub inode: u64,
 }
 /// A redeemed capability's current authority and broker-controlled lifetime.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -117,47 +143,19 @@ pub fn socket_path() -> PathBuf {
 /// Run the broker's touch ceremony for `cap`; blocks through the touch window.
 /// Returns the single-use receipt as lowercase hex bytes, wiped on drop.
 pub fn authorize(cap: &str) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
-    authorize_as(cap, OsStr::new("secrets"))
-}
-
-#[doc(hidden)]
-pub fn authorize_for_test(cap: &str) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
-    let path = socket_path();
-    authorize_as(cap, &test_peer_executable(&path)?)
-}
-
-fn authorize_as(cap: &str, expected_executable: &OsStr) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
     let path = socket_path();
     let frame = Zeroizing::new(authorize_request(cap, session_token()?, caller_tty())?);
-    let fields = call_as(&path, &frame, Verb::Authorize { cap }, expected_executable)?;
+    let fields = call(&path, &frame, Verb::Authorize { cap })?;
     let receipt = authorized_receipt(&fields)?;
     Ok(Zeroizing::new(receipt.as_bytes().to_vec()))
 }
 
 /// Redeem a receipt with the broker and return its authority and remaining TTL.
 ///
-/// One receipt redeems exactly once. The pair is captured at redemption and
+/// One receipt redeems exactly once. The identity is captured at redemption and
 /// must be rechecked before forward records a grant; the TTL is the broker's
 /// capability-grant deadline and bounds forward's derived caches.
 pub fn redeem(path: &Path, receipt: &[u8], cap: &str) -> Result<RedeemedGrant, BrokerError> {
-    redeem_as(path, receipt, cap, OsStr::new("secrets"))
-}
-
-#[doc(hidden)]
-pub fn redeem_for_test(
-    path: &Path,
-    receipt: &[u8],
-    cap: &str,
-) -> Result<RedeemedGrant, BrokerError> {
-    redeem_as(path, receipt, cap, &test_peer_executable(path)?)
-}
-
-fn redeem_as(
-    path: &Path,
-    receipt: &[u8],
-    cap: &str,
-    expected_executable: &OsStr,
-) -> Result<RedeemedGrant, BrokerError> {
     if !valid_hex_bytes(receipt, 64) {
         return Err(BrokerError::Protocol(
             "receipt is not lowercase ASCII hex".to_owned(),
@@ -171,40 +169,26 @@ fn redeem_as(
     // The receipt is ASCII hex, checked above, so this is lossless.
     let receipt = String::from_utf8_lossy(receipt);
     let frame = Zeroizing::new(format!("REDEEM\treceipt={receipt}\tcap={cap}"));
-    let fields = call_as(path, &frame, Verb::Redeem, expected_executable)?;
-    redeemed_cap(&fields, cap)
+    let (fields, socket) = call_with_socket(path, &frame, Verb::Redeem)?;
+    redeemed_cap(&fields, cap, socket)
 }
 
 /// Read the broker identity and authority epoch through a fresh, version-checked
 /// `HELLO`.
 pub fn broker_identity(path: &Path) -> Result<BrokerIdentity, BrokerError> {
-    broker_identity_as(path, OsStr::new("secrets"))
+    transport::broker_identity(path)
 }
 
-#[doc(hidden)]
-pub fn broker_identity_for_test(path: &Path) -> Result<BrokerIdentity, BrokerError> {
-    broker_identity_as(path, &test_peer_executable(path)?)
-}
-
-/// Attach to the broker's input-free authority-event subscription. Every
-/// `EPOCH` event carries the broker instance and its epoch as one authority pair.
-pub(crate) fn subscribe(path: &Path, read_timeout: Duration) -> Result<UnixStream, BrokerError> {
-    subscribe_as(path, read_timeout, OsStr::new("secrets"))
-}
-
-pub(crate) fn subscribe_for_test(
+/// Attach to the broker's input-free authority-event subscription, returning the
+/// stream and the identity of the socket serving it.
+///
+/// Every `EPOCH` event is attributed to that socket, so an event can never be
+/// credited to a socket other than the one that carried it.
+pub(crate) fn subscribe(
     path: &Path,
     read_timeout: Duration,
-) -> Result<UnixStream, BrokerError> {
-    subscribe_as(path, read_timeout, &test_peer_executable(path)?)
-}
-
-fn subscribe_as(
-    path: &Path,
-    read_timeout: Duration,
-    expected_executable: &OsStr,
-) -> Result<UnixStream, BrokerError> {
-    let mut stream = connect_as(path, expected_executable)?;
+) -> Result<(UnixStream, SocketIdentity), BrokerError> {
+    let (mut stream, socket) = transport::connect_verified(path)?;
     stream
         .set_read_timeout(Some(read_timeout))
         .and_then(|()| stream.set_write_timeout(Some(SUBSCRIPTION_WRITE_TIMEOUT)))
@@ -219,7 +203,7 @@ fn subscribe_as(
             path: path.to_path_buf(),
             source,
         })?;
-    Ok(stream)
+    Ok((stream, socket))
 }
 #[cfg(test)]
 mod tests;

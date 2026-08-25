@@ -102,6 +102,10 @@ fn live_grants_are_re_pushed_on_the_renewal_tick() {
     let authority = BrokerIdentity {
         instance: "broker".to_owned(),
         epoch: 1,
+        socket: forward::secretsd::SocketIdentity {
+            device: 50,
+            inode: 283,
+        },
     };
     grants.observe_authority(authority.clone());
     assert!(grants.insert_if_authority(

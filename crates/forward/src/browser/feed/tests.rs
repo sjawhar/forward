@@ -9,12 +9,16 @@ use zeroize::Zeroizing;
 use super::*;
 use crate::browser::BrowserError;
 use crate::browser::grant::{Grant, Grants, ProcessAnchor};
-use crate::secretsd::BrokerIdentity;
+use crate::secretsd::{BrokerIdentity, SocketIdentity};
 
 fn authority(epoch: u64) -> BrokerIdentity {
     BrokerIdentity {
         instance: "broker".to_owned(),
         epoch,
+        socket: SocketIdentity {
+            device: 50,
+            inode: 283,
+        },
     }
 }
 

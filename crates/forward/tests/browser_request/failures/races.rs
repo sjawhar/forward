@@ -89,11 +89,11 @@ fn an_instance_change_at_matching_epoch_refuses_before_a_token_or_proxy_survives
     });
     let redeem_path = broker_path.clone();
     let redeemer: Redeemer = Arc::new(move |receipt| {
-        forward::secretsd::redeem_for_test(&redeem_path, receipt, forward::secretsd::CAP_BROWSER)
+        forward::secretsd::redeem(&redeem_path, receipt, forward::secretsd::CAP_BROWSER)
     });
     let recheck_path = broker_path;
     let identity_reader: IdentityReader =
-        Arc::new(move || forward::secretsd::broker_identity_for_test(&recheck_path));
+        Arc::new(move || forward::secretsd::broker_identity(&recheck_path));
     let server_grants = grants.clone();
     thread::spawn(move || {
         serve_with_binder(
@@ -195,6 +195,10 @@ fn authority_advance_during_feed_ack_refuses_without_a_renewable_grant() {
     let advanced = forward::secretsd::BrokerIdentity {
         instance: "broker-a".to_owned(),
         epoch: 1,
+        socket: forward::secretsd::SocketIdentity {
+            device: 50,
+            inode: 283,
+        },
     };
     // The broker's fresh HELLO has advanced; leave the subscription's observed
     // pair unchanged so this specifically proves the post-ACK recheck.
