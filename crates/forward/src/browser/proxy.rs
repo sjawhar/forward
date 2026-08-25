@@ -113,9 +113,10 @@ fn accept_loop(grants: Grants, listener: TcpListener, upstream: SocketAddr, reso
                     continue;
                 };
                 let resolver = Arc::clone(&resolver);
+                let grants = grants.clone();
                 drop(thread::spawn(move || {
                     let _permit = permit;
-                    handle(grant, port, upstream, &resolver, stream);
+                    handle(&grants, grant, port, upstream, &resolver, stream);
                 }));
             }
             Err(error) => {
@@ -127,6 +128,7 @@ fn accept_loop(grants: Grants, listener: TcpListener, upstream: SocketAddr, reso
 }
 
 fn handle(
+    grants: &Grants,
     grant: Grant,
     port: u16,
     upstream: SocketAddr,
@@ -165,6 +167,13 @@ fn handle(
             return;
         }
     }
+    // Register before piping: from here, ending the grant ends this session,
+    // whether the ending is `secrets lock`, TTL expiry, or anything later.
+    // A registration failure refuses rather than serving an unseverable pipe.
+    let Ok(_pipe) = grants.register_pipe(port, &stream, &laptop) else {
+        refuse(&mut stream, GENERIC_REFUSAL);
+        return;
+    };
     if let Err(error) = bidirectional(stream, laptop) {
         eprintln!("forward: grant proxy session on {port} ended: {error}");
     }

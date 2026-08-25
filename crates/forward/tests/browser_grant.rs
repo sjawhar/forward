@@ -221,3 +221,73 @@ fn reaper_closes_the_listener_without_a_client_connection() {
     assert!(TcpStream::connect(("127.0.0.1", port)).is_err());
     assert!(grants.live(port).is_none());
 }
+
+/// An upstream that acknowledges the established pipe, then holds it open.
+fn spawn_held_upstream() -> (
+    SocketAddr,
+    std::sync::mpsc::Receiver<()>,
+    thread::JoinHandle<()>,
+) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let (established, ready) = std::sync::mpsc::channel();
+    let task = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut byte = [0_u8; 1];
+        while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {}
+        let mut payload = [0_u8; 4];
+        stream.read_exact(&mut payload).unwrap();
+        established.send(()).unwrap();
+        // Hold the pipe open until the far side ends it.
+        let mut sink = [0_u8; 16];
+        while matches!(stream.read(&mut sink), Ok(n) if n > 0) {}
+    });
+    (address, ready, task)
+}
+
+#[test]
+fn expiring_a_grant_severs_an_established_pipe() {
+    // The revocation acceptance test. CDP multiplexes a whole session over one
+    // long-lived websocket, so a grant ending that only refuses *new*
+    // connections leaves the established session driving the browser until its
+    // TTL. This fails if `expire` merely removes the registry row, which is
+    // exactly what it did before pipes were registered with their grant.
+    let grants = Grants::new();
+    let (upstream, established, task) = spawn_held_upstream();
+    let proxy = proxy::bind(grants.clone(), upstream).unwrap();
+    let port = proxy.port();
+    grants.insert(
+        port,
+        grant(current_anchor(), Instant::now() + Duration::from_secs(600)),
+    );
+    proxy.serve();
+
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client.write_all(b"hold").unwrap();
+    // The upstream has read the payload, so the pipe is registered and moving.
+    established
+        .recv_timeout(Duration::from_secs(5))
+        .expect("pipe established");
+
+    grants.expire(port);
+
+    // The established connection must end promptly -- the grant's TTL had ten
+    // minutes left and the idle timeout is fifteen, so only severance explains
+    // an EOF inside this window.
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut buffer = [0_u8; 16];
+    // EOF specifically: a read timeout also lands in Err, and accepting any
+    // error let the gutted implementation pass this test.
+    let outcome = client.read(&mut buffer);
+    assert!(
+        matches!(outcome, Ok(0)),
+        "an established pipe survived its grant's expiry: {outcome:?}"
+    );
+    task.join().unwrap();
+
+    // And a fresh connection is refused, not proxied.
+    let mut late = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    assert_refused(&mut late, b"REFUSED UNGRANTED\n");
+}
