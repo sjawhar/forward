@@ -9,6 +9,9 @@
  * - overrides the bash tool so SECRETSD_SESSION_TOKEN_FILE is present, letting
  *   `secrets` CLI calls inside agent shells act with this session's identity
  *   (human-tier keys included, after approval)
+ * - mirrors SECRETSD_SESSION_TOKEN_FILE into the omp process environment so
+ *   children spawned outside the bash tool (MCP stdio servers, LSP servers)
+ *   inherit the tree's broker identity as well
  * - registers the secrets_request tool for YubiKey-gated approval requests
  * - exposes the bundled using-secrets skill
  * - unregisters and removes the token file on shutdown
@@ -93,6 +96,13 @@ export function getAnchor(): SharedAnchor | undefined {
 
 export function setAnchor(anchor: SharedAnchor | undefined): void {
 	(globalThis as Record<PropertyKey, unknown>)[SHARED_ANCHOR_KEY] = anchor;
+	// Mirror the anchor's token file into the process environment so children
+	// spawned outside the bash tool (MCP stdio servers, LSP servers) inherit
+	// the tree's broker identity. The bash spawnHook still injects per spawn
+	// (and re-materializes deleted token files); this covers every other
+	// spawn path, which inherits the omp process env verbatim.
+	if (anchor) process.env.SECRETSD_SESSION_TOKEN_FILE = anchor.state.tokenFile;
+	else delete process.env.SECRETSD_SESSION_TOKEN_FILE;
 }
 
 function createAnchor(sessionID: string): SharedAnchor {

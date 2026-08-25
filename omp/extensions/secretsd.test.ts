@@ -471,3 +471,27 @@ test("resources_discover advertises the package's real skills directory", async 
 	expect(existsSync(result.skillPaths[0] as string)).toBe(true);
 	expect(existsSync(join(result.skillPaths[0] as string, "using-secrets", "SKILL.md"))).toBe(true);
 });
+
+test("the process environment mirrors the anchor's token file across claim, re-key, and teardown", async () => {
+	setup();
+	fakeBroker(process.env.SECRETSD_SOCK as string);
+
+	// Claim: session_start publishes the anchor's token file for children
+	// spawned outside the bash tool (MCP stdio servers, LSP servers), which
+	// inherit the omp process environment rather than a bash spawnHook env.
+	const owner = await mountSession("root-session");
+	expect(process.env.SECRETSD_SESSION_TOKEN_FILE).toBe(getAnchor()?.state.tokenFile as string);
+
+	// Re-key: a /new-style id change mints a fresh token; the environment
+	// must follow it, or later MCP spawns would present a retired token.
+	await owner.handlers.session_info_changed(undefined, {
+		sessionManager: { getSessionId: () => "root-session-2" },
+	});
+	expect(process.env.SECRETSD_SESSION_TOKEN_FILE).toBe(getAnchor()?.state.tokenFile as string);
+	expect(process.env.SECRETSD_SESSION_TOKEN_FILE).toContain("root-session-2.token");
+
+	// Teardown: the owner's shutdown retires the identity; a stale path left
+	// in the environment would leak into children spawned after shutdown.
+	await owner.handlers.session_shutdown(undefined, {});
+	expect(process.env.SECRETSD_SESSION_TOKEN_FILE).toBeUndefined();
+});
