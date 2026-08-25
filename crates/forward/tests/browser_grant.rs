@@ -202,6 +202,50 @@ fn expired_grant_is_refused_as_ungranted() {
 }
 
 #[test]
+fn expiry_after_accept_refuses_without_piping_the_stale_grant() {
+    // This fails if registration trusts the accept-time grant clone: expiry
+    // then runs before `handle` registers, leaving an unseverable pipe behind.
+    let grants = Grants::new();
+    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    let upstream_address = upstream.local_addr().unwrap();
+    let (forwarded, observed) = std::sync::mpsc::channel();
+    let upstream_task = thread::spawn(move || {
+        let (mut stream, _) = upstream.accept().unwrap();
+        let mut header = Vec::new();
+        let mut byte = [0_u8; 1];
+        while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
+            header.push(byte[0]);
+        }
+        assert_eq!(header, b"RELAY correct-horse");
+        let mut payload = [0_u8; 4];
+        let received = stream.read(&mut payload).unwrap();
+        if received > 0 {
+            stream.write_all(b"FORWARDED").unwrap();
+        }
+        forwarded.send(received).unwrap();
+    });
+    let (listener, port) = listener();
+    grants.insert(
+        port,
+        grant(current_anchor(), Instant::now() + Duration::from_secs(60)),
+    );
+    let expiring_grants = grants.clone();
+    let resolver: Resolver = Arc::new(move |_, _| {
+        expiring_grants.expire(port);
+        Some(std::process::id())
+    });
+    proxy::spawn_with_listener(grants.clone(), listener, upstream_address, resolver);
+
+    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    client.write_all(b"ping").unwrap();
+
+    assert_refused(&mut client, b"REFUSED UNGRANTED\n");
+    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+    upstream_task.join().unwrap();
+    assert!(grants.live(port).is_none());
+}
+
+#[test]
 fn reaper_closes_the_listener_without_a_client_connection() {
     // This fails if expiry only removes the grant and does not wake accept.
     let grants = Grants::new();

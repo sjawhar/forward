@@ -1,3 +1,4 @@
+use std::net::{TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
 use super::*;
@@ -65,6 +66,24 @@ fn expiring_a_grant_removes_its_token_from_the_registry() {
     grants.insert(12811, grant("session-a", Duration::from_secs(60)));
     grants.expire(12811);
     assert!(grants.live(12811).is_none());
+}
+
+#[test]
+fn an_accepted_grant_expiring_before_registration_leaves_no_pipe() {
+    // This fails if `register_pipe` only records handles: an accepted handler
+    // can otherwise outlive the expired authorization in the pipe table.
+    let grants = Grants::new();
+    let port = 12811;
+    grants.insert(port, grant("session-a", Duration::from_secs(60)));
+    let _accepted_grant = grants.live(port).expect("grant is live at accept");
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+    let (laptop, _) = listener.accept().unwrap();
+
+    grants.expire(port);
+
+    assert!(grants.register_pipe(port, &client, &laptop).is_err());
+    assert!(grants.pipes.lock().is_empty());
 }
 
 #[test]

@@ -123,12 +123,19 @@ impl Grants {
         client: &std::net::TcpStream,
         laptop: &std::net::TcpStream,
     ) -> std::io::Result<PipeGuard> {
-        let handles = (client.try_clone()?, laptop.try_clone()?);
+        // Lock pipes before ports, as `expire` does below: this keeps its
+        // removal from falling between the live-grant check and registration.
         let mut pipes = self.pipes.lock();
+        let ports = self.ports.lock();
+        if !ports.contains_key(&port) {
+            return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
+        }
+        let handles = (client.try_clone()?, laptop.try_clone()?);
         let id = self
             .next_pipe_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         pipes.entry(port).or_default().push((id, handles));
+        drop(ports);
         Ok(PipeGuard {
             pipes: Arc::clone(&self.pipes),
             port,
@@ -139,8 +146,14 @@ impl Grants {
     /// Drop `port`'s grant now, zeroing the registry's token copy in place and
     /// severing every live pipe the grant was serving.
     pub fn expire(&self, port: u16) {
-        drop(scrub(&mut self.ports.lock(), port));
-        let severed = self.pipes.lock().remove(&port).unwrap_or_default();
+        let severed = {
+            // Lock pipes before ports, as `register_pipe` does above, so a
+            // registration cannot escape the pipe table after this removal.
+            let mut pipes = self.pipes.lock();
+            let mut ports = self.ports.lock();
+            drop(scrub(&mut ports, port));
+            pipes.remove(&port).unwrap_or_default()
+        };
         for (_, (client, laptop)) in severed {
             // Both directions of both sockets: the pipe threads block on reads
             // of either end, and a one-sided shutdown leaves the other blocked.

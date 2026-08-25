@@ -171,7 +171,7 @@ fn handle(
     // whether the ending is `secrets lock`, TTL expiry, or anything later.
     // A registration failure refuses rather than serving an unseverable pipe.
     let Ok(_pipe) = grants.register_pipe(port, &stream, &laptop) else {
-        refuse(&mut stream, GENERIC_REFUSAL);
+        refuse(&mut stream, UNGRANTED_REFUSAL);
         return;
     };
     if let Err(error) = bidirectional(stream, laptop) {

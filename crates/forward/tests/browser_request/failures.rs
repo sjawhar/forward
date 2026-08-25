@@ -66,7 +66,7 @@ fn a_bind_failure_after_redeem_does_not_publish_a_token() {
 }
 
 #[test]
-fn a_advanced_recheck_epoch_refuses_before_a_token_or_proxy_survives() {
+fn a_lower_recheck_epoch_refuses_before_a_token_or_proxy_survives() {
     let broker_directory = tempfile::tempdir().unwrap();
     let broker_path = broker_directory.path().join("secretsd.sock");
     let broker_listener = UnixListener::bind(&broker_path).unwrap();
@@ -74,18 +74,18 @@ fn a_advanced_recheck_epoch_refuses_before_a_token_or_proxy_survives() {
         let steps = [
             (
                 "HELLO\tversion=3\n".to_owned(),
-                "OK\tversion=3 instance=broker epoch=0\n".to_owned(),
+                "OK\tversion=3 instance=broker epoch=1\n".to_owned(),
             ),
             (
                 format!(
                     "REDEEM\treceipt={}\tcap=browser\n",
                     std::str::from_utf8(RECEIPT).unwrap()
                 ),
-                "OK\tstatus=redeemed cap=browser epoch=0\n".to_owned(),
+                "OK\tstatus=redeemed cap=browser epoch=1\n".to_owned(),
             ),
             (
                 "HELLO\tversion=3\n".to_owned(),
-                "OK\tversion=3 instance=broker epoch=1\n".to_owned(),
+                "OK\tversion=3 instance=broker epoch=0\n".to_owned(),
             ),
         ];
         for (expected, reply) in steps {

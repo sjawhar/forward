@@ -174,6 +174,8 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
     }
     // The feed acknowledgement can wait five seconds. Recheck again immediately
     // before insertion so a lock during that wait cannot cross this boundary.
+    // A refusal here leaves the already-pushed laptop token bounded by the
+    // five-minute lease and never renewed: the grant is never inserted.
     if !epoch_is_current(deps, redeemed_epoch) {
         let _ = stream.write_all(b"REFUSED\n");
         return;
@@ -199,10 +201,10 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
 
 fn epoch_is_current(deps: &Deps, redeemed_epoch: u64) -> bool {
     match (deps.epoch_reader)() {
-        Ok(epoch) if epoch <= redeemed_epoch => true,
+        Ok(epoch) if epoch == redeemed_epoch => true,
         Ok(epoch) => {
             eprintln!(
-                "forward: grant refused: broker epoch advanced from {redeemed_epoch} to {epoch}"
+                "forward: grant refused: broker epoch changed from {redeemed_epoch} to {epoch}"
             );
             false
         }
