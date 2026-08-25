@@ -17,8 +17,14 @@ use crate::config::Config;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 pub type SessionResolver = Arc<dyn Fn(u32) -> Option<String> + Send + Sync>;
-pub type Redeemer = Arc<dyn Fn(&[u8]) -> Result<u64, crate::secretsd::BrokerError> + Send + Sync>;
-pub type EpochReader = Arc<dyn Fn() -> Result<u64, crate::secretsd::BrokerError> + Send + Sync>;
+pub type Redeemer = Arc<
+    dyn Fn(&[u8]) -> Result<crate::secretsd::BrokerIdentity, crate::secretsd::BrokerError>
+        + Send
+        + Sync,
+>;
+pub type IdentityReader = Arc<
+    dyn Fn() -> Result<crate::secretsd::BrokerIdentity, crate::secretsd::BrokerError> + Send + Sync,
+>;
 #[doc(hidden)]
 pub type Binder =
     Arc<dyn Fn(Grants, SocketAddr) -> Result<proxy::BoundProxy, proxy::ProxyError> + Send + Sync>;
@@ -33,7 +39,7 @@ pub struct Deps {
     pub slot: crate::browser::push::FeedSlot,
     pub resolver: SessionResolver,
     pub redeemer: Redeemer,
-    pub epoch_reader: EpochReader,
+    pub identity_reader: IdentityReader,
     pub binder: Binder,
 }
 pub fn socket_path() -> PathBuf {
@@ -67,7 +73,7 @@ pub fn serve(grants: Grants, cfg: Config, path: PathBuf, slot: crate::browser::p
             redeemer: Arc::new(move |receipt: &[u8]| {
                 crate::secretsd::redeem(&redeem_socket, receipt, crate::secretsd::CAP_BROWSER)
             }),
-            epoch_reader: Arc::new(move || crate::secretsd::lock_epoch(&socket)),
+            identity_reader: Arc::new(move || crate::secretsd::broker_identity(&socket)),
             binder: Arc::new(proxy::bind),
         },
         cfg,
@@ -146,8 +152,8 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
-    let redeemed_epoch = match (deps.redeemer)(receipt.as_slice()) {
-        Ok(epoch) => epoch,
+    let redeemed_authority = match (deps.redeemer)(receipt.as_slice()) {
+        Ok(authority) => authority,
         Err(error) => {
             eprintln!("forward: grant refused: receipt not redeemed: {error}");
             let _ = stream.write_all(b"REFUSED RECEIPT\n");
@@ -163,7 +169,7 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
-    if !epoch_is_current(deps, redeemed_epoch) {
+    if !authority_is_current(deps, &redeemed_authority) {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     }
@@ -173,18 +179,18 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
         return;
     }
     // The feed acknowledgement can wait five seconds. Recheck again immediately
-    // before insertion so a lock during that wait cannot cross this boundary.
-    // A refusal here leaves the already-pushed laptop token bounded by the
-    // five-minute lease and never renewed: the grant is never inserted.
-    if !epoch_is_current(deps, redeemed_epoch) {
+    // before insertion so a lock or broker restart during that wait cannot
+    // cross this boundary. A refusal leaves the already-pushed laptop token
+    // bounded by the five-minute lease and never renewed.
+    if !authority_is_current(deps, &redeemed_authority) {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     }
     let port = proxy.port();
     let deadline = Instant::now() + Duration::from_secs(ttl);
-    if !deps.grants.insert_if_epoch(
+    if !deps.grants.insert_if_authority(
         port,
-        redeemed_epoch,
+        &redeemed_authority,
         Grant {
             session: session.clone(),
             anchor,
@@ -203,17 +209,15 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
     let _ = writeln!(stream, "{port}");
 }
 
-fn epoch_is_current(deps: &Deps, redeemed_epoch: u64) -> bool {
-    match (deps.epoch_reader)() {
-        Ok(epoch) if epoch == redeemed_epoch => true,
-        Ok(epoch) => {
-            eprintln!(
-                "forward: grant refused: broker epoch changed from {redeemed_epoch} to {epoch}"
-            );
+fn authority_is_current(deps: &Deps, redeemed_authority: &crate::secretsd::BrokerIdentity) -> bool {
+    match (deps.identity_reader)() {
+        Ok(current) if current == *redeemed_authority => true,
+        Ok(_) => {
+            eprintln!("forward: grant refused: broker authority changed after redemption");
             false
         }
         Err(error) => {
-            eprintln!("forward: grant refused: could not recheck broker epoch: {error}");
+            eprintln!("forward: grant refused: could not recheck broker authority: {error}");
             false
         }
     }

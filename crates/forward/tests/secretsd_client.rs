@@ -3,7 +3,7 @@ use std::os::unix::net::UnixListener;
 use std::path::PathBuf;
 use std::thread::{self, JoinHandle};
 
-use forward::secretsd::{self, BrokerError, CAP_BROWSER};
+use forward::secretsd::{self, BrokerError, BrokerIdentity, CAP_BROWSER};
 
 const RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HELLO_OK: &str = "OK\tversion=3 instance=abc123 epoch=0\n";
@@ -72,13 +72,21 @@ fn redeem_accepts_matching_capability() {
         hello(),
         Step {
             expected: redeem(),
-            reply: Reply::Text("OK\tstatus=redeemed cap=browser epoch=7\n".to_owned()),
+            reply: Reply::Text(
+                "OK\tstatus=redeemed cap=browser instance=abc123 epoch=7\n".to_owned(),
+            ),
         },
     ]);
 
     let result = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
     broker.finish();
-    assert_eq!(result.ok(), Some(7));
+    assert_eq!(
+        result.ok(),
+        Some(BrokerIdentity {
+            instance: "abc123".to_owned(),
+            epoch: 7,
+        })
+    );
 }
 
 #[test]
@@ -87,7 +95,7 @@ fn redeem_refuses_a_success_reply_without_an_epoch() {
         hello(),
         Step {
             expected: redeem(),
-            reply: Reply::Text("OK\tstatus=redeemed cap=browser\n".to_owned()),
+            reply: Reply::Text("OK\tstatus=redeemed cap=browser instance=abc123\n".to_owned()),
         },
     ]);
 
@@ -98,13 +106,36 @@ fn redeem_refuses_a_success_reply_without_an_epoch() {
 }
 
 #[test]
-fn lock_epoch_reads_the_fresh_hello_extension() {
-    let broker = FakeBroker::start(vec![hello()]);
+fn redeem_refuses_a_success_reply_without_an_instance() {
+    // This fails if a receipt can be accepted using epoch alone.
+    let broker = FakeBroker::start(vec![
+        hello(),
+        Step {
+            expected: redeem(),
+            reply: Reply::Text("OK\tstatus=redeemed cap=browser epoch=7\n".to_owned()),
+        },
+    ]);
 
-    let epoch = secretsd::lock_epoch(&broker.path);
+    let result = secretsd::redeem(&broker.path, RECEIPT.as_bytes(), CAP_BROWSER);
     broker.finish();
 
-    assert_eq!(epoch.ok(), Some(0));
+    assert!(matches!(result, Err(BrokerError::Protocol(_))));
+}
+
+#[test]
+fn broker_identity_reads_the_fresh_hello_extension() {
+    let broker = FakeBroker::start(vec![hello()]);
+
+    let identity = secretsd::broker_identity(&broker.path);
+    broker.finish();
+
+    assert_eq!(
+        identity.ok(),
+        Some(BrokerIdentity {
+            instance: "abc123".to_owned(),
+            epoch: 0,
+        })
+    );
 }
 
 #[test]
@@ -216,8 +247,8 @@ fn redeem_rejects_an_authorize_shaped_success() {
 #[test]
 fn redeem_rejects_duplicate_or_unexpected_success_fields() {
     for response in [
-        "OK\tstatus=redeemed cap=browser epoch=7 cap=other\n",
-        "OK\tstatus=redeemed cap=browser epoch=7 extra=value\n",
+        "OK\tstatus=redeemed cap=browser instance=abc123 epoch=7 cap=other\n",
+        "OK\tstatus=redeemed cap=browser instance=abc123 epoch=7 extra=value\n",
     ] {
         let broker = FakeBroker::start(vec![
             hello(),

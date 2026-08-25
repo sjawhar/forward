@@ -42,7 +42,7 @@ type PipeHandles = Vec<(u64, (std::net::TcpStream, std::net::TcpStream))>;
 pub struct Grants {
     ports: Arc<Mutex<HashMap<u16, Grant>>>,
     pipes: Arc<Mutex<PipeTable>>,
-    authority_epoch: Arc<Mutex<Option<u64>>>,
+    authority: Arc<Mutex<Option<crate::secretsd::BrokerIdentity>>>,
     next_pipe_id: Arc<std::sync::atomic::AtomicU64>,
 }
 
@@ -57,44 +57,44 @@ impl Grants {
         ports.insert(port, grant);
     }
 
-    /// Insert only when a live subscription has proven `epoch` current.
+    /// Insert only when the broker instance and epoch that redeemed this
+    /// receipt are still the subscription's current authority.
     ///
     /// Keeping the authority lock through insertion closes the last interval
     /// between the request handler's HELLO recheck and this registry update.
-    pub fn insert_if_epoch(&self, port: u16, epoch: u64, grant: Grant) -> bool {
-        let authority_epoch = self.authority_epoch.lock();
-        if *authority_epoch != Some(epoch) {
+    pub fn insert_if_authority(
+        &self,
+        port: u16,
+        authority: &crate::secretsd::BrokerIdentity,
+        grant: Grant,
+    ) -> bool {
+        let observed = self.authority.lock();
+        if observed.as_ref() != Some(authority) {
             return false;
         }
         self.insert(port, grant);
         true
     }
 
-    /// Record a subscription epoch and revoke every grant if it changed.
+    /// Record a subscription authority and revoke every grant if it changed.
     ///
-    /// The first epoch merely establishes authority. Every later advance or
-    /// regression is unprovable continuity and therefore fails closed.
-    pub fn observe_epoch(&self, epoch: u64) -> bool {
-        let mut authority_epoch = self.authority_epoch.lock();
-        let changed = authority_epoch.is_some_and(|seen| seen != epoch);
-        *authority_epoch = Some(epoch);
+    /// The first observation merely establishes authority. Every later broker
+    /// instance or epoch change is unprovable continuity and therefore fails
+    /// closed.
+    pub fn observe_authority(&self, authority: crate::secretsd::BrokerIdentity) -> bool {
+        let mut observed = self.authority.lock();
+        let changed = observed.as_ref().is_some_and(|seen| seen != &authority);
+        *observed = Some(authority);
         if changed {
             shutdown(self.drain_all());
         }
         changed
     }
 
-    /// Revoke every grant for a newly observed broker instance.
-    pub fn replace_authority(&self, epoch: u64) {
-        let mut authority_epoch = self.authority_epoch.lock();
-        *authority_epoch = Some(epoch);
-        shutdown(self.drain_all());
-    }
-
     /// Revoke every grant when the subscription remains unprovable.
     pub fn invalidate_authority(&self) {
-        let mut authority_epoch = self.authority_epoch.lock();
-        *authority_epoch = None;
+        let mut authority = self.authority.lock();
+        *authority = None;
         shutdown(self.drain_all());
     }
 

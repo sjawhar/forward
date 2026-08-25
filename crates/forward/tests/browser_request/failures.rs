@@ -9,12 +9,13 @@ use forward::browser::grant::Grants;
 use forward::browser::proxy::ProxyError;
 use forward::browser::push::FeedSlot;
 use forward::browser::request::{
-    Binder, Deps, EpochReader, Redeemer, SessionResolver, read_line_with_timeout, serve_with_binder,
+    Binder, Deps, IdentityReader, Redeemer, SessionResolver, read_line_with_timeout,
+    serve_with_binder,
 };
 
 use super::{
-    RECEIPT, accepting_epoch_reader, accepting_redeemer, await_socket, feed_acceptor, grant_config,
-    request_reply,
+    RECEIPT, accepting_identity_reader, accepting_redeemer, await_socket, feed_acceptor,
+    grant_config, request_reply,
 };
 
 fn spawn_with_binder(
@@ -31,7 +32,7 @@ fn spawn_with_binder(
                 slot,
                 resolver: Arc::new(|_pid| Some("session-a".to_owned())) as SessionResolver,
                 redeemer,
-                epoch_reader: accepting_epoch_reader(),
+                identity_reader: accepting_identity_reader(),
                 binder,
             },
             grant_config(),
@@ -66,7 +67,7 @@ fn a_bind_failure_after_redeem_does_not_publish_a_token() {
 }
 
 #[test]
-fn a_lower_recheck_epoch_refuses_before_a_token_or_proxy_survives() {
+fn an_instance_change_at_matching_epoch_refuses_before_a_token_or_proxy_survives() {
     let broker_directory = tempfile::tempdir().unwrap();
     let broker_path = broker_directory.path().join("secretsd.sock");
     let broker_listener = UnixListener::bind(&broker_path).unwrap();
@@ -74,18 +75,18 @@ fn a_lower_recheck_epoch_refuses_before_a_token_or_proxy_survives() {
         let steps = [
             (
                 "HELLO\tversion=3\n".to_owned(),
-                "OK\tversion=3 instance=broker epoch=1\n".to_owned(),
+                "OK\tversion=3 instance=broker-a epoch=0\n".to_owned(),
             ),
             (
                 format!(
                     "REDEEM\treceipt={}\tcap=browser\n",
                     std::str::from_utf8(RECEIPT).unwrap()
                 ),
-                "OK\tstatus=redeemed cap=browser epoch=1\n".to_owned(),
+                "OK\tstatus=redeemed cap=browser instance=broker-a epoch=0\n".to_owned(),
             ),
             (
                 "HELLO\tversion=3\n".to_owned(),
-                "OK\tversion=3 instance=broker epoch=0\n".to_owned(),
+                "OK\tversion=3 instance=broker-b epoch=0\n".to_owned(),
             ),
         ];
         for (expected, reply) in steps {
@@ -114,7 +115,8 @@ fn a_lower_recheck_epoch_refuses_before_a_token_or_proxy_survives() {
         forward::secretsd::redeem(&redeem_path, receipt, forward::secretsd::CAP_BROWSER)
     });
     let recheck_path = broker_path;
-    let epoch_reader: EpochReader = Arc::new(move || forward::secretsd::lock_epoch(&recheck_path));
+    let identity_reader: IdentityReader =
+        Arc::new(move || forward::secretsd::broker_identity(&recheck_path));
     let server_grants = grants.clone();
     thread::spawn(move || {
         serve_with_binder(
@@ -123,7 +125,7 @@ fn a_lower_recheck_epoch_refuses_before_a_token_or_proxy_survives() {
                 slot,
                 resolver: Arc::new(|_pid| Some("session-a".to_owned())) as SessionResolver,
                 redeemer,
-                epoch_reader,
+                identity_reader,
                 binder,
             },
             grant_config(),

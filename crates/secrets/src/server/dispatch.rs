@@ -298,8 +298,9 @@ fn redeem(
         Outcome::Failed(ErrCode::Denied, "receipt is not redeemable"),
         |cap| {
             let outcome = Outcome::Fields(format!(
-                "status=redeemed cap={} epoch={}",
+                "status=redeemed cap={} instance={} epoch={}",
                 cap.as_str(),
+                state.instance,
                 state.lock_epoch
             ));
             state.capability_grants.insert(cap, caller, deadline);
@@ -323,6 +324,7 @@ fn lock(shared: &Shared) -> Decision {
     state.capability_grants.clear();
     state.lock_epoch = state.lock_epoch.saturating_add(1);
     let epoch = state.lock_epoch;
+    let instance = state.instance.clone();
     let subscribers = std::sync::Arc::clone(&state.subscribers);
     if let Some(active) = state.active_decrypt.take() {
         state.queue.deny(active.id);
@@ -333,11 +335,10 @@ fn lock(shared: &Shared) -> Decision {
     }
     drop(state);
     condvar.notify_all();
-    // The epoch changes before any fallible socket write. Subscribers attach
-    // under the same publication lock, so they see either this event or its
-    // current epoch; reconnecting forward re-reads HELLO to fail closed if a
-    // write was missed while its socket was down.
-    subscribers.publish(epoch);
+    // The authority pair changes before any subscriber write. Attachment and
+    // publication serialize their event ordering; nonblocking publication
+    // drops a blocked subscriber instead of delaying LOCK.
+    subscribers.publish(&instance, epoch);
     Decision {
         outcome: Outcome::Ok,
         scope_kind: None,

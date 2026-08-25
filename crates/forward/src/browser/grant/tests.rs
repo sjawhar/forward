@@ -134,3 +134,26 @@ fn snapshot_live_excludes_expired_grants_and_preserves_a_positive_ttl() {
     assert!(snapshot[0].0.as_slice() == b"correct-horse");
     assert!(snapshot[0].1 > 0);
 }
+
+#[test]
+fn a_grant_redeemed_by_prior_instance_cannot_insert_at_matching_epoch() {
+    // This fails if the registry compares only epoch: broker-b at epoch 0
+    // would accept a receipt redeemed from broker-a at that same epoch.
+    let grants = Grants::new();
+    let redeemed = crate::secretsd::BrokerIdentity {
+        instance: "broker-a".to_owned(),
+        epoch: 0,
+    };
+    grants.observe_authority(redeemed.clone());
+    grants.observe_authority(crate::secretsd::BrokerIdentity {
+        instance: "broker-b".to_owned(),
+        epoch: 0,
+    });
+
+    assert!(!grants.insert_if_authority(
+        12811,
+        &redeemed,
+        grant("session-a", Duration::from_secs(60))
+    ));
+    assert!(grants.live(12811).is_none());
+}

@@ -18,6 +18,9 @@ enum Command {
 enum Script {
     Lock,
     Gap,
+    Restart,
+    MalformedEvent,
+    MalformedHello,
 }
 
 struct FakeBroker {
@@ -40,19 +43,53 @@ impl FakeBroker {
         let (reattached_sender, reattached) = mpsc::channel();
         thread::spawn(move || match script {
             Script::Lock => {
-                let mut subscription = subscribe(&listener, 0);
+                let mut subscription = subscribe(&listener, "broker-a", 0);
                 attached_sender.send(()).unwrap();
                 assert!(matches!(commands.recv().unwrap(), Command::Lock));
-                subscription.write_all(b"EPOCH 1\n").unwrap();
+                write_event(&mut subscription, "broker-a", 1);
             }
             Script::Gap => {
-                let subscription = subscribe(&listener, 0);
+                let subscription = subscribe(&listener, "broker-a", 0);
                 attached_sender.send(()).unwrap();
                 assert!(matches!(commands.recv().unwrap(), Command::Drop));
                 drop(subscription);
                 dropped_sender.send(()).unwrap();
                 assert!(matches!(commands.recv().unwrap(), Command::Lock));
-                let _subscription = subscribe(&listener, 1);
+                let _subscription = subscribe(&listener, "broker-a", 1);
+                reattached_sender.send(()).unwrap();
+            }
+            Script::Restart => {
+                let subscription = subscribe(&listener, "broker-a", 0);
+                attached_sender.send(()).unwrap();
+                assert!(matches!(commands.recv().unwrap(), Command::Drop));
+                drop(subscription);
+                dropped_sender.send(()).unwrap();
+                hello(&listener, "broker-a", 0);
+                let (mut subscription, _) = listener.accept().unwrap();
+                let mut frame = String::new();
+                BufReader::new(subscription.try_clone().unwrap())
+                    .read_line(&mut frame)
+                    .unwrap();
+                assert_eq!(frame, "SUBSCRIBE\n");
+                write_event(&mut subscription, "broker-b", 0);
+                reattached_sender.send(()).unwrap();
+            }
+            Script::MalformedEvent => {
+                let subscription = subscribe(&listener, "broker-a", 0);
+                attached_sender.send(()).unwrap();
+                assert!(matches!(commands.recv().unwrap(), Command::Drop));
+                drop(subscription);
+                dropped_sender.send(()).unwrap();
+                malformed_subscription(&listener);
+                reattached_sender.send(()).unwrap();
+            }
+            Script::MalformedHello => {
+                let subscription = subscribe(&listener, "broker-a", 0);
+                attached_sender.send(()).unwrap();
+                assert!(matches!(commands.recv().unwrap(), Command::Drop));
+                drop(subscription);
+                dropped_sender.send(()).unwrap();
+                malformed_hello(&listener);
                 reattached_sender.send(()).unwrap();
             }
         });
@@ -94,21 +131,19 @@ impl FakeBroker {
     }
 }
 
-fn subscribe(listener: &UnixListener, epoch: u64) -> UnixStream {
-    hello(listener, epoch);
+fn subscribe(listener: &UnixListener, instance: &str, epoch: u64) -> UnixStream {
+    hello(listener, instance, epoch);
     let (mut stream, _) = listener.accept().unwrap();
     let mut frame = String::new();
     BufReader::new(stream.try_clone().unwrap())
         .read_line(&mut frame)
         .unwrap();
     assert_eq!(frame, "SUBSCRIBE\n");
-    stream
-        .write_all(format!("EPOCH {epoch}\n").as_bytes())
-        .unwrap();
+    write_event(&mut stream, instance, epoch);
     stream
 }
 
-fn hello(listener: &UnixListener, epoch: u64) {
+fn hello(listener: &UnixListener, instance: &str, epoch: u64) {
     let (mut stream, _) = listener.accept().unwrap();
     let mut frame = String::new();
     BufReader::new(stream.try_clone().unwrap())
@@ -116,8 +151,35 @@ fn hello(listener: &UnixListener, epoch: u64) {
         .unwrap();
     assert_eq!(frame, "HELLO\tversion=3\n");
     stream
-        .write_all(format!("OK\tversion=3 instance=broker-a epoch={epoch}\n").as_bytes())
+        .write_all(format!("OK\tversion=3 instance={instance} epoch={epoch}\n").as_bytes())
         .unwrap();
+}
+
+fn write_event(stream: &mut UnixStream, instance: &str, epoch: u64) {
+    stream
+        .write_all(format!("EPOCH {epoch} instance={instance}\n").as_bytes())
+        .unwrap();
+}
+
+fn malformed_subscription(listener: &UnixListener) {
+    hello(listener, "broker-a", 0);
+    let (mut stream, _) = listener.accept().unwrap();
+    let mut frame = String::new();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut frame)
+        .unwrap();
+    assert_eq!(frame, "SUBSCRIBE\n");
+    stream.write_all(b"EPOCH broken\n").unwrap();
+}
+
+fn malformed_hello(listener: &UnixListener) {
+    let (mut stream, _) = listener.accept().unwrap();
+    let mut frame = String::new();
+    BufReader::new(stream.try_clone().unwrap())
+        .read_line(&mut frame)
+        .unwrap();
+    assert_eq!(frame, "HELLO\tversion=3\n");
+    stream.write_all(b"OK\tversion=3 epoch=0\n").unwrap();
 }
 
 fn spawn_subscription(
@@ -136,15 +198,7 @@ fn spawn_subscription(
     .unwrap()
 }
 
-#[test]
-fn lock_epoch_ends_an_established_browser_pipe_and_refuses_its_port() {
-    // This fails if EPOCH advances do not call the existing grant expiry path:
-    // the pipe stays live and the proxy still admits a second connection.
-    let broker = FakeBroker::start(Script::Lock);
-    let grants = Grants::new();
-    let subscription = spawn_subscription(grants.clone(), broker.path());
-    broker.wait_for_attach();
-
+fn established_pipe(grants: Grants) -> (u16, std::net::TcpStream, thread::JoinHandle<()>) {
     let (upstream, established, task) = spawn_held_upstream();
     let proxy = proxy::bind(grants.clone(), upstream).unwrap();
     let port = proxy.port();
@@ -161,17 +215,34 @@ fn lock_epoch_ends_an_established_browser_pipe_and_refuses_its_port() {
     established
         .recv_timeout(Duration::from_secs(5))
         .expect("pipe did not establish");
+    (port, client, task)
+}
 
-    broker.lock();
-
-    client
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
+fn assert_revoked(
+    mut client: std::net::TcpStream,
+    task: thread::JoinHandle<()>,
+    port: u16,
+    within: Duration,
+) {
+    client.set_read_timeout(Some(within)).unwrap();
     let mut buffer = [0_u8; 16];
     assert!(matches!(client.read(&mut buffer), Ok(0)));
     task.join().unwrap();
     let mut late = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
     assert_refused(&mut late, b"REFUSED UNGRANTED\n");
+}
+#[test]
+fn lock_epoch_ends_an_established_browser_pipe_and_refuses_its_port() {
+    // This fails if EPOCH advances do not call the existing grant expiry path:
+    // the pipe stays live and the proxy still admits a second connection.
+    let broker = FakeBroker::start(Script::Lock);
+    let grants = Grants::new();
+    let subscription = spawn_subscription(grants.clone(), broker.path());
+    broker.wait_for_attach();
+
+    let (port, client, task) = established_pipe(grants);
+    broker.lock();
+    assert_revoked(client, task, port, Duration::from_secs(5));
     subscription.shutdown();
 }
 
@@ -184,34 +255,58 @@ fn a_same_instance_reconnect_after_a_subscription_gap_expires_grants_by_epoch() 
     let subscription = spawn_subscription(grants.clone(), broker.path());
     broker.wait_for_attach();
 
-    let (upstream, established, task) = spawn_held_upstream();
-    let proxy = proxy::bind(grants.clone(), upstream).unwrap();
-    let port = proxy.port();
-    grants.insert(
-        port,
-        grant(
-            current_anchor(),
-            std::time::Instant::now() + Duration::from_secs(600),
-        ),
-    );
-    proxy.serve();
-    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    client.write_all(b"hold").unwrap();
-    established
-        .recv_timeout(Duration::from_secs(5))
-        .expect("pipe did not establish");
-
+    let (port, client, task) = established_pipe(grants);
     broker.drop_subscription();
     broker.lock();
     broker.wait_for_reattach();
+    assert_revoked(client, task, port, Duration::from_secs(5));
+    subscription.shutdown();
+}
 
-    client
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .unwrap();
-    let mut buffer = [0_u8; 16];
-    assert!(matches!(client.read(&mut buffer), Ok(0)));
-    task.join().unwrap();
-    let mut late = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    assert_refused(&mut late, b"REFUSED UNGRANTED\n");
+#[test]
+fn a_broker_restart_at_epoch_zero_revokes_the_prior_instance_grants() {
+    // This fails if the attach event carries only epoch: a restart from
+    // broker-a epoch 0 to broker-b epoch 0 would leave the pipe authorized.
+    let broker = FakeBroker::start(Script::Restart);
+    let grants = Grants::new();
+    let subscription = spawn_subscription(grants.clone(), broker.path());
+    broker.wait_for_attach();
+
+    let (port, client, task) = established_pipe(grants);
+    broker.drop_subscription();
+    broker.wait_for_reattach();
+    assert_revoked(client, task, port, Duration::from_secs(2));
+    subscription.shutdown();
+}
+
+#[test]
+fn a_malformed_subscription_event_revokes_without_outage_grace() {
+    // This fails if a malformed EPOCH is treated as a transport outage: the
+    // five-second test grace leaves this established pipe alive.
+    let broker = FakeBroker::start(Script::MalformedEvent);
+    let grants = Grants::new();
+    let subscription = spawn_subscription(grants.clone(), broker.path());
+    broker.wait_for_attach();
+
+    let (port, client, task) = established_pipe(grants);
+    broker.drop_subscription();
+    broker.wait_for_reattach();
+    assert_revoked(client, task, port, Duration::from_secs(2));
+    subscription.shutdown();
+}
+
+#[test]
+fn a_malformed_hello_revokes_without_outage_grace() {
+    // This fails if a malformed HELLO is treated as a transport outage: the
+    // five-second test grace leaves this established pipe alive.
+    let broker = FakeBroker::start(Script::MalformedHello);
+    let grants = Grants::new();
+    let subscription = spawn_subscription(grants.clone(), broker.path());
+    broker.wait_for_attach();
+
+    let (port, client, task) = established_pipe(grants);
+    broker.drop_subscription();
+    broker.wait_for_reattach();
+    assert_revoked(client, task, port, Duration::from_secs(2));
     subscription.shutdown();
 }

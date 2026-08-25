@@ -100,21 +100,31 @@ fn worker(
     stop: Option<mpsc::Receiver<()>>,
 ) {
     let mut budget = ReconnectBudget::default();
-    let mut previous = None;
     let mut in_outage = false;
     loop {
         if stopped(&stop) {
             return;
         }
         let connected_at = Instant::now();
-        let result = run_once(&grants, &socket, &mut previous);
+        let result = run_once(&grants, &socket);
         budget.restored_if_long_lived(connected_at);
         if stopped(&stop) {
             return;
         }
-        match result {
+        match &result {
             Ok(()) => eprintln!("forward: broker authority subscription closed"),
             Err(error) => eprintln!("forward: broker authority subscription failed: {error}"),
+        }
+        if matches!(&result, Err(error) if !matches!(error, crate::secretsd::BrokerError::Connect { .. }))
+        {
+            // A syntactically bad reply has no bounded continuity argument:
+            // revoke before the next reconnect attempt rather than using the
+            // transport-outage grace.
+            grants.invalidate_authority();
+            budget = ReconnectBudget::default();
+            in_outage = false;
+            thread::sleep(timing.reconnect_backoff);
+            continue;
         }
         let now = Instant::now();
         let exhausted = budget.exhausted(now, timing.max_unhealthy);
@@ -140,13 +150,9 @@ fn stopped(stop: &Option<mpsc::Receiver<()>>) -> bool {
         .is_some_and(|receiver| !matches!(receiver.try_recv(), Err(TryRecvError::Empty)))
 }
 
-fn run_once(
-    grants: &Grants,
-    socket: &Path,
-    previous: &mut Option<crate::secretsd::BrokerIdentity>,
-) -> Result<(), crate::secretsd::BrokerError> {
+fn run_once(grants: &Grants, socket: &Path) -> Result<(), crate::secretsd::BrokerError> {
     let identity = crate::secretsd::broker_identity(socket)?;
-    reconcile_identity(grants, previous, identity);
+    grants.observe_authority(identity);
     let stream = crate::secretsd::subscribe(socket)?;
     let mut reader = BufReader::new(stream);
     loop {
@@ -162,39 +168,26 @@ fn run_once(
         if bytes == 0 {
             return Ok(());
         }
-        let epoch = parse_epoch(&line).ok_or_else(|| {
+        let identity = parse_identity(&line).ok_or_else(|| {
             crate::secretsd::BrokerError::Protocol("malformed broker subscription event".to_owned())
         })?;
-        grants.observe_epoch(epoch);
-        if let Some(identity) = previous {
-            identity.epoch = epoch;
-        }
+        grants.observe_authority(identity);
     }
 }
 
-fn reconcile_identity(
-    grants: &Grants,
-    previous: &mut Option<crate::secretsd::BrokerIdentity>,
-    identity: crate::secretsd::BrokerIdentity,
-) {
-    match previous {
-        Some(last) if last.instance != identity.instance => {
-            grants.replace_authority(identity.epoch)
-        }
-        Some(last) if last.epoch != identity.epoch => {
-            grants.observe_epoch(identity.epoch);
-        }
-        Some(_) => {}
-        None => {
-            grants.observe_epoch(identity.epoch);
-        }
-    }
-    *previous = Some(identity);
-}
-
-fn parse_epoch(line: &str) -> Option<u64> {
-    line.strip_suffix('\n')?
+fn parse_identity(line: &str) -> Option<crate::secretsd::BrokerIdentity> {
+    let (epoch, instance) = line
+        .strip_suffix('\n')?
         .strip_prefix("EPOCH ")?
-        .parse()
-        .ok()
+        .split_once(" instance=")?;
+    let epoch = epoch.parse().ok()?;
+    (!instance.is_empty()
+        && instance.is_ascii()
+        && !instance
+            .bytes()
+            .any(|byte| byte.is_ascii_control() || byte.is_ascii_whitespace()))
+    .then(|| crate::secretsd::BrokerIdentity {
+        instance: instance.to_owned(),
+        epoch,
+    })
 }

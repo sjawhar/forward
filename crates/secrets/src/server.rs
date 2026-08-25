@@ -52,7 +52,6 @@ const CONNECTION_CAPACITY: usize = CONNECTION_WORKERS + CONNECTION_QUEUE_DEPTH;
 const CONNECTION_READ_TIMEOUT: Duration = Duration::from_millis(250);
 const CONNECTION_CAPACITY_RESPONSE: &[u8] = b"ERR\tINTERNAL\tconnection capacity reached\n";
 const SUBSCRIBER_CAPACITY: usize = 8;
-const SUBSCRIBER_WRITE_TIMEOUT: Duration = Duration::from_millis(250);
 const SUBSCRIBER_CAPACITY_RESPONSE: &[u8] = b"ERR\tINTERNAL\tsubscription capacity reached\n";
 
 #[derive(Debug)]
@@ -153,7 +152,9 @@ impl SubscriberHub {
         mut stream: UnixStream,
         peer: crate::peer::PeerIdentity,
     ) -> std::io::Result<()> {
-        stream.set_write_timeout(Some(SUBSCRIBER_WRITE_TIMEOUT))?;
+        // Writes never wait under the attachment/publication mutex. A peer
+        // whose socket cannot accept its attach event is not a subscriber.
+        stream.set_nonblocking(true)?;
         // This lock serializes attach with publication. If LOCK wins the state
         // mutex first, attach observes its epoch; if attach wins first, LOCK
         // publishes the next epoch after this initial line.
@@ -165,24 +166,32 @@ impl SubscriberHub {
         if subscribers.len() >= SUBSCRIBER_CAPACITY {
             return stream.write_all(SUBSCRIBER_CAPACITY_RESPONSE);
         }
-        let epoch = {
+        let (instance, epoch) = {
             let (mutex, _) = &**shared;
-            lock_state(mutex).lock_epoch
+            let state = lock_state(mutex);
+            (state.instance.clone(), state.lock_epoch)
         };
-        stream.write_all(format!("EPOCH {epoch}\n").as_bytes())?;
+        let line = format!("EPOCH {epoch} instance={instance}\n");
+        if stream.write(line.as_bytes())? != line.len() {
+            return Err(std::io::Error::from(std::io::ErrorKind::WriteZero));
+        }
         subscribers.push(Subscriber { peer, stream });
         drop(subscribers);
         Ok(())
     }
 
-    fn publish(&self, epoch: u64) {
-        let line = format!("EPOCH {epoch}\n");
+    fn publish(&self, instance: &str, epoch: u64) {
+        let line = format!("EPOCH {epoch} instance={instance}\n");
         let mut subscribers = self
             .subscribers
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         subscribers.retain_mut(|subscriber| {
-            subscriber.peer.is_alive() && subscriber.stream.write_all(line.as_bytes()).is_ok()
+            subscriber.peer.is_alive()
+                && matches!(
+                    subscriber.stream.write(line.as_bytes()),
+                    Ok(written) if written == line.len()
+                )
         });
     }
 }
@@ -708,7 +717,11 @@ mod tests {
         let mut reader = BufReader::new(subscriber.try_clone().unwrap());
         let mut attached = String::new();
         reader.read_line(&mut attached).unwrap();
-        assert_eq!(attached, "EPOCH 0\n");
+        let instance = attached
+            .strip_prefix("EPOCH 0 instance=")
+            .and_then(|line| line.strip_suffix('\n'))
+            .expect("attach must identify the broker instance")
+            .to_owned();
 
         let mut control = UnixStream::connect(socket_path).unwrap();
         control
@@ -721,7 +734,61 @@ mod tests {
 
         let mut after_lock = String::new();
         reader.read_line(&mut after_lock).unwrap();
-        assert_eq!(after_lock, "EPOCH 1\n");
+        assert_eq!(after_lock, format!("EPOCH 1 instance={instance}\n"));
+    }
+
+    #[test]
+    fn lock_drops_blocked_subscribers_without_waiting_for_write_timeouts() {
+        // This fails if subscription streams remain blocking: eight full send
+        // buffers serialize their 250ms write timeouts on LOCK's response path.
+        let directory = tempfile::tempdir().unwrap();
+        let shared = Arc::new((
+            Mutex::new(State::new(test_config(directory.path())).unwrap()),
+            Condvar::new(),
+        ));
+        let subscribers = Arc::clone(&lock_state(&shared.0).subscribers);
+        let mut clients = Vec::with_capacity(SUBSCRIBER_CAPACITY);
+        for _ in 0..SUBSCRIBER_CAPACITY {
+            let (server, client) = UnixStream::pair().unwrap();
+            subscribers
+                .attach(&shared, server, crate::peer::current_for_test())
+                .unwrap();
+            clients.push(client);
+        }
+        let buffered = [0_u8; 4_096];
+        let entries = subscribers
+            .subscribers
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for subscriber in entries.iter() {
+            loop {
+                match send(
+                    subscriber.stream.as_raw_fd(),
+                    &buffered,
+                    MsgFlags::MSG_DONTWAIT | MsgFlags::MSG_NOSIGNAL,
+                ) {
+                    Ok(_) => {}
+                    Err(Errno::EAGAIN) => break,
+                    Err(error) => panic!("could not fill subscriber buffer: {error}"),
+                }
+            }
+        }
+        drop(entries);
+
+        let started = Instant::now();
+        assert!(matches!(
+            dispatch(Request::Lock, &shared, &crate::peer::current_for_test()).outcome,
+            Outcome::Ok
+        ));
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(
+            subscribers
+                .subscribers
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_empty()
+        );
+        drop(clients);
     }
 
     #[test]
@@ -756,7 +823,7 @@ mod tests {
 
         let mut epoch = String::new();
         BufReader::new(client).read_line(&mut epoch).unwrap();
-        assert_eq!(epoch, "EPOCH 0\n");
+        assert!(epoch.starts_with("EPOCH 0 instance="));
         assert_eq!(
             subscribers
                 .subscribers

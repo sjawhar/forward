@@ -26,11 +26,11 @@ const SUBSCRIPTION_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Browser capability namespace in the broker.
 pub const CAP_BROWSER: &str = "browser";
 
-/// The broker identity and authority epoch from a version-checked handshake.
+/// The broker instance and authority epoch that jointly identify authority.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct BrokerIdentity {
-    pub(crate) instance: String,
-    pub(crate) epoch: u64,
+pub struct BrokerIdentity {
+    pub instance: String,
+    pub epoch: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -101,11 +101,11 @@ pub fn authorize(cap: &str) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
     Ok(Zeroizing::new(receipt.as_bytes().to_vec()))
 }
 
-/// Redeem a receipt with the broker and return its authority epoch.
+/// Redeem a receipt with the broker and return its authority identity.
 ///
-/// One receipt redeems exactly once. The epoch is captured at redemption and
+/// One receipt redeems exactly once. The pair is captured at redemption and
 /// must be rechecked before forward records a grant.
-pub fn redeem(path: &Path, receipt: &[u8], cap: &str) -> Result<u64, BrokerError> {
+pub fn redeem(path: &Path, receipt: &[u8], cap: &str) -> Result<BrokerIdentity, BrokerError> {
     if !valid_hex_bytes(receipt, 64) {
         return Err(BrokerError::Protocol(
             "receipt is not lowercase ASCII hex".to_owned(),
@@ -125,13 +125,18 @@ pub fn redeem(path: &Path, receipt: &[u8], cap: &str) -> Result<u64, BrokerError
 
 /// Read the broker identity and authority epoch through a fresh, version-checked
 /// `HELLO`.
-pub(crate) fn broker_identity(path: &Path) -> Result<BrokerIdentity, BrokerError> {
+pub fn broker_identity(path: &Path) -> Result<BrokerIdentity, BrokerError> {
     let fields = BrokerClient::new(path)
         .hello_fields()
         .map_err(|error| map_error(error, path, Verb::Hello))?;
     let instance = fields.required("instance").map_err(|_| {
         BrokerError::Protocol("broker HELLO reply has no usable instance".to_owned())
     })?;
+    if !valid_field(instance) {
+        return Err(BrokerError::Protocol(
+            "broker HELLO reply has no usable instance".to_owned(),
+        ));
+    }
     let epoch = fields
         .required("epoch")
         .map_err(|_| BrokerError::Protocol("broker HELLO reply has no usable epoch".to_owned()))?
@@ -143,7 +148,8 @@ pub(crate) fn broker_identity(path: &Path) -> Result<BrokerIdentity, BrokerError
     })
 }
 
-/// Attach to the broker's input-free authority-event subscription.
+/// Attach to the broker's input-free authority-event subscription. Every
+/// `EPOCH` event carries the broker instance and its epoch as one authority pair.
 pub(crate) fn subscribe(path: &Path) -> Result<UnixStream, BrokerError> {
     let mut stream = UnixStream::connect(path).map_err(|source| BrokerError::Connect {
         path: path.to_path_buf(),
@@ -162,11 +168,6 @@ pub(crate) fn subscribe(path: &Path) -> Result<UnixStream, BrokerError> {
             source,
         })?;
     Ok(stream)
-}
-
-/// Read the broker authority epoch through a fresh, version-checked `HELLO`.
-pub fn lock_epoch(path: &Path) -> Result<u64, BrokerError> {
-    broker_identity(path).map(|identity| identity.epoch)
 }
 
 /// Send one request over the shared transport and map its reply.
@@ -307,22 +308,34 @@ fn authorized_receipt(fields: &str) -> Result<Zeroizing<String>, BrokerError> {
     }
 }
 
-fn redeemed_cap(fields: &str, cap: &str) -> Result<u64, BrokerError> {
-    let parsed = expected_fields(fields, &["status", "cap", "epoch"])?;
+fn redeemed_cap(fields: &str, cap: &str) -> Result<BrokerIdentity, BrokerError> {
+    let parsed = expected_fields(fields, &["status", "cap", "instance", "epoch"])?;
     match (
         value(&parsed, "status"),
         value(&parsed, "cap"),
+        value(&parsed, "instance"),
         value(&parsed, "epoch"),
     ) {
-        (Some("redeemed"), Some(returned), Some(epoch)) if returned == cap => {
-            epoch.parse().map_err(|_| {
-                BrokerError::Protocol("broker redeem reply has no usable epoch".to_owned())
-            })
+        (Some("redeemed"), Some(returned), Some(instance), Some(epoch)) if returned == cap => {
+            if !valid_field(instance) {
+                return Err(BrokerError::Protocol(
+                    "broker redeem reply has no usable instance".to_owned(),
+                ));
+            }
+            epoch
+                .parse()
+                .map(|epoch| BrokerIdentity {
+                    instance: instance.to_owned(),
+                    epoch,
+                })
+                .map_err(|_| {
+                    BrokerError::Protocol("broker redeem reply has no usable epoch".to_owned())
+                })
         }
         // A reply naming this capability under a status REDEEM never produces
         // is malformed, not a refusal: treating an AUTHORIZE-shaped success as
         // "receipt rejected" would hide a broker that answered the wrong verb.
-        (Some(status), _, _) if status != "redeemed" => Err(BrokerError::Protocol(
+        (Some(status), _, _, _) if status != "redeemed" => Err(BrokerError::Protocol(
             "broker success reply has an unexpected status".to_owned(),
         )),
         _ => Err(BrokerError::ReceiptRejected),

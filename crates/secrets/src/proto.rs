@@ -81,7 +81,8 @@ pub enum Request {
     },
     /// Wipe all plaintext and revoke all grants.
     Lock,
-    /// Hold this connection open for broker authority epoch events.
+    /// Hold this input-free connection open for `EPOCH <epoch>
+    /// instance=<broker-instance>` authority events.
     Subscribe,
 }
 
