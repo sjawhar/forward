@@ -1,6 +1,6 @@
-//! Multi-source edit command parsing and path selection.
+//! Multi-source edit path selection.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
@@ -16,10 +16,10 @@ mod new;
 /// Edit an agent-tier file in the selected source root.
 pub(super) fn agent(
     sources: &Sources,
-    arguments: &[OsString],
+    source: Option<&OsString>,
     local: bool,
 ) -> Result<(), CliError> {
-    let flags = edit_arguments(arguments, 1, false)?;
+    let flags = EditArguments { source, local };
     let [local_path, shared_path] = select_root(sources, flags.source)?.agent_files();
     let path = if local { local_path } else { shared_path };
     if path.exists() {
@@ -33,10 +33,12 @@ pub(super) fn agent(
 pub(super) fn human(
     sources: &Sources,
     human: &HumanNames,
-    arguments: &[OsString],
+    raw_key: &OsString,
+    source: Option<&OsString>,
+    local: bool,
 ) -> Result<(), CliError> {
-    let name = parse_name(argument_at(arguments, 1)?)?;
-    let flags = edit_arguments(arguments, 2, true)?;
+    let name = parse_name(raw_key)?;
+    let flags = EditArguments { source, local };
     let piped = !std::io::stdin().is_terminal();
     if let Some(location) = human.location(&name) {
         let path = existing_human_path(
@@ -83,37 +85,6 @@ struct ExistingHumanEdit<'a> {
     name: &'a SecretName,
     location: &'a HumanLocation,
     flags: EditArguments<'a>,
-}
-
-fn edit_arguments(
-    arguments: &[OsString],
-    flag_start: usize,
-    accepts_local: bool,
-) -> Result<EditArguments<'_>, CliError> {
-    let source_flag = OsStr::new("--source");
-    let local_flag = OsStr::new("--local");
-    let flags = arguments.get(flag_start..).ok_or(CliError::Usage)?;
-    let mut source = None;
-    let mut local = false;
-    let mut flags = flags.iter();
-    while let Some(flag) = flags.next() {
-        if flag == source_flag {
-            let value = flags.next().ok_or(CliError::Usage)?;
-            if source.replace(value).is_some()
-                || value.to_str().is_some_and(|value| value.starts_with("--"))
-            {
-                return Err(CliError::Usage);
-            }
-        } else if accepts_local && flag == local_flag {
-            if local {
-                return Err(CliError::Usage);
-            }
-            local = true;
-        } else {
-            return Err(CliError::Usage);
-        }
-    }
-    Ok(EditArguments { source, local })
 }
 
 fn existing_human_path(
@@ -196,10 +167,6 @@ fn source_names(sources: &Sources) -> String {
         .map(|root| root.name.as_str())
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn argument_at(arguments: &[OsString], index: usize) -> Result<&OsString, CliError> {
-    arguments.get(index).ok_or(CliError::Usage)
 }
 
 fn edit(path: PathBuf) -> Result<(), CliError> {
