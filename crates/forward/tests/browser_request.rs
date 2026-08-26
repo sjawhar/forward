@@ -17,6 +17,8 @@ mod failures;
 mod grant;
 #[path = "browser_request/parsing.rs"]
 mod parsing;
+#[path = "browser_request/probe.rs"]
+mod probe;
 #[path = "browser_request/session.rs"]
 mod session;
 
