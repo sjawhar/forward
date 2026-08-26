@@ -6,6 +6,7 @@ use forward::config::{self, Config};
 use forward::{bridge, doctor, send, serve, target};
 
 mod daemon;
+mod grant;
 mod opener;
 mod process;
 mod ratelimit;
@@ -161,30 +162,7 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Browser { action } => match action {
-            BrowserCommand::Grant { ttl, config } => {
-                let _ = load_config(config)?;
-                let Some(ttl_secs) = forward::browser::request::parse_ttl(&ttl) else {
-                    eprintln!("forward: invalid --ttl {ttl:?}; use 45s, 30m, or 2h");
-                    std::process::exit(1);
-                };
-                // The broker runs the YubiKey ceremony; this blocks through
-                // the touch window and prints nothing until it resolves.
-                let receipt = forward::secretsd::authorize(forward::secretsd::CAP_BROWSER)
-                    .unwrap_or_else(|error| exit_with_error(error));
-                let socket = forward::browser::request::socket_path();
-                let granted = forward::browser::request::request(&socket, ttl_secs, &receipt);
-                drop(receipt);
-                let Some(port) = granted else {
-                    eprintln!(
-                        "forward: grant refused, or no forward serve at {}",
-                        socket.display()
-                    );
-                    std::process::exit(1);
-                };
-                let mut stdout = std::io::stdout().lock();
-                writeln!(stdout, "http://127.0.0.1:{port}")?;
-                Ok(())
-            }
+            BrowserCommand::Grant { ttl, config } => grant::run(&ttl, config),
         },
         Command::Doctor {
             config,

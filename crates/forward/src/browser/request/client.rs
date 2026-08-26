@@ -18,6 +18,38 @@ pub enum GrantStatus {
     Live { port: u16, remaining_secs: u64 },
 }
 
+/// Why a grant request produced no port.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RequestFailure {
+    /// Nothing answered the socket's protocol — no forward serve listening.
+    Unreachable,
+    /// forward serve answered `REFUSED`; the payload is its reason word.
+    Refused(String),
+}
+
+/// A deterministic pre-ceremony answer from forward serve.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ProbeOutcome {
+    /// Nothing answered the socket's protocol — no forward serve listening.
+    Unreachable,
+    /// forward serve would refuse a grant; the payload is its reason word.
+    Refused(String),
+    /// Every deterministic check passed; the ceremony is worth running.
+    Grantable,
+}
+
+/// Human phrasing for a refusal reason word the daemon sent.
+#[must_use]
+pub fn describe_refusal(reason: &str) -> &'static str {
+    match reason {
+        "ANCHOR" => "forward serve could not anchor the calling process",
+        "UPSTREAM" => "forward serve has no peer configured to relay to",
+        "RECEIPT" => "the broker receipt was not redeemed (broker restarted mid-grant?)",
+        "LAPTOP" => "the laptop feed is unavailable",
+        _ => "forward serve refused (see the forward-serve log for the reason)",
+    }
+}
+
 /// `45s`, `30m`, or `2h` to seconds, for the CLI's `--ttl`.
 pub fn parse_ttl(value: &str) -> Option<u64> {
     if !value.is_ascii() || value.len() < 2 {
@@ -37,18 +69,55 @@ pub fn parse_ttl(value: &str) -> Option<u64> {
         .filter(|ttl| *ttl > 0)
 }
 
-/// Ask the local daemon for a grant. Returns the bound loopback port.
-pub fn request(path: &Path, ttl_secs: u64, token: &[u8]) -> Option<u16> {
-    let mut stream = UnixStream::connect(path).ok()?;
-    stream.set_read_timeout(Some(REPLY_TIMEOUT)).ok()?;
-    stream.write_all(b"GRANT ").ok()?;
-    stream.write_all(ttl_secs.to_string().as_bytes()).ok()?;
-    stream.write_all(b" ").ok()?;
-    stream.write_all(token).ok()?;
-    stream.write_all(b"\n").ok()?;
+/// Ask the daemon whether a grant for this caller could succeed, without
+/// spending a receipt. Runs before the broker's YubiKey ceremony so a
+/// deterministic refusal never costs the human a touch.
+pub fn probe(path: &Path) -> ProbeOutcome {
+    let Ok(mut stream) = UnixStream::connect(path) else {
+        return ProbeOutcome::Unreachable;
+    };
+    if stream.set_read_timeout(Some(REPLY_TIMEOUT)).is_err()
+        || stream.write_all(b"PROBE\n").is_err()
+    {
+        return ProbeOutcome::Unreachable;
+    }
     let mut reply = String::new();
-    BufReader::new(stream).read_line(&mut reply).ok()?;
-    reply.trim_end().parse().ok()
+    if BufReader::new(stream).read_line(&mut reply).is_err() {
+        return ProbeOutcome::Unreachable;
+    }
+    let reply = reply.trim_end();
+    if reply == "OK" {
+        return ProbeOutcome::Grantable;
+    }
+    match reply.strip_prefix("REFUSED") {
+        Some(reason) => ProbeOutcome::Refused(reason.trim().to_owned()),
+        None => ProbeOutcome::Unreachable,
+    }
+}
+
+/// Ask the local daemon for a grant. Returns the bound loopback port.
+pub fn request(path: &Path, ttl_secs: u64, token: &[u8]) -> Result<u16, RequestFailure> {
+    let mut stream = UnixStream::connect(path).map_err(|_| RequestFailure::Unreachable)?;
+    stream
+        .set_read_timeout(Some(REPLY_TIMEOUT))
+        .and_then(|()| stream.write_all(b"GRANT "))
+        .and_then(|()| stream.write_all(ttl_secs.to_string().as_bytes()))
+        .and_then(|()| stream.write_all(b" "))
+        .and_then(|()| stream.write_all(token))
+        .and_then(|()| stream.write_all(b"\n"))
+        .map_err(|_| RequestFailure::Unreachable)?;
+    let mut reply = String::new();
+    BufReader::new(stream)
+        .read_line(&mut reply)
+        .map_err(|_| RequestFailure::Unreachable)?;
+    let reply = reply.trim_end();
+    if let Ok(port) = reply.parse() {
+        return Ok(port);
+    }
+    match reply.strip_prefix("REFUSED") {
+        Some(reason) => Err(RequestFailure::Refused(reason.trim().to_owned())),
+        None => Err(RequestFailure::Unreachable),
+    }
 }
 
 /// Ask the local daemon whether the calling session holds a live grant.

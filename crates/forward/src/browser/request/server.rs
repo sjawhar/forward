@@ -9,8 +9,12 @@ use std::time::{Duration, Instant};
 
 use zeroize::Zeroizing;
 
+mod answers;
+
+use answers::{answer_probe, answer_status, peer_pid};
+
 use super::line;
-use crate::browser::grant::{Grant, Grants, ProcessAnchor};
+use crate::browser::grant::{Grant, Grants};
 use crate::browser::peer::{anchor_for, session_label};
 use crate::browser::{LONGEST_TTL, proxy};
 use crate::config::Config;
@@ -131,27 +135,29 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
         answer_status(&deps.grants, anchor, stream);
         return;
     }
+    if line.as_slice() == b"PROBE" {
+        answer_probe(pid, anchor, upstream, stream);
+        return;
+    }
     let Some((ttl, receipt)) = parse(line.as_slice()) else {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
     let receipt = Zeroizing::new(receipt);
-    let session = (deps.resolver)(pid);
-    let Some(session) = session else {
-        eprintln!("forward: grant refused: pid {pid} is not inside an omp session");
-        let _ = stream.write_all(b"REFUSED\n");
-        return;
-    };
     let Some(anchor) = anchor else {
         eprintln!("forward: grant refused: could not anchor requesting pid {pid}");
-        let _ = stream.write_all(b"REFUSED\n");
+        let _ = stream.write_all(b"REFUSED ANCHOR\n");
         return;
     };
     let Some(upstream) = upstream else {
         eprintln!("forward: grant refused: no peer configured to relay to");
-        let _ = stream.write_all(b"REFUSED\n");
+        let _ = stream.write_all(b"REFUSED UPSTREAM\n");
         return;
     };
+    // Descriptive only: the anchor is the authorization boundary, enforced per
+    // CDP connection by the proxy. A caller outside any omp session is still
+    // grantable; the label only names the grant in log lines.
+    let session = (deps.resolver)(pid).unwrap_or_else(|| format!("pid {pid}"));
     let redeemed = match (deps.redeemer)(receipt.as_slice()) {
         Ok(redeemed) => redeemed,
         Err(error) => {
@@ -223,26 +229,4 @@ fn authority_is_current(deps: &Deps, redeemed_authority: &crate::secretsd::Broke
             false
         }
     }
-}
-
-fn answer_status(grants: &Grants, caller: Option<ProcessAnchor>, mut stream: UnixStream) {
-    let reply = caller
-        .and_then(|caller| grants.live_for_descendant(caller))
-        .map(|(port, grant)| {
-            format!(
-                "LIVE {port} {}\n",
-                grant
-                    .deadline
-                    .saturating_duration_since(Instant::now())
-                    .as_secs()
-            )
-        })
-        .unwrap_or_else(|| "NONE\n".to_owned());
-    let _ = stream.write_all(reply.as_bytes());
-}
-
-fn peer_pid(stream: &UnixStream) -> Option<u32> {
-    let credentials =
-        nix::sys::socket::getsockopt(stream, nix::sys::socket::sockopt::PeerCredentials).ok()?;
-    u32::try_from(credentials.pid()).ok()
 }

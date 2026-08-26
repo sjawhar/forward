@@ -201,10 +201,7 @@ fn every_daemon_error_has_distinct_retry_safe_guidance() {
         (ErrCode::UnknownOp, "unsupported operation"),
         (ErrCode::VersionMismatch, "different protocol versions"),
         (ErrCode::UnknownToken, "broker restarted"),
-        (
-            ErrCode::NoScope,
-            "non-interactive ssh host 'secrets get KEY'",
-        ),
+        (ErrCode::NoScope, "echo $SECRETSD_SESSION_TOKEN_FILE"),
         (ErrCode::AgentTty, "known agent terminal"),
         (ErrCode::NotHumanKey, "restart secretsd"),
         (ErrCode::AmbiguousKey, "remove or rename"),

@@ -247,7 +247,7 @@ const fn broker_guidance(code: ErrCode) -> &'static str {
             "the broker restarted, losing this session's registration and every grant. The OpenCode plugin re-registers on the next command, so run this command once more -- once, not in a loop -- and expect the human's key to blink, because the first request after a restart needs a fresh touch."
         }
         ErrCode::NoScope => {
-            "there is neither a terminal tty nor a session token. This is what non-interactive ssh host 'secrets get KEY' produces; run from a human terminal with a tty or use the OpenCode token path."
+            "there is neither a terminal tty nor a session token. Inside an agent session (omp or OpenCode) this means the secretsd plugin did not inject a token into this shell -- check with `echo $SECRETSD_SESSION_TOKEN_FILE`; if it is empty, the session predates the plugin or its registration failed, so start a fresh session. From non-interactive ssh ('ssh host secrets get KEY') this is expected; run from a human terminal with a tty instead."
         }
         ErrCode::AgentTty => {
             "a tokenless request came from a known agent terminal; use the OpenCode token path instead."
