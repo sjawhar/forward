@@ -1,50 +1,66 @@
-//! Drop-in command-line compatibility for the `secrets` executable.
+//! Command-line dispatch for the `secrets` executable.
+
+mod parser;
 
 use std::collections::BTreeMap;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::ffi::OsStringExt;
 use std::os::unix::process::CommandExt;
 use std::process::Command;
 
+use clap::Parser as _;
+
+use self::parser::{Cli, CliCommand};
 use super::error::CliError;
-use super::status::{GetOutput, TierStatus, active_grant, get_arguments, write_status};
+use super::status::{GetOutput, TierStatus, active_grant, write_status};
 use super::{AgentStore, BrokerClient, BrokerResponse, ClientError, HumanClient, HumanNames};
 use crate::config::{SourceRoot, Sources};
 use crate::secret::{SecretBytes, SecretName};
 
-/// Run a compatible `secrets` command.
+/// Run a `secrets` command.
 pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError> {
-    let mut arguments = arguments.into_iter();
-    let _program = arguments.next();
-    let arguments: Vec<OsString> = arguments.collect();
-    let command = arguments.first().ok_or(CliError::Usage)?;
-    if command == OsStr::new("sources") {
-        if arguments.len() != 1 {
-            return Err(CliError::Usage);
+    let cli = Cli::try_parse_from(arguments).unwrap_or_else(|error| error.exit());
+    match cli.command {
+        None => Context::from_environment()?.inject(&cli.keys, &cli.program),
+        Some(CliCommand::Sources) => super::sources::run(),
+        Some(CliCommand::Completions { shell }) => parser::completions(shell),
+        Some(CliCommand::Get {
+            key,
+            value,
+            no_request,
+        }) => {
+            let output = if value {
+                GetOutput::Value
+            } else if no_request {
+                GetOutput::Status
+            } else {
+                GetOutput::Request
+            };
+            Context::from_environment()?.get(&key, output)
         }
-        return super::sources::run();
-    }
-    let context = Context::from_environment()?;
-    match command.as_os_str() {
-        value if value == OsStr::new("get") => {
-            let (name, output) = get_arguments(&arguments)?;
-            context.get(name, output)
+        Some(CliCommand::List) => Context::from_environment()?.list(),
+        Some(CliCommand::Edit { source }) => {
+            let context = Context::from_environment()?;
+            super::edit::agent(&context.sources, source.as_ref(), false)
         }
-        value if value == OsStr::new("list") => context.list(),
-        value if value == OsStr::new("edit") => {
-            super::edit::agent(&context.sources, &arguments, false)
+        Some(CliCommand::EditLocal { source }) => {
+            let context = Context::from_environment()?;
+            super::edit::agent(&context.sources, source.as_ref(), true)
         }
-        value if value == OsStr::new("edit-local") => {
-            super::edit::agent(&context.sources, &arguments, true)
+        Some(CliCommand::EditHuman { key, source, local }) => {
+            let context = Context::from_environment()?;
+            super::edit::human(
+                &context.sources,
+                &context.human,
+                &key,
+                source.as_ref(),
+                local,
+            )
         }
-        value if value == OsStr::new("edit-human") => {
-            super::edit::human(&context.sources, &context.human, &arguments)
-        }
-        value if value == OsStr::new("grants") => Context::grants(),
-        value if value == OsStr::new("deny") => Context::deny(argument_at(&arguments, 1)?),
-        value if value == OsStr::new("lock") => Context::lock(),
-        _ => context.inject(&arguments),
+        Some(CliCommand::Grants) => Context::grants(),
+        Some(CliCommand::Deny { id }) => Context::deny(&id),
+        Some(CliCommand::Lock) => Context::lock(),
     }
 }
 
@@ -144,19 +160,12 @@ impl Context {
         Ok(())
     }
 
-    fn inject(&self, arguments: &[OsString]) -> Result<(), CliError> {
-        let Some(separator) = arguments.iter().position(|argument| argument == "--") else {
-            return Err(CliError::Usage);
-        };
-        let Some(command_index) = separator.checked_add(1) else {
-            return Err(CliError::Usage);
-        };
-        if separator == 0 || command_index == arguments.len() {
-            return Err(CliError::Usage);
-        }
-        let names = arguments.get(..separator).ok_or(CliError::Usage)?;
+    fn inject(&self, keys: &[OsString], program: &[OsString]) -> Result<(), CliError> {
+        // The grammar requires both halves, so an empty program is
+        // unreachable through the parser; refuse rather than panic.
+        let (command_name, command_arguments) = program.split_first().ok_or(CliError::Usage)?;
         let mut environment = Vec::new();
-        for raw_name in names {
+        for raw_name in keys {
             let name = parse_name(raw_name)?;
             let value = self.value(&name)?;
             environment.push((
@@ -164,9 +173,6 @@ impl Context {
                 OsString::from_vec(value.as_slice().to_vec()),
             ));
         }
-        let command_name = arguments.get(command_index).ok_or(CliError::Usage)?;
-        let argument_index = command_index.checked_add(1).ok_or(CliError::Usage)?;
-        let command_arguments = arguments.get(argument_index..).ok_or(CliError::Usage)?;
         let mut command = Command::new(command_name);
         command.args(command_arguments).envs(environment);
         Err(CliError::Exec(command.exec()))
@@ -234,9 +240,6 @@ impl Context {
             }
         }
     }
-}
-fn argument_at(arguments: &[OsString], index: usize) -> Result<&OsString, CliError> {
-    arguments.get(index).ok_or(CliError::Usage)
 }
 
 pub(super) fn parse_name(raw: &OsString) -> Result<SecretName, CliError> {

@@ -115,7 +115,7 @@ impl fmt::Display for CliError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
-                "usage: secrets get KEY [--value|--no-request] | secrets list | secrets sources | secrets edit [--source NAME] | secrets edit-local [--source NAME] | secrets edit-human KEY [--source NAME] [--local] | secrets grants | secrets deny ID | secrets lock | secrets KEY1 [KEY2 ...] -- command [args...]",
+                "expected `secrets <KEY>... -- <PROGRAM> [ARGS]...`; run `secrets --help` for the full grammar",
             ),
             Self::Config(error) => error.fmt(formatter),
             Self::InvalidSecretName => formatter.write_str("invalid secret key"),

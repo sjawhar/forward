@@ -1,4 +1,3 @@
-use std::ffi::{OsStr, OsString};
 use std::io::Write;
 
 use super::{CliError, ClientError, caller_tty};
@@ -13,26 +12,6 @@ pub(super) enum GetOutput {
     Status,
     /// Print the secret itself.
     Value,
-}
-
-pub(super) fn get_arguments(arguments: &[OsString]) -> Result<(&OsString, GetOutput), CliError> {
-    let value = OsStr::new("--value");
-    let no_request = OsStr::new("--no-request");
-    let is_flag = |argument: &OsString| argument == value || argument == no_request;
-    let mode = |flag: &OsString| {
-        if flag == value {
-            GetOutput::Value
-        } else {
-            GetOutput::Status
-        }
-    };
-    match arguments {
-        [_, name] if !is_flag(name) => Ok((name, GetOutput::Request)),
-        [_, name, flag] | [_, flag, name] if is_flag(flag) && !is_flag(name) => {
-            Ok((name, mode(flag)))
-        }
-        _ => Err(CliError::Usage),
-    }
 }
 
 pub(super) fn write_status(name: &SecretName, status: TierStatus) -> Result<(), CliError> {

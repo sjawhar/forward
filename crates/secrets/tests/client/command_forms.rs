@@ -1,7 +1,7 @@
 use super::Fixture;
 
 #[test]
-fn get_rejects_missing_extra_and_unknown_arguments() {
+fn get_rejects_missing_extra_conflicting_and_unknown_arguments() {
     let fixture = Fixture::agent("AGENT_ONLY=agent-value\n");
 
     for arguments in [
@@ -9,15 +9,37 @@ fn get_rejects_missing_extra_and_unknown_arguments() {
         ["get", "AGENT_ONLY", "ANOTHER"].as_slice(),
         ["get", "AGENT_ONLY", "--unknown"].as_slice(),
         ["get", "--value"].as_slice(),
+        ["get", "AGENT_ONLY", "--value", "--no-request"].as_slice(),
     ] {
         let output = fixture.run_minimal(arguments);
 
         assert_ne!(output.status.code(), Some(0));
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("usage: secrets get KEY [--value|--no-request]")
-        );
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: secrets get"));
     }
+    assert_eq!(fixture.sops_calls(), 0);
+}
+
+#[test]
+fn help_documents_both_grammar_shapes_and_exits_zero() {
+    let fixture = Fixture::agent("");
+
+    let output = fixture.run_minimal(["--help"]);
+
+    assert_eq!(output.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("secrets <KEY>... -- <PROGRAM> [ARGS]..."));
+    assert!(stdout.contains("edit-human"));
+    assert_eq!(fixture.sops_calls(), 0);
+}
+
+#[test]
+fn completions_render_the_subcommands_for_bash() {
+    let fixture = Fixture::agent("");
+
+    let output = fixture.run_minimal(["completions", "bash"]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("edit-human"));
     assert_eq!(fixture.sops_calls(), 0);
 }
 

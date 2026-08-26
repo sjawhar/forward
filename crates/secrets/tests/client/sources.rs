@@ -90,7 +90,7 @@ fn sources_rejects_trailing_arguments() {
     let output = fixture.run_minimal(["sources", "extra"]);
 
     assert_ne!(output.status.code(), Some(0));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("usage: secrets"));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Usage: secrets sources"));
     assert!(fixture.sops_log().is_empty());
 }
 
