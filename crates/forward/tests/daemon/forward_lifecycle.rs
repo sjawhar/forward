@@ -41,23 +41,29 @@ fn an_expired_lease_stops_listening() {
 
 #[test]
 fn forward_service_ports_are_never_leased() {
-    // Given: a daemon whose config moves the relay/pcsc/grant ports off their
-    // defaults — the lease filter must track the effective config, not them.
+    // Given: a daemon whose config moves the relay/pcsc/grant/pulse ports off
+    // their defaults — the lease filter must track the effective config.
     let dir = tempfile::tempdir().unwrap();
     let bridged = dir.path().join("bridged");
     let bridge_port = spawn_bridge(&bridged);
     let config = format!(
-        "{}relay_port = 12911\npcsc_port = 12912\ngrant_port = 12913\n",
+        "{}relay_port = 12911\npcsc_port = 12912\ngrant_port = 12913\npulse_port = 12916\n",
         config(bridge_port, 1)
     );
     let (daemon, port) = start(dir.path(), &config);
 
     // When: URLs naming each forward service port arrive.
-    for service_port in [12_800, 12_802, 12_911, 12_912, 12_913] {
+    for service_port in [12_800, 12_802, 12_911, 12_912, 12_913, 12_916] {
         send(port, &format!("http://localhost:{service_port}/callback"));
         daemon.wait_for_log(&format!(
             "opener spawned for http://localhost:{service_port}/callback"
         ));
+        assert!(
+            !daemon
+                .log()
+                .contains(&format!("cannot serve callback port {service_port}")),
+            "forward service port {service_port} must be denied before binding"
+        );
     }
 
     // Then: none of them is ever leased or relayed.

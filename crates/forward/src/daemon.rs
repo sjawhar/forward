@@ -37,6 +37,8 @@ pub enum DaemonError {
     BrowserRelay(#[from] forward::browser::BrowserError),
     #[error(transparent)]
     Pcsc(forward::pcsc::PcscError),
+    #[error(transparent)]
+    Pulse(forward::pulse::PulseError),
 }
 
 pub fn run(cfg: Config, config_path: &Path, port: u16) -> Result<(), DaemonError> {
@@ -63,6 +65,7 @@ pub fn run(cfg: Config, config_path: &Path, port: u16) -> Result<(), DaemonError
     forward::browser::feed::spawn_client(&cfg, tokens.clone())?;
     forward::browser::spawn(&cfg, tokens)?;
     forward::pcsc::laptop::spawn(&cfg).map_err(DaemonError::Pcsc)?;
+    forward::pulse::laptop::spawn(&cfg).map_err(DaemonError::Pulse)?;
     for connection in listener.incoming() {
         match connection {
             Ok(stream) => {

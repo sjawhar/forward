@@ -48,12 +48,6 @@ impl ProbeEvidence {
     }
 }
 
-struct ChannelProbe {
-    name: &'static str,
-    port: u16,
-    probe: Probe,
-}
-
 fn probe_hosts(cfg: &Config) -> Vec<String> {
     let mut hosts = Vec::new();
     for host in [cfg.listen.as_str(), "127.0.0.1", cfg.peer.as_str()] {
@@ -67,93 +61,63 @@ fn probe_hosts(cfg: &Config) -> Vec<String> {
 /// Report evidence for each channel and return whether none contradicts its protocol.
 pub fn run(cfg: &Config, channel_port: u16, files_port: u16) -> bool {
     let hosts = probe_hosts(cfg);
-    let url = report(
+    let url = channel(cfg, &hosts, "url channel", channel_port, probe_url_channel);
+    let preview = channel(cfg, &hosts, "file preview", files_port, probe_file_preview);
+    let bridge = channel(
         cfg,
         &hosts,
-        ChannelProbe {
-            name: "url channel",
-            port: channel_port,
-            probe: probe_url_channel,
-        },
-    );
-    let preview = report(
-        cfg,
-        &hosts,
-        ChannelProbe {
-            name: "file preview",
-            port: files_port,
-            probe: probe_file_preview,
-        },
-    );
-    let bridge = report(
-        cfg,
-        &hosts,
-        ChannelProbe {
-            name: "callback bridge",
-            port: cfg.bridge_port,
-            probe: probe_bridge,
-        },
+        "callback bridge",
+        cfg.bridge_port,
+        probe_bridge,
     );
     let relay = browser::report(cfg);
     grant::report();
-    let feed = if cfg.grant_port == 0 {
-        print_line("browser feed: disabled (grant_port = 0)");
-        true
-    } else {
-        report(
-            cfg,
-            &hosts,
-            ChannelProbe {
-                name: "browser feed",
-                port: cfg.grant_port,
-                probe: probe_url_channel,
-            },
-        )
-    };
-    let pcsc_channel = if cfg.pcsc_port == 0 {
-        print_line("pcsc channel: disabled (pcsc_port = 0)");
-        true
-    } else {
-        report(
-            cfg,
-            &hosts,
-            ChannelProbe {
-                name: "pcsc channel",
-                port: cfg.pcsc_port,
-                probe: probe_url_channel,
-            },
-        )
-    };
+    let feed = optional_channel(cfg, &hosts, "browser feed", "grant_port", cfg.grant_port);
+    let pcsc_channel = optional_channel(cfg, &hosts, "pcsc channel", "pcsc_port", cfg.pcsc_port);
     let pcsc_socket = pcsc::report(cfg);
-    url && preview && bridge && relay && feed && pcsc_channel && pcsc_socket
+    let pulse_channel =
+        optional_channel(cfg, &hosts, "pulse channel", "pulse_port", cfg.pulse_port);
+    let pulse_socket = pulse::report(cfg);
+    url && preview
+        && bridge
+        && relay
+        && feed
+        && pcsc_channel
+        && pcsc_socket
+        && pulse_channel
+        && pulse_socket
 }
 
-fn report(cfg: &Config, hosts: &[String], channel: ChannelProbe) -> bool {
+/// Report one TCP channel across the probe hosts.
+fn channel(cfg: &Config, hosts: &[String], name: &'static str, port: u16, probe: Probe) -> bool {
     let mut failures = Vec::new();
     for host in hosts {
-        match (channel.probe)(host, channel.port) {
+        match probe(host, port) {
             Ok(evidence) if evidence_is_healthy(cfg, host, evidence) => {
-                print_line(format_args!(
-                    "{}: {}",
-                    channel.name,
-                    evidence.observation(host, channel.port)
-                ));
+                print_line(format_args!("{name}: {}", evidence.observation(host, port)));
                 return true;
             }
-            Ok(evidence) => failures.push(format!(
-                "{host}:{} ({})",
-                channel.port,
-                evidence.failure_reason()
-            )),
-            Err(reason) => failures.push(format!("{host}:{} ({reason})", channel.port)),
+            Ok(evidence) => failures.push(format!("{host}:{port} ({})", evidence.failure_reason())),
+            Err(reason) => failures.push(format!("{host}:{port} ({reason})")),
         }
     }
-    print_line(format_args!(
-        "{}: FAIL — tried {}",
-        channel.name,
-        failures.join(", ")
-    ));
+    print_line(format_args!("{name}: FAIL — tried {}", failures.join(", ")));
     false
+}
+
+/// Report a plain TCP channel that a zero port deliberately disables.
+fn optional_channel(
+    cfg: &Config,
+    hosts: &[String],
+    name: &'static str,
+    field: &'static str,
+    port: u16,
+) -> bool {
+    if port == 0 {
+        print_line(format_args!("{name}: disabled ({field} = 0)"));
+        return true;
+    }
+    channel(cfg, hosts, name, port, probe_url_channel)
 }
 
 fn evidence_is_healthy(cfg: &Config, host: &str, evidence: ProbeEvidence) -> bool {
@@ -231,6 +195,7 @@ fn print_line(message: impl Display) {
 mod browser;
 mod grant;
 mod pcsc;
+mod pulse;
 
 #[cfg(test)]
 mod browser_tests;

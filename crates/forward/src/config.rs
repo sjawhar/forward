@@ -31,6 +31,10 @@ pub struct Config {
     /// 0 disables the feed, which refuses every browser relay connection.
     #[serde(default = "default_grant_port")]
     pub grant_port: u16,
+    /// Port for the pulse channel: the laptop listens on it (tailnet address),
+    /// the devbox dials it per PulseAudio client. 0 disables the channel.
+    #[serde(default = "default_pulse_port")]
+    pub pulse_port: u16,
     #[serde(default)]
     pub allow: Vec<String>,
 }
@@ -151,6 +155,7 @@ impl Config {
             relay_port: default_relay_port(),
             pcsc_port: default_pcsc_port(),
             grant_port: default_grant_port(),
+            pulse_port: default_pulse_port(),
             allow: Vec::new(),
         }
     }
@@ -186,6 +191,10 @@ pub(crate) fn default_pcsc_port() -> u16 {
 
 pub(crate) fn default_grant_port() -> u16 {
     12_805
+}
+
+pub(crate) fn default_pulse_port() -> u16 {
+    12_806
 }
 
 fn parse_ip(field: &'static str, value: &str) -> Result<std::net::IpAddr, ConfigError> {

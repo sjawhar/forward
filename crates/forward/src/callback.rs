@@ -30,7 +30,7 @@ pub const RELAY_TARGET_PORT: u16 = 9_224;
 /// constant service ports. Derived from `Config`, never from the defaults: an
 /// overridden port carries its protection with it. A value of 0 marks a
 /// disabled service and reserves nothing (port 0 is separately never leased).
-pub fn service_ports(cfg: &Config) -> [u16; 6] {
+pub fn service_ports(cfg: &Config) -> [u16; 7] {
     [
         CHANNEL_PORT,
         FILES_PORT,
@@ -38,6 +38,7 @@ pub fn service_ports(cfg: &Config) -> [u16; 6] {
         cfg.relay_port,
         cfg.pcsc_port,
         cfg.grant_port,
+        cfg.pulse_port,
     ]
 }
 

@@ -74,14 +74,17 @@ fn production_source_contains_no_legacy_ssh_transport() {
 }
 
 #[test]
-fn pcsc_and_grant_ports_default_and_parse() {
-    // This fails if the new channel ports are missing, misdefaulted, or not
+fn channel_ports_default_and_parse() {
+    // This fails if the channel ports are missing, misdefaulted, or not
     // overridable from config.toml.
     let cfg = Config::default_values_for_test();
     assert_eq!(cfg.pcsc_port, 12_804);
     assert_eq!(cfg.grant_port, 12_805);
+    assert_eq!(cfg.pulse_port, 12_806);
 
-    let parsed: Config = toml::from_str("pcsc_port = 0\ngrant_port = 12905\n").unwrap();
+    let parsed: Config =
+        toml::from_str("pcsc_port = 0\ngrant_port = 12905\npulse_port = 0\n").unwrap();
     assert_eq!(parsed.pcsc_port, 0);
     assert_eq!(parsed.grant_port, 12_905);
+    assert_eq!(parsed.pulse_port, 0);
 }
