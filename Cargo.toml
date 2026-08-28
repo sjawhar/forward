@@ -6,7 +6,7 @@ resolver = "3"
 # from the secrets broker's 2.6.0: taking forward's 0.6.1 forward instead would
 # regress a published version and confuse the installer's version gating.
 [workspace.package]
-version = "3.1.0"
+version = "3.2.0"
 edition = "2024"
 
 # One `nix` for the whole workspace. Two majors used to link into one binary:
