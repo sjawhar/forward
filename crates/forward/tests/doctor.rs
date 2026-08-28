@@ -2,6 +2,8 @@ use std::io::{Read as _, Write as _};
 use std::net::TcpListener;
 #[path = "doctor/browser.rs"]
 mod browser;
+#[path = "doctor/pulse.rs"]
+mod pulse;
 
 fn spawn_accept_and_close() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -58,7 +60,7 @@ fn run_doctor(ports: DoctorPorts) -> std::process::Output {
     std::fs::write(
         &config,
         format!(
-            "bridge_port = {}\nrelay_port = 0\npcsc_port = 0\ngrant_port = 0\n",
+            "bridge_port = {}\nrelay_port = 0\npcsc_port = 0\ngrant_port = 0\npulse_port = 0\n",
             ports.bridge
         ),
     )
@@ -97,7 +99,7 @@ fn doctor_names_every_channel_and_exits_non_zero_when_one_is_down() {
     let config = dir.path().join("config.toml");
     std::fs::write(
         &config,
-        "peer = \"127.0.0.2\"\nbridge_port = 9\nrelay_port = 9\npcsc_port = 0\ngrant_port = 0\n",
+        "peer = \"127.0.0.2\"\nbridge_port = 9\nrelay_port = 9\npcsc_port = 0\ngrant_port = 0\npulse_port = 0\n",
     )
     .unwrap();
 
@@ -126,14 +128,16 @@ fn doctor_names_every_channel_and_exits_non_zero_when_one_is_down() {
     assert!(text.contains("browser feed: disabled"), "got {text}");
     assert!(text.contains("pcsc channel: disabled"), "got {text}");
     assert!(text.contains("pcsc socket:"), "got {text}");
+    assert!(text.contains("pulse channel: disabled"), "got {text}");
+    assert!(text.contains("pulse socket:"), "got {text}");
     assert!(!output.status.success());
 }
 
 #[test]
-fn disabled_pcsc_channel_and_socket_are_healthy() {
+fn disabled_channels_and_sockets_are_healthy() {
     // Given: the channels this test exercises answer as doctor expects, the
-    // browser relay and PC/SC channel are deliberately disabled, and no
-    // assumption about a legacy socket that may happen to exist here.
+    // browser relay, PC/SC, and pulse channels are deliberately disabled, and
+    // no assumption about a legacy socket that may happen to exist here.
     let channel_port = spawn_accept_and_close();
     let bridge_port = spawn_bridge_refusal(b"REFUSED DENIED\n");
     let files_port = spawn_file_preview(200);
@@ -142,11 +146,12 @@ fn disabled_pcsc_channel_and_socket_are_healthy() {
     cfg.relay_port = 0;
     cfg.grant_port = 0;
     cfg.pcsc_port = 0;
+    cfg.pulse_port = 0;
 
     // When: doctor reports.
     let healthy = forward::doctor::run(&cfg, channel_port, files_port);
 
-    // Then: deliberately disabled PC/SC is healthy information, not a failure.
+    // Then: deliberately disabled PC/SC and pulse channels are healthy information, not failures.
     assert!(healthy);
 }
 

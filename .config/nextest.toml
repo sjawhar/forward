@@ -4,8 +4,8 @@
 # That same isolation breaks forward's daemon tests, which coordinate through an
 # in-process `DAEMON_TEST_LOCK` mutex: under one test binary they serialized, but
 # nextest gives each test its own process, so the mutex no longer serializes
-# anything and they race over fixed ports, `HOME`, and umask. The pcsc tests
-# coordinate the same way through `PROCESS_STATE_LOCK`.
+# anything and they race over fixed ports, `HOME`, and umask. The pcsc and pulse
+# tests coordinate the same way through their own `PROCESS_STATE_LOCK`.
 #
 # Rather than rewrite both suites around cross-process locking, declare the
 # constraint that was previously implicit: these binaries run serially.
@@ -14,5 +14,5 @@
 serial-daemon = { max-threads = 1 }
 
 [[profile.default.overrides]]
-filter = 'binary(daemon) or binary(pcsc)'
+filter = 'binary(daemon) or binary(pcsc) or binary(pulse)'
 test-group = 'serial-daemon'

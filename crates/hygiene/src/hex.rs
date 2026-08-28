@@ -43,7 +43,7 @@ pub fn decode_exact(raw: &str, expected_len: usize) -> Option<Zeroizing<Box<[u8]
         return None;
     }
     let mut parsed = Zeroizing::new(vec![0_u8; expected_len].into_boxed_slice());
-    for (slot, chunk) in parsed.iter_mut().zip(raw.as_bytes().chunks_exact(2)) {
+    for (slot, chunk) in parsed.iter_mut().zip(raw.as_bytes().as_chunks::<2>().0) {
         let text = std::str::from_utf8(chunk).ok()?;
         *slot = u8::from_str_radix(text, 16).ok()?;
     }

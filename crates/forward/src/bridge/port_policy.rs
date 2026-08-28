@@ -13,7 +13,8 @@ pub(super) fn can_arm(cfg: &Config, port: u16) -> bool {
 /// Whether `port` is never safe for the callback bridge to dial.
 ///
 /// The denied forward services derive from the effective config: the URL
-/// channel, file preview, bridge, browser relay, pcsc channel, and grant feed.
+/// channel, file preview, bridge, browser relay, pcsc channel, grant feed, and
+/// pulse channel.
 /// The shipped list held constants and missed the configurable relay port,
 /// letting the bridge dial the browser relay; deriving from `Config` closes the
 /// class of self-routing holes. Port zero has no destination, ports below 1024
@@ -58,9 +59,18 @@ mod tests {
         cfg.relay_port = 12_903;
         cfg.pcsc_port = 12_914;
         cfg.grant_port = 12_915;
+        cfg.pulse_port = 12_916;
 
         // When/Then: the constants and every effective port refuse arming.
-        for port in [CHANNEL_PORT, FILES_PORT, 12_901, 12_903, 12_914, 12_915] {
+        for port in [
+            CHANNEL_PORT,
+            FILES_PORT,
+            12_901,
+            12_903,
+            12_914,
+            12_915,
+            12_916,
+        ] {
             assert!(!can_arm(&cfg, port), "port {port} was armable");
         }
         // And the abandoned defaults are ordinary callback ports again, as is
@@ -69,6 +79,7 @@ mod tests {
             crate::config::default_relay_port(),
             crate::config::default_pcsc_port(),
             crate::config::default_grant_port(),
+            crate::config::default_pulse_port(),
             12_799,
         ] {
             assert!(can_arm(&cfg, abandoned), "port {abandoned} still reserved");

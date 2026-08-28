@@ -7,7 +7,7 @@ fn run_doctor_with(ports: super::DoctorPorts, relay_lines: &str) -> std::process
     std::fs::write(
         &config,
         format!(
-            "bridge_port = {}\npcsc_port = 0\ngrant_port = 0\n{relay_lines}",
+            "bridge_port = {}\npcsc_port = 0\ngrant_port = 0\npulse_port = 0\n{relay_lines}",
             ports.bridge
         ),
     )

@@ -46,7 +46,10 @@ relay_port = 12803
     assert!(cfg.notifier.is_empty());
     assert_eq!(cfg.forward_ttl_secs, 300);
     assert_eq!(cfg.allow.len(), 2);
-    assert_eq!((cfg.pcsc_port, cfg.grant_port), (12_804, 12_805));
+    assert_eq!(
+        (cfg.pcsc_port, cfg.grant_port, cfg.pulse_port),
+        (12_804, 12_805, 12_806)
+    );
 }
 
 #[test]

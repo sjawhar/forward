@@ -75,6 +75,7 @@ pub fn start(dir: &Path, config_body: &str) -> (Daemon, u16) {
             config.to_str().unwrap(),
         ])
         .env("PATH", path)
+        .env("XDG_RUNTIME_DIR", dir)
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
@@ -120,6 +121,7 @@ pub fn start_expecting_failure(dir: &Path, config_body: &str) -> String {
             "--config",
             config.to_str().unwrap(),
         ])
+        .env("XDG_RUNTIME_DIR", dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .output()
