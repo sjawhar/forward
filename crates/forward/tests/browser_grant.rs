@@ -33,14 +33,29 @@ fn grant(anchor: ProcessAnchor, deadline: Instant) -> Grant {
     }
 }
 fn insert_grant(grants: &Grants, port: u16, grant: Grant) {
-    let authority = forward::secretsd::BrokerIdentity {
-        instance: "broker-a".to_owned(),
-        epoch: 0,
-        socket: forward::secretsd::SocketIdentity {
-            device: 50,
-            inode: 283,
+    // Synthetic authority for tests without a live subscription; nothing ever
+    // observes a competing identity.
+    insert_grant_as(
+        grants,
+        port,
+        forward::secretsd::BrokerIdentity {
+            instance: "broker-a".to_owned(),
+            epoch: 0,
+            socket: forward::secretsd::SocketIdentity {
+                device: 50,
+                inode: 283,
+            },
         },
-    };
+        grant,
+    );
+}
+
+fn insert_grant_as(
+    grants: &Grants,
+    port: u16,
+    authority: forward::secretsd::BrokerIdentity,
+    grant: Grant,
+) {
     grants.observe_authority(authority.clone());
     assert!(grants.insert_if_authority(port, &authority, grant));
 }

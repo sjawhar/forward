@@ -6,8 +6,9 @@ use std::thread;
 use std::time::Duration;
 
 enum Command {
-    Lock,
+    Trigger,
     Drop,
+    Mute,
 }
 
 pub(super) enum Script {
@@ -43,8 +44,11 @@ impl FakeBroker {
             Script::Lock => {
                 let mut subscription = subscribe(&listener, "broker-a", 0);
                 attached_sender.send(()).unwrap();
-                assert!(matches!(commands.recv().unwrap(), Command::Lock));
-                write_event(&mut subscription, "broker-a", 1);
+                assert!(matches!(commands.recv().unwrap(), Command::Trigger));
+                write_event(&mut subscription, "broker-a", 1).unwrap();
+                // Hold the stream open: revocation must come from the epoch
+                // advance, never from a trailing EOF.
+                let _ = commands.recv();
             }
             Script::Close => {
                 let subscription = subscribe(&listener, "broker-a", 0);
@@ -54,8 +58,17 @@ impl FakeBroker {
                 dropped_sender.send(()).unwrap();
             }
             Script::Mute => {
-                let _subscription = subscribe(&listener, "broker-a", 0);
+                let mut subscription = subscribe(&listener, "broker-a", 0);
                 attached_sender.send(()).unwrap();
+                // Keepalives hold the feed healthy until the test commands
+                // silence, so the read deadline measures from that moment
+                // instead of racing the pipe establishment.
+                while matches!(commands.try_recv(), Err(mpsc::TryRecvError::Empty)) {
+                    if write_event(&mut subscription, "broker-a", 0).is_err() {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(10));
+                }
                 let _ = commands.recv();
             }
             Script::Capacity => {
@@ -73,7 +86,7 @@ impl FakeBroker {
                 assert!(matches!(commands.recv().unwrap(), Command::Drop));
                 drop(subscription);
                 dropped_sender.send(()).unwrap();
-                assert!(matches!(commands.recv().unwrap(), Command::Lock));
+                assert!(matches!(commands.recv().unwrap(), Command::Trigger));
                 let _subscription = subscribe(&listener, "broker-a", 1);
                 reattached_sender.send(()).unwrap();
             }
@@ -90,17 +103,17 @@ impl FakeBroker {
                     .read_line(&mut frame)
                     .unwrap();
                 assert_eq!(frame, "SUBSCRIBE\n");
-                write_event(&mut subscription, "broker-b", 0);
+                write_event(&mut subscription, "broker-b", 0).unwrap();
                 reattached_sender.send(()).unwrap();
             }
             Script::MalformedEvent => {
-                let subscription = subscribe(&listener, "broker-a", 0);
+                let mut subscription = subscribe(&listener, "broker-a", 0);
                 attached_sender.send(()).unwrap();
-                assert!(matches!(commands.recv().unwrap(), Command::Drop));
-                drop(subscription);
-                dropped_sender.send(()).unwrap();
-                malformed_subscription(&listener);
-                reattached_sender.send(()).unwrap();
+                assert!(matches!(commands.recv().unwrap(), Command::Trigger));
+                subscription.write_all(b"EPOCH broken\n").unwrap();
+                // Hold the stream open: revocation must come from the
+                // malformed frame, never from a trailing EOF.
+                let _ = commands.recv();
             }
             Script::MalformedHello => {
                 let subscription = subscribe(&listener, "broker-a", 0);
@@ -133,7 +146,15 @@ impl FakeBroker {
     }
 
     pub(super) fn lock(&self) {
-        self.command.send(Command::Lock).unwrap();
+        self.command.send(Command::Trigger).unwrap();
+    }
+
+    pub(super) fn corrupt(&self) {
+        self.command.send(Command::Trigger).unwrap();
+    }
+
+    pub(super) fn mute(&self) {
+        self.command.send(Command::Mute).unwrap();
     }
 
     pub(super) fn drop_subscription(&self) {
@@ -158,7 +179,7 @@ fn subscribe(listener: &UnixListener, instance: &str, epoch: u64) -> UnixStream 
         .read_line(&mut frame)
         .unwrap();
     assert_eq!(frame, "SUBSCRIBE\n");
-    write_event(&mut stream, instance, epoch);
+    write_event(&mut stream, instance, epoch).unwrap();
     stream
 }
 
@@ -174,21 +195,8 @@ fn hello(listener: &UnixListener, instance: &str, epoch: u64) {
         .unwrap();
 }
 
-fn write_event(stream: &mut UnixStream, instance: &str, epoch: u64) {
-    stream
-        .write_all(format!("EPOCH {epoch} instance={instance}\n").as_bytes())
-        .unwrap();
-}
-
-fn malformed_subscription(listener: &UnixListener) {
-    hello(listener, "broker-a", 0);
-    let (mut stream, _) = listener.accept().unwrap();
-    let mut frame = String::new();
-    BufReader::new(stream.try_clone().unwrap())
-        .read_line(&mut frame)
-        .unwrap();
-    assert_eq!(frame, "SUBSCRIBE\n");
-    stream.write_all(b"EPOCH broken\n").unwrap();
+fn write_event(stream: &mut UnixStream, instance: &str, epoch: u64) -> std::io::Result<()> {
+    stream.write_all(format!("EPOCH {epoch} instance={instance}\n").as_bytes())
 }
 
 fn malformed_hello(listener: &UnixListener) {
