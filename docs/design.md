@@ -70,8 +70,9 @@ When its standard input is non-terminal, `secrets edit-human KEY [--source
 NAME] [--local]` accepts the value only on standard input, never argv, and
 disables core dumps before reading it. It locks the human-secret directory while
 it encrypts directly to an atomically replaced ciphertext file, so the value
-never reaches a plaintext file at rest. New non-interactive keys default to a
-local file; later reads remain YubiKey-gated.
+never reaches a plaintext file at rest. New keys are committed files unless
+`--local` is passed, exactly as in the terminal flow; later reads remain
+YubiKey-gated.
 
 ## Non-goals
 
