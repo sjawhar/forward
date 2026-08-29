@@ -1,5 +1,5 @@
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
 use std::time::{Duration, Instant};
 use std::{fs, thread};
@@ -11,6 +11,10 @@ use nix::unistd::Pid;
 use super::Fixture;
 
 const FAKE_SOPS_CIPHERTEXT_MARKER: &[u8] = b"# fake-sops-ciphertext\n";
+
+fn new_key_target(fixture: &Fixture) -> PathBuf {
+    fixture.dotfiles_dir().join("secrets.human.d/NEW_KEY.env")
+}
 
 fn assert_filename_override(fixture: &Fixture, path: &Path) {
     let mut expected = b"--filename-override\0".to_vec();
@@ -95,11 +99,9 @@ fn core_limit_is_zero(pid: u32) -> bool {
 }
 
 #[test]
-fn edit_human_creates_a_local_file_for_a_new_key_from_stdin() {
+fn edit_human_creates_a_committed_file_for_a_new_key_from_stdin() {
     let fixture = Fixture::agent("");
-    let expected = fixture
-        .dotfiles_dir()
-        .join("secrets.human.d/NEW_KEY.local.env");
+    let expected = new_key_target(&fixture);
 
     let output = fixture.run_with_stdin(["edit-human", "NEW_KEY"], b"swordfish-0123");
 
@@ -112,6 +114,19 @@ fn edit_human_creates_a_local_file_for_a_new_key_from_stdin() {
     assert!(ciphertext.starts_with(FAKE_SOPS_CIPHERTEXT_MARKER));
     assert_sops_encrypt_command(&fixture);
     assert_filename_override(&fixture, &expected);
+}
+
+#[test]
+fn edit_human_creates_a_local_file_only_with_the_local_flag() {
+    let fixture = Fixture::agent("");
+    let expected = new_key_target(&fixture).with_extension("local.env");
+
+    let output = fixture.run_with_stdin(["edit-human", "NEW_KEY", "--local"], b"swordfish-0123");
+
+    assert!(output.status.success());
+    let report = format!("created {}\n", expected.display()).into_bytes();
+    assert_eq!(output.stdout, report);
+    assert!(expected.is_file());
 }
 
 #[test]
@@ -159,9 +174,7 @@ fn edit_human_rejects_a_source_other_than_an_existing_keys_actual_root() {
 fn edit_human_requires_a_source_when_multiple_roots_are_configured() {
     let fixture = Fixture::agent("");
     fixture.add_root("private");
-    let target = fixture
-        .dotfiles_dir()
-        .join("secrets.human.d/NEW_KEY.local.env");
+    let target = new_key_target(&fixture);
 
     let output = fixture.run_with_stdin(["edit-human", "NEW_KEY"], b"unwritten-value");
 
@@ -177,9 +190,7 @@ fn edit_human_requires_a_source_when_multiple_roots_are_configured() {
 #[test]
 fn edit_human_refuses_an_empty_stdin_value_and_creates_nothing() {
     let fixture = Fixture::agent("");
-    let target = fixture
-        .dotfiles_dir()
-        .join("secrets.human.d/NEW_KEY.local.env");
+    let target = new_key_target(&fixture);
 
     let output = fixture.run_with_stdin(["edit-human", "NEW_KEY"], b"");
 
@@ -193,9 +204,7 @@ fn edit_human_refuses_an_empty_stdin_value_and_creates_nothing() {
 fn edit_human_refuses_multiline_and_comment_smuggling_values() {
     for value in [b"a\nb".as_slice(), b"a\n#comment", b"a\n\n", b"a\r\nb"] {
         let fixture = Fixture::agent("");
-        let target = fixture
-            .dotfiles_dir()
-            .join("secrets.human.d/NEW_KEY.local.env");
+        let target = new_key_target(&fixture);
 
         let output = fixture.run_with_stdin(["edit-human", "NEW_KEY"], value);
 
@@ -209,9 +218,7 @@ fn edit_human_refuses_multiline_and_comment_smuggling_values() {
 #[test]
 fn edit_human_strips_exactly_one_trailing_newline() {
     let fixture = Fixture::agent("");
-    let target = fixture
-        .dotfiles_dir()
-        .join("secrets.human.d/NEW_KEY.local.env");
+    let target = new_key_target(&fixture);
 
     let output = fixture.run_with_stdin(["edit-human", "NEW_KEY"], b"value\n");
 
@@ -222,9 +229,7 @@ fn edit_human_strips_exactly_one_trailing_newline() {
 #[test]
 fn edit_human_strips_exactly_one_trailing_carriage_return_newline() {
     let fixture = Fixture::agent("");
-    let target = fixture
-        .dotfiles_dir()
-        .join("secrets.human.d/NEW_KEY.local.env");
+    let target = new_key_target(&fixture);
 
     let output = fixture.run_with_stdin(["edit-human", "NEW_KEY"], b"value\r\n");
 
@@ -268,9 +273,7 @@ fn edit_human_zeroes_the_core_limit_before_reading_stdin() {
 #[test]
 fn edit_human_sops_failure_never_echoes_the_value_and_leaves_target_unchanged() {
     let create_fixture = Fixture::agent("");
-    let create_target = create_fixture
-        .dotfiles_dir()
-        .join("secrets.human.d/NEW_KEY.local.env");
+    let create_target = new_key_target(&create_fixture);
     let create_value = b"create-failure-value";
     create_fixture.use_sops_fixture("fake-sops-stdin-fail");
 
@@ -303,9 +306,7 @@ fn edit_human_sops_failure_never_echoes_the_value_and_leaves_target_unchanged() 
 fn edit_human_stdout_failure_never_stages_the_piped_value() {
     let fixture = Fixture::agent("");
     fixture.use_sops_fixture("fake-sops-stdout-hang");
-    let target = fixture
-        .dotfiles_dir()
-        .join("secrets.human.d/NEW_KEY.local.env");
+    let target = new_key_target(&fixture);
     let human_dir = target.parent().unwrap();
     let marker_directory = tempfile::tempdir().unwrap();
     let process_marker = marker_directory.path().join("sops.pid");
@@ -377,9 +378,7 @@ fn edit_human_drains_sops_output_before_writing_large_stdin() {
 
     let fixture = Fixture::agent("");
     fixture.use_sops_fixture("fake-sops-output-before-stdin");
-    let target = fixture
-        .dotfiles_dir()
-        .join("secrets.human.d/NEW_KEY.local.env");
+    let target = new_key_target(&fixture);
     let marker_directory = tempfile::tempdir().unwrap();
     let process_marker = marker_directory.path().join("sops.pid");
     let mut child = fixture
@@ -520,7 +519,7 @@ fn edit_human_leaves_the_runtime_dir_empty() {
 fn edit_human_blocks_on_the_directory_lock() {
     let fixture = Fixture::human("EXISTING_KEY");
     let human_dir = fixture.dotfiles_dir().join("secrets.human.d");
-    let target = human_dir.join("NEW_KEY.local.env");
+    let target = human_dir.join("NEW_KEY.env");
     let lock = Flock::lock(fs::File::open(&human_dir).unwrap(), FlockArg::LockExclusive).unwrap();
     let mut child = fixture
         .command(["edit-human", "NEW_KEY"])

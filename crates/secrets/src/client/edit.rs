@@ -55,18 +55,7 @@ pub(super) fn human(
             edit(path)
         }
     } else {
-        let path = new_human_path(
-            sources,
-            &name,
-            if piped {
-                EditArguments {
-                    source: flags.source,
-                    local: true,
-                }
-            } else {
-                flags
-            },
-        )?;
+        let path = new_human_path(sources, &name, flags)?;
         if piped {
             new::write_piped_human(&path, &name)
         } else {

@@ -318,9 +318,9 @@ fi
 assert_sops_counts 1 0 'human secret creation'
 report '6/14 created ciphertext under the human rule; the agent key could not decrypt it'
 
-report '7/14 writing and rotating a human secret from stdin through the real client and real sops'
+report '7/14 writing and rotating a machine-local human secret from stdin through the real client and real sops'
 readonly piped_human_path="$human_dir/$piped_human_key.local.env"
-piped_human_create_output="$(printf '%s' "$piped_human_value" | run_client_from "$operator_dir" edit-human "$piped_human_key" --source dotfiles)"
+piped_human_create_output="$(printf '%s' "$piped_human_value" | run_client_from "$operator_dir" edit-human "$piped_human_key" --source dotfiles --local)"
 [[ "$piped_human_create_output" == "created $piped_human_path" ]] || fail 'stdin write did not report its created ciphertext path'
 [[ -f "$piped_human_path" ]] || fail 'stdin write did not create the human ciphertext file'
 grep -F --quiet "$unavailable_human_recipient" "$piped_human_path" || fail 'stdin write secret lacks the human-rule recipient'
