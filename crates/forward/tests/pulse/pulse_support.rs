@@ -14,9 +14,14 @@ pub fn cfg() -> Config {
 }
 
 pub fn is_bare_close(error: &std::io::Error) -> bool {
+    // A refused connection's bare close can surface client-side as a broken
+    // pipe or reset on read/write, or as ENOTCONN when the server's reset
+    // lands before the client's own shutdown(Write) call.
     matches!(
         error.kind(),
-        std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::NotConnected
     )
 }
 
