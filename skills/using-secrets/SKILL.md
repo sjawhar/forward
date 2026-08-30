@@ -1,13 +1,35 @@
 ---
 name: using-secrets
-description: "Use BEFORE running any command that needs an API key, token, password, or credential, and whenever a secret looks missing, wrong, truncated, or like a placeholder. This machine has no secrets in the environment — every key comes from the `secrets` CLI, and `secrets get KEY` does NOT print the value. Triggers on: secrets get, secrets list, API key, API token, access token, credential, OPENAI_API_KEY, ANTHROPIC_API_KEY, AIRTABLE_TOKEN, SLACK_MCP_XOXP_TOKEN, GROQ_API_KEY, DEEL_API_KEY, sk-, xoxp-, export KEY=, env var for a command, 'key is a placeholder', 'key looks wrong', 'invalid api key', 401, 403, authentication failed, sops, YubiKey touch, secretsd, secrets_request, SecretsRequest, grant expired, key blinking, TIMEOUT, TOO_MANY_PENDING."
+description: "Use BEFORE running any command that needs an API key, token, password, or credential, and whenever a secret looks missing, wrong, truncated, or like a placeholder. No personal or third-party API credential is pre-exported into this machine's environment — every one of those comes from the `secrets` CLI, and `secrets get KEY` does NOT print the value. Infrastructure credentials (database passwords, RDS-managed master secrets) live in AWS Secrets Manager instead, reached with the machine's own cloud identity, so a key missing from `secrets list` never means the infrastructure is unreachable. Triggers on: secrets get, secrets list, API key, API token, access token, credential, database password, OPENAI_API_KEY, ANTHROPIC_API_KEY, AIRTABLE_TOKEN, SLACK_MCP_XOXP_TOKEN, GROQ_API_KEY, DEEL_API_KEY, sk-, xoxp-, export KEY=, env var for a command, 'key is a placeholder', 'key looks wrong', 'invalid api key', 401, 403, authentication failed, sops, YubiKey touch, secretsd, secrets_request, SecretsRequest, grant expired, key blinking, TIMEOUT, TOO_MANY_PENDING."
 ---
 
 # Using `secrets` and the `secrets_request` tool
 
-Every credential on this machine comes from `secrets` (CLI) or `secrets_request` (the MCP
-tool, shown as `SecretsRequest` in OpenCode). Nothing is pre-exported into the environment,
-so a bare `echo $OPENAI_API_KEY` is empty and that is not a bug.
+Every **personal or third-party API** credential on this machine comes from `secrets` (CLI)
+or `secrets_request` (the MCP tool, shown as `SecretsRequest` in OpenCode). Nothing is
+pre-exported into the environment, so a bare `echo $OPENAI_API_KEY` is empty and that is not
+a bug. Infrastructure credentials are a separate system — see the boundary below before
+concluding anything is unreachable.
+
+## Two credential systems, not one
+
+`secrets` and `secrets_request` cover one category: personal and third-party API credentials
+— LLM API keys, Slack/Deel/Airtable/GitHub tokens, everything `secrets list` enumerates.
+That is not the whole credential surface.
+
+Database passwords, cloud-managed master secrets, and other infrastructure credentials never
+appear in `secrets list`. They live in the cloud provider's own secret store, reached with
+the machine's own identity — on AWS, `aws secretsmanager list-secrets`,
+`aws secretsmanager get-secret-value`, and `aws rds describe-db-clusters` for an
+RDS-managed master secret whose name is generated rather than declared. A devbox's instance
+role commonly carries broad read access in the workload account, a completely separate grant
+from anything `secrets` manages, and read-only inspection of it needs no approval.
+
+**A key absent from `secrets list`, or a `secret 'X' not found`, is never evidence that a
+database or any other piece of infrastructure is unreachable.** It means only that this
+particular credential is not provisioned through this system. Check the cloud secret store
+and the owning infrastructure skill before reporting anything as inaccessible: stopping at
+`secrets list` is the specific mistake this section exists to prevent.
 
 ## The one mistake to never make
 
@@ -151,3 +173,4 @@ make the human's key blink repeatedly.
 - Never conclude "grants expire quickly" from a failure — it is one of the causes in Grant lifetime above, or an unrelated bug, never the grant itself.
 - Never request keys mid-flight into unattended work, and never fire `secrets_request` calls in parallel — see the two sections above.
 - Never have a subagent request a human-tier key; request it in the parent before dispatching.
+- Never report infrastructure as unreachable because its credential is not in `secrets list` — that list covers personal and API credentials only. Check the cloud secret store first; see "Two credential systems" above.
