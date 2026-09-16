@@ -15,6 +15,9 @@ pub(super) struct Access {
     pub(super) key: String,
     pub(super) token_hex: Option<Zeroizing<String>>,
     pub(super) tty: Option<String>,
+    /// Caller-requested lifetime for a freshly created grant. `None` means no
+    /// preference: the daemon's own default backstop governs.
+    pub(super) requested_ttl: Option<u64>,
 }
 
 impl fmt::Debug for Access {
@@ -24,6 +27,7 @@ impl fmt::Debug for Access {
             .field("key", &self.key)
             .field("token_present", &self.token_hex.is_some())
             .field("tty", &self.tty)
+            .field("requested_ttl", &self.requested_ttl)
             .finish()
     }
 }
@@ -60,10 +64,20 @@ fn resolve_access(
     Ok((scope, key))
 }
 
-fn await_approval(shared: &Shared, scope: &Scope, key: &SecretName, force_fresh: bool) -> Approval {
+#[allow(
+    clippy::too_many_lines,
+    reason = "one state machine owns the full grant-or-refuse decision; splitting it would only rename the seams"
+)]
+fn await_approval(
+    shared: &Shared,
+    scope: &Scope,
+    key: &SecretName,
+    force_fresh: bool,
+    requested_ttl: Option<u64>,
+) -> Approval {
     let (mutex, condvar) = &**shared;
     let mut state = lock_state(mutex);
-    if let Some((_, source, identity)) = state.grants.lookup(scope, key) {
+    if let Some((_, source, identity)) = state.grants.lookup(scope, key, Instant::now()) {
         let source = source.to_owned();
         let identity = identity.clone();
         if state
@@ -103,7 +117,10 @@ fn await_approval(shared: &Shared, scope: &Scope, key: &SecretName, force_fresh:
         drop(state);
         return Approval::Refused(ErrCode::Internal);
     };
-    let id = match state.queue.enqueue(scope.clone(), key.clone(), now) {
+    let id = match state
+        .queue
+        .enqueue(scope.clone(), key.clone(), now, requested_ttl)
+    {
         Ok(id) => id,
         Err(error) => {
             drop(state);
@@ -184,32 +201,44 @@ pub(super) fn dispatch_access(
         }
     };
     let scope_kind = Some(scope.kind());
-    let (outcome, source, request_id) = match await_approval(shared, &scope, &key, force_fresh) {
-        Approval::Refused(error) => (Outcome::Failed(error, "request refused"), None, None),
-        Approval::Incomplete { error, request_id } => (
-            Outcome::Failed(error, "approval did not complete"),
-            None,
-            Some(request_id),
-        ),
-        Approval::Granted { source, request_id } if return_value => {
-            let (mutex, _) = &**shared;
-            let outcome = lock_state(mutex)
-                .grants
-                .lookup(&scope, &key)
-                .map(|(value, _, _)| value)
-                .cloned()
-                .map_or(
-                    Outcome::Failed(ErrCode::Internal, "grant disappeared"),
-                    Outcome::Bytes,
+    let (outcome, source, request_id) =
+        match await_approval(shared, &scope, &key, force_fresh, access.requested_ttl) {
+            Approval::Refused(error) => (Outcome::Failed(error, "request refused"), None, None),
+            Approval::Incomplete { error, request_id } => (
+                Outcome::Failed(error, "approval did not complete"),
+                None,
+                Some(request_id),
+            ),
+            Approval::Granted { source, request_id } if return_value => {
+                let (mutex, _) = &**shared;
+                let outcome = lock_state(mutex)
+                    .grants
+                    .lookup(&scope, &key, Instant::now())
+                    .map(|(value, _, _)| value)
+                    .cloned()
+                    .map_or(
+                        Outcome::Failed(ErrCode::Internal, "grant disappeared"),
+                        Outcome::Bytes,
+                    );
+                (outcome, source, request_id)
+            }
+            Approval::Granted { source, request_id } => {
+                // Only worth a lock+lookup when the caller actually asked for a
+                // ttl: the reply stays byte-for-byte "status=granted" otherwise,
+                // matching today's behavior exactly.
+                let ttl_field = access.requested_ttl.and_then(|_| {
+                    let (mutex, _) = &**shared;
+                    lock_state(mutex)
+                        .grants
+                        .remaining_secs(&scope, &key, Instant::now())
+                });
+                let fields = ttl_field.map_or_else(
+                    || "status=granted".to_owned(),
+                    |ttl| format!("status=granted ttl={ttl}"),
                 );
-            (outcome, source, request_id)
-        }
-        Approval::Granted { source, request_id } => (
-            Outcome::Fields("status=granted".to_owned()),
-            source,
-            request_id,
-        ),
-    };
+                (Outcome::Fields(fields), source, request_id)
+            }
+        };
     Decision {
         outcome,
         scope_kind,

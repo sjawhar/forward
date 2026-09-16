@@ -57,6 +57,11 @@ pub(super) enum CliCommand {
         /// Report status without requesting a grant (never costs a touch)
         #[arg(long)]
         no_request: bool,
+        /// Maximum lifetime of a freshly created grant: 45s, 30m, 2h, 8h.
+        /// Capped server-side; has no effect on an already-live grant, and
+        /// omitting it keeps today's default backstop.
+        #[arg(long, value_name = "DURATION", conflicts_with = "no_request")]
+        ttl: Option<String>,
     },
     /// List every agent- and human-tier key
     List,

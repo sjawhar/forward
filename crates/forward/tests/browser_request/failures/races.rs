@@ -51,8 +51,8 @@ fn an_instance_change_at_matching_epoch_refuses_before_a_token_or_proxy_survives
     let broker = thread::spawn(move || {
         let steps = [
             (
-                "HELLO\tversion=3\n".to_owned(),
-                "OK\tversion=3 instance=broker-a epoch=0\n".to_owned(),
+                "HELLO\tversion=4\n".to_owned(),
+                "OK\tversion=4 instance=broker-a epoch=0\n".to_owned(),
             ),
             (
                 format!(
@@ -62,8 +62,8 @@ fn an_instance_change_at_matching_epoch_refuses_before_a_token_or_proxy_survives
                 "OK\tstatus=redeemed cap=browser instance=broker-a epoch=0 ttl=60\n".to_owned(),
             ),
             (
-                "HELLO\tversion=3\n".to_owned(),
-                "OK\tversion=3 instance=broker-b epoch=0\n".to_owned(),
+                "HELLO\tversion=4\n".to_owned(),
+                "OK\tversion=4 instance=broker-b epoch=0\n".to_owned(),
             ),
         ];
         for (expected, reply) in steps {

@@ -30,7 +30,7 @@ type ShellOutput = { env: Record<string, string> };
 
 const decoder = new TextDecoder();
 const CONTROL_TIMEOUT_MS = 2_000;
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 const HELLO = `HELLO\tversion=${PROTOCOL_VERSION}`;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
 

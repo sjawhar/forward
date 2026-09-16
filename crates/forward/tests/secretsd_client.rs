@@ -9,7 +9,7 @@ mod framing;
 mod identity;
 
 const RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const HELLO_OK: &str = "OK\tversion=3 instance=abc123 epoch=0\n";
+const HELLO_OK: &str = "OK\tversion=4 instance=abc123 epoch=0\n";
 
 struct Step {
     expected: String,
@@ -60,7 +60,7 @@ impl FakeBroker {
 
 fn hello() -> Step {
     Step {
-        expected: "HELLO\tversion=3\n".to_owned(),
+        expected: "HELLO\tversion=4\n".to_owned(),
         reply: Reply::Text(HELLO_OK.to_owned()),
     }
 }

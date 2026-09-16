@@ -30,11 +30,9 @@ private = { ignore = true }
 [bans]
 multiple-versions = "deny"
 skip = [
-    # Reviewed 2026-08-25: nix 0.29 remains in the credential-path crates
-    # until the planned 0.31 unification also removes containment's legacy
-    # SO_PEERPIDFD code. Main owns that complete, separately verified change
-    # in this session; do not renew this exception.
-    { name = "nix", version = "0.29.0", reason = "credential-path nix 0.31 migration pending its required source cutover" },
+    # Reviewed 2026-09-18: the nix 0.29/0.31 split (credential-path crates vs
+    # containment's legacy SO_PEERPIDFD code) is resolved on main -- every
+    # crate now depends on nix 0.31, so no skip entry is needed here.
     # Reviewed 2026-08-25: these are the lower transitive halves of the
     # distinct TOML 0.8 (secrets) and TOML 1 (forward) parser stacks.
     { name = "serde_spanned", version = "0.6.9", reason = "transitive from secrets' TOML 0.8 source-root parser" },

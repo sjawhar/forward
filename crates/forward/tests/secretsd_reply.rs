@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use forward::secretsd::{self, BrokerError, CAP_BROWSER};
 
 const RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const HELLO_OK: &[u8] = b"OK\tversion=3 instance=abc123\n";
+const HELLO_OK: &[u8] = b"OK\tversion=4 instance=abc123\n";
 
 struct FakeBroker {
     _dir: tempfile::TempDir,
@@ -28,7 +28,7 @@ impl FakeBroker {
         let worker = thread::spawn(move || {
             for (expected, reply) in [
                 (
-                    "HELLO\tversion=3\n".to_owned(),
+                    "HELLO\tversion=4\n".to_owned(),
                     Reply::Bytes(HELLO_OK.to_vec()),
                 ),
                 (format!("REDEEM\treceipt={RECEIPT}\tcap=browser\n"), reply),

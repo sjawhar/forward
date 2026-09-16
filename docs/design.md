@@ -35,11 +35,13 @@ secrets keep working unattended with zero interaction, exactly as today.
   (below); the residual window is accepted for touch-only ergonomics. The
   future explicit-approve mode eliminates it.
 - **Grant lifetime and silent harness death**: once granted, a secret stays
-  available to its session until the session-end event, `secrets lock`, or the
-  12h backstop — including while the user is away. This is deliberate:
-  presence is proven at grant time, not continuously. A silently crashed
-  harness cannot send its session-end event, and the broker has no death-watch
-  fallback, so its grants survive until the 12h backstop.
+  available to its session until the session-end event, `secrets lock`, or its
+  own backstop — 12h by default, or up to `SECRETSD_MAX_REQUESTED_GRANT_SECS`
+  (24h by default) when the caller passed `secrets get KEY --ttl <duration>` —
+  including while the user is away. This is deliberate: presence is proven at
+  grant time, not continuously. A silently crashed harness cannot send its
+  session-end event, and the broker has no death-watch fallback, so its grants
+  survive until their own backstop.
 - **Open registration**: the broker socket is same-UID-open, so any process
   can register a token and pose as "a session". A forged registration cannot
   mint a grant — the touch requirement stands — but it can supply misleading
@@ -77,7 +79,10 @@ YubiKey-gated.
 ## Non-goals
 
 - Per-use approval (schema leaves room; explicitly not wanted now).
-- Per-key TTL policies (additive later; grant records carry created-at).
+- Per-key TTL *policies* — a different default baked into a key's own
+  configuration — remain unimplemented; `secrets get KEY --ttl <duration>`
+  (per-request, capped server-side) ships instead. Grant records already
+  carried created-at; they now carry their own capped `ttl` too.
 - Claude Code support for human-tier grants (dropped to simplify the design
   to a single authorization mechanism; CC keeps agent-tier access unchanged
   and gets a clear error for human-tier keys). Re-adding CC later means
@@ -297,7 +302,7 @@ A grant is `(session_token, key)`, held in broker memory.
 ### Grant lifecycle
 
 ```
-request → pending → decrypting → granted ──(session end | lock | 12h)→ revoked+zeroized
+request → pending → decrypting → granted ──(session end | lock | its own ttl)→ revoked+zeroized
                         │
                         ├─ denied  (secrets deny / timeout 90s)
                         └─ failed  (YubiKey unreachable, decrypt error)
@@ -308,7 +313,9 @@ request → pending → decrypting → granted ──(session end | lock | 12h)�
   are coalesced **only** for the same `(token, key)`; one session's approval
   never creates another session's grant.
 - Revocation triggers: plugin session-end event (primary), `secrets lock`
-  (wipe all + revoke all), and a 12h backstop per grant.
+  (wipe all + revoke all), and each grant's own backstop -- 12h by default,
+  or up to the `SECRETSD_MAX_REQUESTED_GRANT_SECS` ceiling (24h by default)
+  for a grant created by an explicit `--ttl` request.
 - Grants are never persisted. Reopening the same on-disk session re-registers
   the persisted token but starts with zero grants — the first human-tier
   request goes through a fresh blink-and-touch. One touch to resume is
@@ -393,9 +400,12 @@ needs, so PIN+touch (`pin-policy` change) becomes possible per-key.
 ## CLI / tool surface
 
 ```
-secrets get KEY                        pre-authorizes: asks the broker for a grant
+secrets get KEY [--ttl DURATION]        pre-authorizes: asks the broker for a grant
                                        (touch if none is live) and prints one JSON
-                                       status object, nothing else
+                                       status object, nothing else. --ttl bounds
+                                       only a freshly created grant (45s/30m/2h/8h,
+                                       capped server-side); omitted keeps the
+                                       default 12h backstop
 secrets get KEY --value                prints the secret; the only form that does
 secrets get KEY --no-request           status without asking, so it never triggers a touch
 secrets KEY -- cmd                     injects into a child environment, never prints
@@ -456,8 +466,9 @@ resolved by precedence.
 
 ## Future extensions (explicitly deferred)
 
-- Per-use approval mode and per-key TTLs (grant records already carry
-  created-at; additive).
+- Per-key TTL *policies* (a default baked into a key's own configuration)
+  and per-use approval mode remain deferred; grant records carry their own
+  capped `ttl` now, not just created-at.
 - Explicit-approve + PIN mode (see Approval UX).
 - Claude Code human-tier support via process-ancestry anchoring.
 - Migrating agent-tier storage to per-key files / per-key recipient sets

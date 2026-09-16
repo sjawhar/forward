@@ -18,6 +18,22 @@ struct Job {
     lock_epoch: u64,
     store: HumanStore,
     decryptor: Decryptor,
+    /// Caller-requested grant lifetime, carried from the enqueued request.
+    requested_ttl: Option<u64>,
+}
+
+/// The lifetime a freshly created grant receives: `requested` clamped to
+/// `max_requested_grant`, or `max_grant` -- today's unconditional default --
+/// when the caller asked for nothing. Pure and reused nowhere else, so it is
+/// unit-tested directly instead of only through a running daemon.
+fn effective_grant_ttl(
+    requested: Option<u64>,
+    max_grant: Duration,
+    max_requested_grant: Duration,
+) -> Duration {
+    requested.map_or(max_grant, |secs| {
+        Duration::from_secs(secs).min(max_requested_grant)
+    })
 }
 
 #[allow(
@@ -37,12 +53,11 @@ pub(super) fn worker(shared: &Shared) {
             let (mutex, condvar) = &**shared;
             let mut state = lock_state(mutex);
             let now = Instant::now();
-            let max_grant = state.config.max_grant;
             let expired = state.queue.sweep_timeouts(now);
             for id in expired {
                 state.kill_active(id);
             }
-            state.grants.revoke_expired(now, max_grant);
+            state.grants.revoke_expired(now);
             state.grants.revoke_missing_ttys();
             state.queue.prune(now);
             state.receipts.sweep(now);
@@ -59,7 +74,7 @@ pub(super) fn worker(shared: &Shared) {
             let Some(generation) = state.queue.mark_decrypting(id, now) else {
                 continue;
             };
-            let Some((scope, key)) = state.queue.describe(id) else {
+            let Some((scope, key, requested_ttl)) = state.queue.describe(id) else {
                 state.queue.fail(id, now);
                 condvar.notify_all();
                 continue;
@@ -72,6 +87,7 @@ pub(super) fn worker(shared: &Shared) {
                 lock_epoch: state.lock_epoch,
                 store: state.store.clone(),
                 decryptor: state.decryptor.clone(),
+                requested_ttl,
             }
         };
         let shared_for_start = Arc::clone(shared);
@@ -114,6 +130,11 @@ pub(super) fn worker(shared: &Shared) {
                     state.queue.deny(job.id);
                 }
                 if state.queue.complete(job.id, job.generation, Instant::now()) {
+                    let ttl = effective_grant_ttl(
+                        job.requested_ttl,
+                        state.config.max_grant,
+                        state.config.max_requested_grant,
+                    );
                     state.grants.insert(
                         job.scope,
                         job.key,
@@ -123,10 +144,12 @@ pub(super) fn worker(shared: &Shared) {
                             source: decrypted.source.clone(),
                             identity: decrypted.identity,
                         },
+                        ttl,
                     );
                     tracing::info!(
                         source = %sanitize_audit_value(&decrypted.source),
                         request_id = ?job.id,
+                        ttl_secs = ttl.as_secs(),
                         "grant inserted"
                     );
                 }
@@ -138,5 +161,66 @@ pub(super) fn worker(shared: &Shared) {
         }
         drop(state);
         condvar.notify_all();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::effective_grant_ttl;
+
+    fn max_grant() -> Duration {
+        Duration::from_hours(12)
+    }
+
+    fn max_requested_grant() -> Duration {
+        Duration::from_hours(24)
+    }
+
+    #[test]
+    fn omitted_ttl_keeps_todays_default_backstop() {
+        assert_eq!(
+            effective_grant_ttl(None, max_grant(), max_requested_grant()),
+            max_grant()
+        );
+    }
+
+    #[test]
+    fn a_requested_ttl_under_the_ceiling_is_honored_exactly() {
+        assert_eq!(
+            effective_grant_ttl(Some(3_600), max_grant(), max_requested_grant()),
+            Duration::from_secs(3_600)
+        );
+    }
+
+    #[test]
+    fn a_requested_ttl_at_the_ceiling_is_honored_exactly() {
+        assert_eq!(
+            effective_grant_ttl(
+                Some(max_requested_grant().as_secs()),
+                max_grant(),
+                max_requested_grant()
+            ),
+            max_requested_grant()
+        );
+    }
+
+    #[test]
+    fn a_requested_ttl_over_the_ceiling_is_clamped_to_it() {
+        assert_eq!(
+            effective_grant_ttl(Some(999_999_999), max_grant(), max_requested_grant()),
+            max_requested_grant()
+        );
+    }
+
+    #[test]
+    fn a_requested_ttl_can_undercut_the_default_backstop() {
+        // A shorter --ttl is always honored: the ceiling only ever bounds
+        // from above, never forces a grant to live as long as the default.
+        assert_eq!(
+            effective_grant_ttl(Some(45), max_grant(), max_requested_grant()),
+            Duration::from_secs(45)
+        );
     }
 }

@@ -36,7 +36,7 @@ fn hello_on_validates_the_supplied_stream_response() {
             .read_line(&mut request)
             .unwrap();
         broker_stream
-            .write_all(b"OK\tversion=3 instance=broker epoch=0\n")
+            .write_all(b"OK\tversion=4 instance=broker epoch=0\n")
             .unwrap();
         request
     });
@@ -47,5 +47,5 @@ fn hello_on_validates_the_supplied_stream_response() {
         client.hello_on(client_stream).unwrap().required("instance"),
         Ok("broker")
     );
-    assert_eq!(broker.join().unwrap(), "HELLO\tversion=3\n");
+    assert_eq!(broker.join().unwrap(), "HELLO\tversion=4\n");
 }

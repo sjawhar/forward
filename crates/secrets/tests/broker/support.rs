@@ -81,6 +81,7 @@ impl Harness {
             yubikey_probe_timeout: Duration::from_secs(2),
             touch_policy: secrets::TouchPolicy::Cached,
             max_grant: Duration::from_hours(12),
+            max_requested_grant: Duration::from_hours(24),
             cooldown: Duration::from_secs(16),
             request_ttl: Duration::from_secs(20),
             max_pending_per_scope: 2,

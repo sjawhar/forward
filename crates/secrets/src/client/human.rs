@@ -72,17 +72,31 @@ impl HumanClient {
     /// human's approval, so it triggers the hardware touch when no grant is
     /// live, and returns once the scope holds a grant. Nothing about the value
     /// crosses the socket.
-    pub fn request_grant(&self, key: &SecretName) -> Result<(), ClientError> {
-        let request = self.scoped_frame("REQUEST", key);
+    ///
+    /// `ttl_secs` bounds a *freshly created* grant only; it has no effect when
+    /// the scope already holds a live one. Returns the grant's actual
+    /// lifetime as the broker reports it, when the caller asked for a ttl.
+    pub fn request_grant(
+        &self,
+        key: &SecretName,
+        ttl_secs: Option<u64>,
+    ) -> Result<Option<u64>, ClientError> {
+        let request = self.scoped_frame("REQUEST", key, ttl_secs);
         match self.broker.call(&request) {
-            Ok(BrokerResponse::Ok | BrokerResponse::Fields(_)) => Ok(()),
+            Ok(BrokerResponse::Ok) => Ok(None),
+            Ok(BrokerResponse::Fields(fields)) => Ok(parse_ttl_field(&fields)),
             Ok(BrokerResponse::Bytes(_)) => Err(ClientError::InvalidResponse),
             Err(error) => Err(error),
         }
     }
 
     /// Build an operation frame carrying whichever scope this caller has.
-    fn scoped_frame(&self, operation: &str, key: &SecretName) -> Zeroizing<String> {
+    fn scoped_frame(
+        &self,
+        operation: &str,
+        key: &SecretName,
+        ttl_secs: Option<u64>,
+    ) -> Zeroizing<String> {
         let mut request = Zeroizing::new(format!("{operation}\tkey={}", key.as_str()));
         if let Some(token) = &self.token {
             request.push_str("\ttoken=");
@@ -92,18 +106,35 @@ impl HumanClient {
             request.push_str("\ttty=");
             request.push_str(tty);
         }
+        if let Some(ttl) = ttl_secs {
+            request.push_str("\tttl=");
+            request.push_str(&ttl.to_string());
+        }
         request
     }
 
     /// Request a human-tier value, blocking until the broker reaches its terminal response.
-    pub fn get(&self, key: &SecretName) -> Result<SecretBytes, ClientError> {
-        let request = self.scoped_frame("GET", key);
+    ///
+    /// `ttl_secs` bounds a *freshly created* grant only, exactly as in
+    /// `request_grant`; a live grant is returned unchanged.
+    pub fn get(&self, key: &SecretName, ttl_secs: Option<u64>) -> Result<SecretBytes, ClientError> {
+        let request = self.scoped_frame("GET", key, ttl_secs);
         match self.broker.call(&request) {
             Ok(BrokerResponse::Bytes(bytes)) => Ok(SecretBytes::from_vec(bytes)),
             Ok(BrokerResponse::Ok | BrokerResponse::Fields(_)) => Err(ClientError::InvalidResponse),
             Err(error) => Err(error),
         }
     }
+}
+
+/// Extract `ttl=<seconds>` from a space-separated `k=v` `OkFields` reply.
+/// Absent or malformed is `None`, never an error: an older broker that
+/// silently drops the field must not turn a successful grant into a failure.
+fn parse_ttl_field(fields: &str) -> Option<u64> {
+    fields
+        .split(' ')
+        .find_map(|field| field.strip_prefix("ttl="))
+        .and_then(|value| value.parse().ok())
 }
 
 impl HumanNames {

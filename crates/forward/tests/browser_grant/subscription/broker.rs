@@ -189,9 +189,9 @@ fn hello(listener: &UnixListener, instance: &str, epoch: u64) {
     BufReader::new(stream.try_clone().unwrap())
         .read_line(&mut frame)
         .unwrap();
-    assert_eq!(frame, "HELLO\tversion=3\n");
+    assert_eq!(frame, "HELLO\tversion=4\n");
     stream
-        .write_all(format!("OK\tversion=3 instance={instance} epoch={epoch}\n").as_bytes())
+        .write_all(format!("OK\tversion=4 instance={instance} epoch={epoch}\n").as_bytes())
         .unwrap();
 }
 
@@ -205,6 +205,6 @@ fn malformed_hello(listener: &UnixListener) {
     BufReader::new(stream.try_clone().unwrap())
         .read_line(&mut frame)
         .unwrap();
-    assert_eq!(frame, "HELLO\tversion=3\n");
-    stream.write_all(b"OK\tversion=3 epoch=0\n").unwrap();
+    assert_eq!(frame, "HELLO\tversion=4\n");
+    stream.write_all(b"OK\tversion=4 epoch=0\n").unwrap();
 }

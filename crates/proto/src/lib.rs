@@ -1,4 +1,4 @@
-//! Wire protocol v3, shared by both binaries.
+//! Wire protocol v4, shared by both binaries.
 //!
 //! Line-oriented, tab-separated, ASCII, and hand-rolled deliberately: secret
 //! plaintext is written straight from a zeroizing buffer to the socket and
@@ -9,7 +9,7 @@
 //! that parses one.
 
 /// Protocol version. A mismatch is a hard error, never a downgrade.
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// Maximum accepted request frame and response payload. Requests never carry
 /// secret values, but replies must be bounded before allocating their payload.
@@ -24,6 +24,30 @@ pub const SUBSCRIBER_CAPACITY_RESPONSE: &str = "ERR SUBSCRIBER_CAPACITY\n";
 #[must_use]
 pub fn authority_event(instance: &str, epoch: u64) -> String {
     format!("EPOCH {epoch} instance={instance}\n")
+}
+
+/// Parse a `--ttl`-style duration -- `45s`, `30m`, or `2h` -- to seconds.
+///
+/// Shared by `forward browser grant --ttl` and `secrets get --ttl`: one
+/// grammar, one place that rejects `0m`, a bare unit, or a missing one.
+#[must_use]
+pub fn parse_ttl(value: &str) -> Option<u64> {
+    if !value.is_ascii() || value.len() < 2 {
+        return None;
+    }
+    let split = value.len().checked_sub(1)?;
+    let (number, unit) = value.split_at(split);
+    let multiplier = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3_600,
+        _ => return None,
+    };
+    number
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(multiplier)
+        .filter(|ttl| *ttl > 0)
 }
 
 /// Parse exactly one complete broker authority event.
@@ -148,5 +172,16 @@ mod tests {
         );
         assert_eq!(SUBSCRIBE_VERB, "SUBSCRIBE");
         assert_eq!(SUBSCRIBER_CAPACITY_RESPONSE, "ERR SUBSCRIBER_CAPACITY\n");
+    }
+
+    #[test]
+    fn ttl_shorthand_parses() {
+        assert_eq!(parse_ttl("45s"), Some(45));
+        assert_eq!(parse_ttl("30m"), Some(1_800));
+        assert_eq!(parse_ttl("2h"), Some(7_200));
+        assert_eq!(parse_ttl("0m"), None);
+        assert_eq!(parse_ttl("5x"), None);
+        assert_eq!(parse_ttl("m"), None);
+        assert_eq!(parse_ttl(""), None);
     }
 }
