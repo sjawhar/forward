@@ -95,14 +95,32 @@ secrets AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY -- terraform apply
 The value is placed in the child process's environment and never printed, so it cannot
 land in the transcript. Prefer this over every other form.
 
+**Checking that a read works** (diagnosing a broken shim, a fallback path, a
+registration) is the same form with a command that reveals only the length:
+
+```bash
+secrets GH_PUBLIC_REPO_PAT -- sh -c 'echo len=${#GH_PUBLIC_REPO_PAT}'
+```
+
+A read that works prints `len=N`. A failure that involved the broker at all carries
+`AGENT NOTICE: ask the human; do not retry-loop.` and the table below names the causes;
+any other error is the client's own and prints plainly — the key is in no source root,
+sops cannot decrypt a source, a dotenv file is malformed, the command would not run. The
+notice is the signal to act on, not the tier: an agent-tier key never reaches the broker,
+and a human-tier read can still fail plainly, because the client decrypts every agent-tier
+source before it looks the key up and the value can arrive but the command still fail to
+exec. This is the only acceptable probe — `--value` as a "does it work" check put a live
+token in a transcript on 2026-09-17.
+
 **Only when you genuinely need the bytes** (piping into a file, building a header):
 
 ```bash
 secrets get OPENAI_API_KEY --value
 ```
 
-This prints the secret, so it will appear in the transcript. Never run it just to look at
-a key, and never paste its output into a message.
+This prints the secret, so it will appear in the transcript. Never run it to look at a
+key, never run it to test whether the read works (use the length form above), and never
+paste its output into a message. A value in a transcript means a rotation.
 
 **Other forms:**
 
@@ -127,27 +145,36 @@ does not inherit another session's grants.
 
 ## When it refuses
 
-Errors start with `AGENT NOTICE: ask the human; do not retry-loop.` Take that literally: with
-one exception (`the broker restarted`, below), re-running will not help, and repeated attempts
-make the human's key blink repeatedly.
+Any failure that involved the broker starts with `AGENT NOTICE: ask the human; do not
+retry-loop.` Take that literally: except for the two rows below that say otherwise,
+re-running will not help, and a retried request that does reach the approval queue makes
+the human's key blink again. Anything printed without that notice is the client's own
+error — a missing key, a source sops cannot decrypt, a malformed dotenv, a command that
+would not run — and re-running changes nothing there either until the cause is fixed.
 
-| Message contains | Means | Do |
-|---|---|---|
-| `not human-tier` | no approval needed for this key | read it directly with `--value` or inject it |
-| `neither a terminal tty nor a session token` | non-interactive context with no session | ask the human to run it, or run inside the agent session |
-| `outside that session's process tree` | the token came from elsewhere | run the request from this session |
-| `secretsd failed while decrypting` | daemon-side sops failure — **not** a missed touch, which is reported as `TIMEOUT` instead | `journalctl --user -u secretsd` for the daemon's sops stderr |
-| `secret 'X' not found` | the key genuinely is not configured | ask the human to add it; do not invent a value |
-| `the broker restarted` | the daemon restarted, so its registrations and grants are gone | run the command **once** more: the plugin re-registers between commands. Expect a touch. If it fails twice, tell the human |
-| `TIMEOUT` / `timed out` | nobody touched the key within 90s of the request | you skipped announcing the request first; tell the human and request again, watched this time |
-| `TOO_MANY_PENDING` | you (or a parallel call) already have requests queued on this scope | stop; wait for the pending request to resolve before requesting again |
+**The message already says what happened.** The daemon ships one guidance string per error
+code, next to the code that raises it, so that text is what to believe about the cause —
+this table only says what to *do*. Don't infer a cause it didn't state: several of these
+codes cover more than one fault.
+
+| Message contains | Do |
+|---|---|
+| `not human-tier` | read it directly with `--value` or inject it; no approval is involved |
+| `neither a terminal tty nor a session token` | ask the human to run it, or run inside the agent session |
+| `outside that session's process tree` | run the request from this session. If it *is* this session, its registration is stale — restart the session rather than retrying |
+| `secretsd failed while decrypting` | read `journalctl --user -u secretsd` for the daemon's *classification* of the failure (`sops_failure=…`). sops' own output is never logged — it can quote what it just decrypted — so do not go looking for it |
+| `secret 'X' not found` | ask the human to add it; never invent a value |
+| `the broker restarted` | run the command **once** more — the plugin re-registers between commands, so expect a touch. Twice means tell the human |
+| `TIMEOUT` | tell the human *before* requesting again; the daemon's guidance is to wait for them rather than retry blind. If they say they touched it, read the journal before asking for another |
+| `timed out waiting for approval` | this is the *client* giving up, not the daemon refusing — the daemon may still be working. Tell the human and read the journal before requesting again |
+| `TOO_MANY_PENDING` | stop; wait for the pending request to resolve before requesting again |
 
 ## Never
 
 - Never paste a secret's value into a message, a commit, a log, or a file.
 - Never write a secret into a script, a `.env`, or a shell history line.
 - Never conclude a key is wrong from `secrets get` output — that output is status, not the key.
-- Never retry after an `AGENT NOTICE`, with one exception: `the broker restarted` clears itself once the plugin re-registers, so run that command **once** more. Never loop.
+- Never retry after an `AGENT NOTICE`, with two exceptions: `the broker restarted` clears itself once the plugin re-registers, so run that command **once** more; and the daemon's `TIMEOUT` — not the client's `timed out waiting for approval` — may be requested once more *after* telling the human. Never loop.
 - Never conclude "grants expire quickly" from a failure — it is one of the causes in Grant lifetime above, or an unrelated bug, never the grant itself.
 - Never request keys mid-flight into unattended work, and never fire `secrets_request` calls in parallel — see the two sections above.
 - Never have a subagent request a human-tier key; request it in the parent before dispatching.
