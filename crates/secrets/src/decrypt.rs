@@ -16,76 +16,13 @@ use crate::proto::ErrCode;
 use crate::secret::{SecretBytes, SecretName, parse_single_assignment};
 use crate::store::{FileIdentity, HumanStore, OpenedHumanFile};
 
+mod classify;
+
+use classify::{classify_sops_stderr, failure_code};
+
 /// Polling period while a sops child is active.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 const MAX_SOPS_STDERR_BYTES: u64 = 300;
-
-/// Known sops/age failure signatures, matched against lowercased stderr.
-///
-/// Ordered most specific first; the last entry is a generic wrapper sops emits
-/// around any key failure, so it only matches once the others have missed.
-const SOPS_STDERR_SIGNATURES: &[(&str, &str)] = &[
-    (
-        "failed to decrypt yubikey stanza",
-        "yubikey-stanza-undecryptable",
-    ),
-    ("yubikey plugin", "yubikey-plugin-error"),
-    // The plugin's own transport failure, which reaches us unwrapped when sops
-    // surfaces the plugin's stderr verbatim. A stale pcscd tunnel produces this.
-    ("pc/sc error", "pcsc-communication-error"),
-    ("no identity matched", "no-matching-identity"),
-    ("sops metadata not found", "missing-sops-metadata"),
-    ("no such file or directory", "input-unreadable"),
-    ("permission denied", "input-permission-denied"),
-    ("failed to get the data key", "data-key-unavailable"),
-];
-
-fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.len() >= needle.len() && haystack.windows(needle.len()).any(|w| w == needle)
-}
-
-/// Reduce a sops stderr buffer to a stable label.
-///
-/// The child's bytes never reach a log. A decrypt failure can quote the material
-/// it just decrypted, so logging that output would put plaintext in the journal;
-/// only this label and a byte count are recorded.
-fn classify_sops_stderr(stderr: &[u8]) -> &'static str {
-    let mut lowered = stderr.to_ascii_lowercase();
-    let label = SOPS_STDERR_SIGNATURES
-        .iter()
-        .find(|(needle, _)| contains_subslice(&lowered, needle.as_bytes()))
-        .map_or("unclassified", |(_, label)| *label);
-    lowered.zeroize();
-    label
-}
-
-/// Labels that mean the hardware could not be reached, rather than a fault in
-/// the request or the ciphertext.
-///
-/// The reachability probe only sees whether the PC/SC socket exists, so a live
-/// socket whose far end is dead -- a stale pcscd tunnel is the common case --
-/// gets all the way to sops before failing. Reporting `Internal` there tells the
-/// caller to go read the daemon's log about spawning sops, when the actionable
-/// fact is that the key is unreachable.
-const UNREACHABLE_FAILURE_LABELS: &[&str] = &["yubikey-plugin-error", "pcsc-communication-error"];
-
-/// Labels that mean the key was reachable but nobody touched it.
-///
-/// The plugin gives a touch a window of its own, shorter than this daemon's
-/// request TTL, so a human who is slow to reach the key loses the race inside
-/// sops rather than at our deadline. Both mean the same thing to the caller --
-/// no approval happened -- so both must say so instead of blaming sops.
-const UNTOUCHED_FAILURE_LABELS: &[&str] = &["yubikey-stanza-undecryptable"];
-
-fn failure_code(label: &str) -> ErrCode {
-    if UNREACHABLE_FAILURE_LABELS.contains(&label) {
-        ErrCode::YubikeyUnreachable
-    } else if UNTOUCHED_FAILURE_LABELS.contains(&label) {
-        ErrCode::Timeout
-    } else {
-        ErrCode::Internal
-    }
-}
 
 fn duplicate_ciphertext_fd(validated: &std::fs::File) -> Result<std::fs::File, ErrCode> {
     // `F_DUPFD`, not `_CLOEXEC`: the sops child reads the ciphertext through it.
@@ -260,7 +197,18 @@ impl Decryptor {
             .stderr(Stdio::piped())
             .process_group(0)
             .spawn()
-            .map_err(|_| ErrCode::Internal)?;
+            .map_err(|error| {
+                // The INTERNAL guidance sends the human to journald for the cause,
+                // and a spawn that never happened has no stderr to classify: this
+                // is the only record. The io error names the binary and the reason
+                // (missing, not executable) and cannot carry secret material.
+                tracing::warn!(
+                    sops_bin = %self.sops_bin.display(),
+                    %error,
+                    "could not spawn sops"
+                );
+                ErrCode::Internal
+            })?;
         let process_id = i32::try_from(child.id()).map_err(|_| ErrCode::Internal)?;
         on_started(process_id);
         let deadline = Instant::now()

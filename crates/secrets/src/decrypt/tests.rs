@@ -309,78 +309,30 @@ fn classifies_a_sops_failure_without_logging_child_stderr() {
 }
 
 #[test]
-fn classifies_known_sops_signatures_and_falls_back_to_unclassified() {
-    // The first case is the real message seen when a YubiKey touch never lands;
-    // it contains both yubikey signatures, so ordering must pick the specific one.
-    assert_eq!(
-        classify_sops_stderr(
-            b"age: yubikey plugin: Failed to decrypt YubiKey stanza. Did you touch it?"
-        ),
-        "yubikey-stanza-undecryptable"
+fn logs_why_sops_could_not_be_spawned() {
+    // The INTERNAL guidance sends the human to `journalctl -u secretsd` for the
+    // cause, and a spawn that never happened has no stderr to classify, so the
+    // spawn error itself is the only record of it. An unreadable sops binary is
+    // the common shape: a wrong SECRETSD_SOPS_BIN, or a mise install mid-upgrade.
+    let (_dir, store) = store_with_key("K");
+    let decryptor = Decryptor::new(
+        std::path::PathBuf::from("/nonexistent/sops"),
+        Duration::from_secs(5),
+        direct_pcsc(),
     );
-    assert_eq!(
-        classify_sops_stderr(b"Failed to get the data key required to decrypt the SOPS file."),
-        "data-key-unavailable"
-    );
-    assert_eq!(
-        classify_sops_stderr(b"open /nope: no such file or directory"),
-        "input-unreadable"
-    );
-    assert_eq!(
-        classify_sops_stderr(b"sops metadata not found"),
-        "missing-sops-metadata"
-    );
-    assert_eq!(classify_sops_stderr(b"a novel failure"), "unclassified");
-    assert_eq!(classify_sops_stderr(b""), "unclassified");
-}
+    let key = SecretName::parse("K").unwrap();
+    let logs = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .with_writer(CapturedLogs(std::sync::Arc::clone(&logs)))
+        .finish();
 
-#[test]
-fn unreachable_hardware_reports_itself_rather_than_an_internal_fault() {
-    // Both wrappings of a stale pcscd tunnel, taken from real output: the socket
-    // exists, so the reachability probe passes and sops is what discovers the key
-    // is gone. sops usually prefixes the plugin's name, but surfaces the plugin's
-    // own stderr verbatim when it does not.
-    let wrapped = b"age: yubikey plugin: Error while communicating with YubiKey: \
-PC/SC error: An internal communications error has been detected";
-    let raw = b"Error: Error while communicating with YubiKey: PC/SC error: \
-An internal communications error has been detected";
-    assert_eq!(classify_sops_stderr(wrapped), "yubikey-plugin-error");
-    assert_eq!(classify_sops_stderr(raw), "pcsc-communication-error");
-    for stderr in [wrapped.as_slice(), raw.as_slice()] {
-        assert_eq!(
-            failure_code(classify_sops_stderr(stderr)),
-            ErrCode::YubikeyUnreachable,
-            "a caller told to inspect journalctl for a sops spawn failure cannot act; \
-             an unreachable key is actionable"
-        );
-    }
+    let outcome = tracing::subscriber::with_default(subscriber, || decryptor.decrypt(&store, &key));
 
-    // A touch that never landed is an approval that did not happen, not an
-    // internal fault: sops gives the touch a shorter window than our request
-    // TTL, so a slow human loses the race inside sops.
-    assert_eq!(
-        classify_sops_stderr(
-            b"age: yubikey plugin: Failed to decrypt YubiKey stanza. Did you touch it?"
-        ),
-        "yubikey-stanza-undecryptable"
+    assert_eq!(outcome.err(), Some(ErrCode::Internal));
+    let output = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+    assert!(
+        output.contains("could not spawn sops") && output.contains("/nonexistent/sops"),
+        "the spawn failure left no cause in the log: {output}"
     );
-    assert_eq!(
-        failure_code("yubikey-stanza-undecryptable"),
-        ErrCode::Timeout,
-        "a missed touch must tell the caller to wait for the human, not to read \
-         the daemon's log about spawning sops"
-    );
-
-    // Everything genuinely unexplained stays Internal.
-    for label in [
-        "data-key-unavailable",
-        "input-unreadable",
-        "input-permission-denied",
-        "no-matching-identity",
-        "missing-sops-metadata",
-        "unclassified",
-        "stderr-unreadable",
-    ] {
-        assert_eq!(failure_code(label), ErrCode::Internal, "{label}");
-    }
 }
