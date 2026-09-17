@@ -263,8 +263,36 @@ A grant is `(session_token, key)`, held in broker memory.
   `(tty, boot-id)` as the grant scope; same touch flow; revoked when the tty
   vanishes. They are rejected outright from PTYs registered as agent-session
   ttys, and their scope is retained in the journald audit event.
-- Requests from other-UID peers: rejected (socket is 0600; SO_PEERCRED
-  double-checks).
+- Requests from other-UID peers: refused by the socket node, which is owner-only
+  (`S_IFSOCK`, this uid, mode exactly `0600`) from the moment it can be
+  connected to — created under `umask 0177` on the bind path rather than
+  `chmod`ed afterwards, since a peer that connected before a later `chmod`
+  would sit in the backlog carrying a mode the node never had; owned by systemd
+  (`SocketMode=0600`) under socket activation. The daemon proves that shape on
+  both paths before it serves — `stat` of the path it bound, or of the address
+  the activation fd is bound to — and refuses to start otherwise. `SO_PEERCRED`
+  is a double-check against that mode being bypassed, and it is deliberately
+  coarse: systemd's mount protections put a *user* unit in a private user
+  namespace mapping only its own uid, so the kernel reports *every* other real
+  uid — another user, root, a container's subordinate uid — as the overflow uid
+  (65534, the kernel default; a host that changes `kernel.overflowuid` fails
+  closed). The double-check accepts that one value and the daemon's own uid,
+  and refuses any other mapped uid. Who connects is therefore decided by the
+  node's mode in the peer's own namespace: the owning uid, or a process in a
+  sysbox container whose id-mapped mount presents the owner's files as its
+  own — the box user, running the session the box exists for. An admitted
+  overflow peer has exactly a same-uid host process's standing, including the
+  tokenless tty path and the `GRANTS`/`DENY`/`LOCK` controls: the same-UID
+  residual accepted above, not a new one. Token plus pidfd ancestry, walked
+  over host `/proc` (which container pids share), still bind every session
+  request. `tests/e2e-sysbox-peer.sh` proves the shape end to end: the
+  socket-activated, mount-protected daemon serves a registered container
+  session's child (audit line `peer_uid=65534`, verified session scope) and
+  refuses a second container process presenting the same token while the
+  registrant is alive. Rejected: admitting the overflow uid only for
+  `REGISTER` and token-bearing requests — it would refuse a box's `UNREGISTER`
+  and controls, need a protocol bump to carry a session on them, and defend a
+  boundary the socket mode already holds.
 
 ### Grant lifecycle
 
