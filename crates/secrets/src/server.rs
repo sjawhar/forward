@@ -1,8 +1,7 @@
 //! Unix-socket server coordination.
 
 use std::io::{Read, Write};
-use std::os::fd::{AsRawFd, BorrowedFd, FromRawFd};
-use std::os::unix::fs::PermissionsExt;
+use std::os::fd::AsRawFd;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, mpsc};
 use std::thread;
@@ -12,9 +11,8 @@ use std::time::Instant;
 
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
-use nix::sys::socket::sockopt::{AcceptConn, PeerCredentials, SockType as SocketType};
-use nix::sys::socket::{MsgFlags, SockType, UnixAddr, getsockname, getsockopt, recv, send};
-use nix::sys::stat::{SFlag, fstat};
+use nix::sys::socket::sockopt::PeerCredentials;
+use nix::sys::socket::{MsgFlags, getsockopt, recv, send};
 use nix::unistd::{Pid, geteuid};
 use zeroize::Zeroizing;
 
@@ -32,10 +30,12 @@ use crate::store::HumanStore;
 
 mod approval;
 mod dispatch;
+mod listener;
 mod subscribers;
 mod worker;
 
 use dispatch::{Outcome, dispatch, request_key};
+use listener::{listener, uid_is_authorized};
 use subscribers::{SubscriberHub, publish_current_authority};
 use worker::worker;
 
@@ -155,22 +155,6 @@ fn random_instance_id() -> std::io::Result<String> {
         }))
 }
 
-fn socket_activated() -> bool {
-    std::env::var("LISTEN_FDS").is_ok_and(|value| value == "1")
-        && std::env::var("LISTEN_PID")
-            .ok()
-            .and_then(|value| value.parse::<u32>().ok())
-            .is_some_and(|pid| pid == std::process::id())
-}
-
-fn activation_environment_present() -> bool {
-    std::env::var_os("LISTEN_FDS").is_some() || std::env::var_os("LISTEN_PID").is_some()
-}
-
-const fn peer_uid_is_authorized(peer_uid: u32, daemon_uid: u32) -> bool {
-    peer_uid == daemon_uid
-}
-
 #[derive(Debug)]
 struct AuditContext {
     key: String,
@@ -224,49 +208,6 @@ fn audit_context(request: &Request, shared: &Shared) -> AuditContext {
     audit
 }
 
-fn validate_activated_listener(fd: BorrowedFd<'_>) -> std::io::Result<()> {
-    let stat = fstat(fd).map_err(std::io::Error::other)?;
-    if !SFlag::from_bits_truncate(stat.st_mode).contains(SFlag::S_IFSOCK) {
-        return Err(std::io::Error::other("activation fd is not a socket"));
-    }
-    if getsockopt(&fd, SocketType).map_err(std::io::Error::other)? != SockType::Stream {
-        return Err(std::io::Error::other(
-            "activation fd is not a stream socket",
-        ));
-    }
-    if !getsockopt(&fd, AcceptConn).map_err(std::io::Error::other)? {
-        return Err(std::io::Error::other("activation socket is not listening"));
-    }
-    let _: UnixAddr = getsockname(fd.as_raw_fd()).map_err(std::io::Error::other)?;
-    Ok(())
-}
-
-fn listener(config: &Config) -> std::io::Result<UnixListener> {
-    if socket_activated() {
-        // SAFETY: fd 3 is valid for the duration of this call because activation
-        // descriptors are inherited from this process; `validate_activated_listener`
-        // verifies its socket type, protocol family, and listening state before adoption.
-        let fd = unsafe { BorrowedFd::borrow_raw(3) };
-        validate_activated_listener(fd)?;
-        // SAFETY: the borrowed fd was validated above and ownership transfers once
-        // into the resulting listener, which closes it exactly once on drop.
-        return Ok(unsafe { UnixListener::from_raw_fd(3) });
-    }
-    if activation_environment_present() {
-        return Err(std::io::Error::other(
-            "invalid socket activation environment",
-        ));
-    }
-    if let Err(error) = std::fs::remove_file(&config.socket_path)
-        && error.kind() != std::io::ErrorKind::NotFound
-    {
-        return Err(error);
-    }
-    let listener = UnixListener::bind(&config.socket_path)?;
-    std::fs::set_permissions(&config.socket_path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
-}
-
 fn read_frame(stream: &mut UnixStream) -> std::io::Result<Zeroizing<Vec<u8>>> {
     let mut read_buffer = Zeroizing::new(vec![0_u8; MAX_FRAME_BYTES + 1]);
     let mut frame = Zeroizing::new(Vec::with_capacity(MAX_FRAME_BYTES + 1));
@@ -300,7 +241,7 @@ fn read_frame(stream: &mut UnixStream) -> std::io::Result<Zeroizing<Vec<u8>>> {
 fn handle(mut stream: UnixStream, shared: &Shared) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT))?;
     let peer = getsockopt(&stream, PeerCredentials).map_err(std::io::Error::other)?;
-    if !peer_uid_is_authorized(peer.uid(), geteuid().as_raw()) {
+    if !uid_is_authorized(peer.uid(), geteuid().as_raw()) {
         tracing::warn!(peer_uid = peer.uid(), "connection rejected for foreign uid");
         return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
     }
@@ -352,6 +293,7 @@ fn handle(mut stream: UnixStream, shared: &Shared) -> std::io::Result<()> {
             tracing::info!(
                 key = %audit.key,
                 source = %source,
+                peer_uid = peer.uid(),
                 peer_pid = ?peer_pid,
                 caller_pid = ?caller.pid(),
                 scope_kind = ?decision.scope_kind,
@@ -546,7 +488,6 @@ pub fn serve(config: Config) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::os::fd::AsFd;
     use std::path::Path;
 
     use super::*;
@@ -634,18 +575,6 @@ mod tests {
             request_lane(&Request::Subscribe),
             ConnectionLane::Subscription
         ));
-    }
-
-    #[test]
-    fn rejects_a_non_socket_activation_fd() {
-        let file = tempfile::tempfile().unwrap();
-
-        assert!(validate_activated_listener(file.as_fd()).is_err());
-    }
-
-    #[test]
-    fn rejects_a_peer_uid_that_is_not_the_daemon_uid() {
-        assert!(!peer_uid_is_authorized(1000, 1001));
     }
 
     #[test]

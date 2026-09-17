@@ -65,7 +65,8 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | `src/grants.rs` | Scopes, session registrations, grant table, revocation. |
 | `src/requests.rs` | Request state machine, single-flight YubiKey queue, cooldown, pending limits. |
 | `src/audit.rs` | Sanitizes values shared by audit-log surfaces. |
-| `src/server.rs` | Socket activation, three connection lanes, per-connection `handle`, audit line. |
+| `src/server.rs` | Three connection lanes, per-connection `handle` (peer uid gate, pinning, dispatch), audit line. |
+| `src/server/listener.rs` | Creating or adopting the listening socket; proving its node is owner-only (`0600`); the peer uid gate that rests on that proof. |
 | `src/server/dispatch.rs` | Protocol-op routing and request/response decisions. |
 | `src/server/approval.rs` | Access resolution and the approval wait lifecycle. |
 | `src/server/worker.rs` | The single approval worker: dequeue → decrypt → insert grant. |
@@ -79,9 +80,10 @@ filenames in configured `secrets.human.d/` directories are brokered.
 |---|---|
 | Change how a request is authorized | `Registry::resolve`, `src/grants.rs:188`; `src/server/approval.rs:29` |
 | Change ancestry / peer identity | `src/peer.rs:46` (`from_stream`), `:97` (`descends_from`) |
+| Change which peers may connect at all | `assert_owner_only`, `src/server/listener.rs:59`; `uid_is_authorized`, `:38`; the rationale is `docs/design.md` "Requests from other-UID peers" |
 | Add or change a protocol op | `src/proto.rs:97` (requests), `src/proto/response.rs` |
 | Change source-root configuration | `Sources::config_path`, `src/config.rs:54`; `Sources::load`, `src/config.rs:70` |
-| Change what the audit line records | `src/server.rs:294`, context built at `:167`; sanitization in `src/audit.rs:19` |
+| Change what the audit line records | `src/server.rs:305`, context built at `:165`; sanitization in `src/audit.rs:19` |
 | Change how sops is invoked | `src/decrypt.rs:251`; failure classes at `:27` |
 | Change how the runtime directory is resolved | `resolveRuntimeDir`, `opencode/plugins/secretsd.ts`; `SocketPath::resolve` and `runtime_dir`, `src/client.rs:35` |
 | Change which socket either half connects to | `resolveSocketPath`, `opencode/plugins/secretsd.ts`; `BrokerClient::from_environment`, `src/client.rs:91` |

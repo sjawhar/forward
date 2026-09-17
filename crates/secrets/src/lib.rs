@@ -196,18 +196,14 @@ pub fn run(config: Config) -> std::io::Result<()> {
 pub fn serve_main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
+        .with_ansi(false)
         .with_target(false)
         .init();
 
-    let policy = match memlock_policy() {
-        Ok(policy) => policy,
-        Err(error) => {
-            tracing::error!(%error, "refusing to start without process hardening");
-            return std::process::ExitCode::FAILURE;
-        }
-    };
-
-    if let Err(error) = hardening::apply(policy) {
+    if let Err(error) = memlock_policy()
+        .map_err(str::to_owned)
+        .and_then(|policy| hardening::apply(policy).map_err(|error| error.to_string()))
+    {
         tracing::error!(%error, "refusing to start without process hardening");
         return std::process::ExitCode::FAILURE;
     }
