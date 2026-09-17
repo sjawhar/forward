@@ -62,6 +62,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | `src/hardening.rs` | `mlockall`, `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`. Fail-closed. |
 | `src/secret.rs` | `SecretBytes` (zeroize on drop), key-name validation, single-assignment dotenv parse. |
 | `src/decrypt.rs` | Spawning sops, timeout, killing the process group on cancel. |
+| `src/decrypt/classify.rs` | Reducing sops stderr to a stable label, and that label to an error code. Pure functions over bytes; the child's output never reaches a log. |
 | `src/grants.rs` | Scopes, session registrations, grant table, revocation. |
 | `src/requests.rs` | Request state machine, single-flight YubiKey queue, cooldown, pending limits. |
 | `src/audit.rs` | Sanitizes values shared by audit-log surfaces. |
@@ -84,7 +85,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | Add or change a protocol op | `src/proto.rs:97` (requests), `src/proto/response.rs` |
 | Change source-root configuration | `Sources::config_path`, `src/config.rs:54`; `Sources::load`, `src/config.rs:70` |
 | Change what the audit line records | `src/server.rs:305`, context built at `:165`; sanitization in `src/audit.rs:19` |
-| Change how sops is invoked | `src/decrypt.rs:251`; failure classes at `:27` |
+| Change how sops is invoked | `src/decrypt.rs:188`; failure classes in `src/decrypt/classify.rs:16` |
 | Change how the runtime directory is resolved | `resolveRuntimeDir`, `opencode/plugins/secretsd.ts`; `SocketPath::resolve` and `runtime_dir`, `src/client.rs:35` |
 | Change which socket either half connects to | `resolveSocketPath`, `opencode/plugins/secretsd.ts`; `BrokerClient::from_environment`, `src/client.rs:91` |
 | Change the session token file's lifetime | `restoreTokenFile`, `opencode/plugins/secretsd.ts`; `ensureState` beside it |
