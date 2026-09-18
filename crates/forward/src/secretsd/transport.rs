@@ -2,7 +2,7 @@ use std::os::linux::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
-use proto::{BrokerClient, BrokerResponse, ClientError};
+use proto::{BrokerClient, BrokerResponse, ClientError, PROTOCOL_VERSION};
 use zeroize::Zeroizing;
 
 use super::{BrokerError, Verb};
@@ -122,9 +122,9 @@ fn map_error(error: ClientError, path: &Path, verb: Verb<'_>) -> BrokerError {
             Verb::Redeem => BrokerError::Protocol("redeem timed out".to_owned()),
             Verb::Hello => BrokerError::Protocol("HELLO timed out".to_owned()),
         },
-        ClientError::VersionHandshake => {
-            BrokerError::Protocol("broker did not confirm protocol version 3".to_owned())
-        }
+        ClientError::VersionHandshake => BrokerError::Protocol(format!(
+            "broker did not confirm protocol version {PROTOCOL_VERSION}"
+        )),
         ClientError::Broker(code) => map_code(code.wire(), verb),
         ClientError::InvalidRequest | ClientError::InvalidResponse => {
             BrokerError::Protocol("malformed broker exchange".to_owned())

@@ -38,7 +38,9 @@ are:
 - **`secrets lock` ran.** It wipes every grant on the daemon, for every session, on purpose.
 - **The key's backing file was edited or rotated.** The daemon invalidates a grant the moment
   the ciphertext it decrypted changes; the next request needs a fresh touch.
-- **The 12-hour backstop expired.** Vanishingly unlikely inside a normal session.
+- **The grant's own backstop expired.** 12h by default, or up to a day when the
+  caller ran `secrets get KEY --ttl <duration>`. Vanishingly unlikely inside a
+  normal agent session.
 
 "Grants expire quickly" is a superstition, not a fact — forming it and blaming the broker for
 an unrelated failure (a typo'd key name, a missing config entry, your own retry loop) is
@@ -127,6 +129,7 @@ paste its output into a message. A value in a transcript means a rotation.
 | Command | Does |
 |---|---|
 | `secrets get KEY` | JSON status; pre-authorizes (prompts for a touch if the key needs one) |
+| `secrets get KEY --ttl 8h` | same, but the freshly created grant lives up to 8h instead of the 12h default (operator use; capped server-side, ignored on a live grant) |
 | `secrets get KEY --value` | prints the secret |
 | `secrets get KEY --no-request` | status only; never prompts |
 | `secrets KEY [KEY2 ...] -- cmd` | runs `cmd` with the keys in its environment |

@@ -50,25 +50,6 @@ pub fn describe_refusal(reason: &str) -> &'static str {
     }
 }
 
-/// `45s`, `30m`, or `2h` to seconds, for the CLI's `--ttl`.
-pub fn parse_ttl(value: &str) -> Option<u64> {
-    if !value.is_ascii() || value.len() < 2 {
-        return None;
-    }
-    let (number, unit) = value.split_at(value.len() - 1);
-    let multiplier = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3_600,
-        _ => return None,
-    };
-    number
-        .parse::<u64>()
-        .ok()?
-        .checked_mul(multiplier)
-        .filter(|ttl| *ttl > 0)
-}
-
 /// Ask the daemon whether a grant for this caller could succeed, without
 /// spending a receipt. Runs before the broker's YubiKey ceremony so a
 /// deterministic refusal never costs the human a touch.

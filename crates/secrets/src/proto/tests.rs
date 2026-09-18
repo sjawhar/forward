@@ -1,3 +1,5 @@
+use zeroize::Zeroizing;
+
 use super::*;
 
 #[test]
@@ -16,8 +18,50 @@ fn parses_get_with_token_and_tty() {
             key: "DEEL_API_KEY".to_owned(),
             token_hex: Some(Zeroizing::new("ab12".to_owned())),
             tty: Some("/dev/pts/3".to_owned()),
+            ttl_secs: None,
         }
     );
+}
+
+#[test]
+fn parses_a_requested_grant_ttl_on_get_and_request() {
+    assert_eq!(
+        parse_request(b"GET\tkey=K\tttl=28800"),
+        Ok(Request::Get {
+            key: "K".to_owned(),
+            token_hex: None,
+            tty: None,
+            ttl_secs: Some(28_800),
+        })
+    );
+    assert_eq!(
+        parse_request(b"REQUEST\tkey=K\tttl=45"),
+        Ok(Request::RequestGrant {
+            key: "K".to_owned(),
+            token_hex: None,
+            tty: None,
+            ttl_secs: Some(45),
+        })
+    );
+}
+
+#[test]
+fn omitted_ttl_is_no_preference_not_a_default_value() {
+    let Ok(Request::Get { ttl_secs, .. }) = parse_request(b"GET\tkey=K") else {
+        panic!("expected a parsed Get request");
+    };
+    assert_eq!(ttl_secs, None);
+}
+
+#[test]
+fn rejects_a_zero_or_non_numeric_ttl() {
+    for line in [
+        b"GET\tkey=K\tttl=0".as_slice(),
+        b"GET\tkey=K\tttl=soon".as_slice(),
+        b"GET\tkey=K\tttl=-1".as_slice(),
+    ] {
+        assert_eq!(parse_request(line), Err(ErrCode::BadRequest), "{line:?}");
+    }
 }
 
 #[test]
@@ -38,6 +82,7 @@ fn parses_get_without_token() {
             key: "K".to_owned(),
             token_hex: None,
             tty: Some("/dev/pts/3".to_owned()),
+            ttl_secs: None,
         }
     );
 }

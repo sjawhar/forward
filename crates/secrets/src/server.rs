@@ -551,6 +551,7 @@ mod tests {
             yubikey_probe_timeout: Duration::from_secs(2),
             touch_policy: crate::TouchPolicy::Cached,
             max_grant: Duration::from_secs(1),
+            max_requested_grant: Duration::from_secs(1),
             cooldown: Duration::from_secs(16),
             request_ttl: Duration::from_secs(1),
             max_pending_per_scope: 1,
@@ -789,6 +790,7 @@ mod tests {
             key: "DEEL_API_KEY".to_owned(),
             token_hex: Some(Zeroizing::new(token_hex)),
             tty: None,
+            ttl_secs: None,
         };
 
         // When audit metadata is collected for the request.

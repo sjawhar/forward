@@ -10,7 +10,7 @@ use zeroize::Zeroizing;
 
 const TOKEN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-const HELLO_OK: &str = "OK\tversion=3 instance=abc123\n";
+const HELLO_OK: &str = "OK\tversion=4 instance=abc123\n";
 static AUTHORIZE_ENV: Mutex<()> = Mutex::new(());
 
 struct AuthorizeEnvironment {
@@ -61,7 +61,7 @@ impl FakeBroker {
         let listener = UnixListener::bind(&path).unwrap();
         let worker = thread::spawn(move || {
             let steps = [
-                ("HELLO\tversion=3\n", HELLO_OK),
+                ("HELLO\tversion=4\n", HELLO_OK),
                 (
                     "AUTHORIZE\tcap=browser\ttoken=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
                     reply,

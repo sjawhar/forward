@@ -97,7 +97,7 @@ fn an_old_daemon_maps_unknown_op_to_upgrade_guidance() {
 #[test]
 fn a_version_mismatch_is_a_protocol_error() {
     let broker = FakeBroker::start(vec![Step {
-        expected: "HELLO\tversion=3\n".to_owned(),
+        expected: "HELLO\tversion=4\n".to_owned(),
         reply: Reply::Text("OK\tversion=2 instance=abc\n".to_owned()),
     }]);
 

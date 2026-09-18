@@ -19,11 +19,17 @@ pub(super) fn write_status(name: &SecretName, status: TierStatus) -> Result<(), 
     // A key name is validated as [A-Za-z_][A-Za-z0-9_]*, so it needs no escaping.
     match status {
         TierStatus::Agent => writeln!(stdout, r#"{{"key":"{}","tier":"agent"}}"#, name.as_str()),
-        TierStatus::Human { grant_active } => writeln!(
-            stdout,
-            r#"{{"key":"{}","tier":"human","grant":{grant_active}}}"#,
-            name.as_str()
-        ),
+        TierStatus::Human {
+            grant_active,
+            ttl_secs,
+        } => {
+            let ttl_json = ttl_secs.map_or_else(|| "null".to_owned(), |ttl| ttl.to_string());
+            writeln!(
+                stdout,
+                r#"{{"key":"{}","tier":"human","grant":{grant_active},"ttl":{ttl_json}}}"#,
+                name.as_str()
+            )
+        }
     }
     .map_err(CliError::Stdout)
 }
@@ -31,7 +37,12 @@ pub(super) fn write_status(name: &SecretName, status: TierStatus) -> Result<(), 
 #[derive(Clone, Copy)]
 pub(super) enum TierStatus {
     Agent,
-    Human { grant_active: bool },
+    Human {
+        grant_active: bool,
+        /// The live grant's remaining lifetime, when the caller asked for a
+        /// specific `--ttl` and the broker reported one back.
+        ttl_secs: Option<u64>,
+    },
 }
 
 pub(super) fn active_grant(name: &SecretName, grants: &[u8]) -> Result<bool, CliError> {

@@ -1,4 +1,4 @@
-//! Client for the broker's capability verbs, protocol v3.
+//! Client for the broker's capability verbs, protocol v4.
 //!
 //! forward is not a secrets client: nothing here ever requests, receives, or
 //! forwards a secret value. AUTHORIZE asks the broker to run its YubiKey touch
