@@ -51,6 +51,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError
             let context = Context::from_environment()?;
             super::edit::human(
                 &context.sources,
+                &context.agent,
                 &context.human,
                 &key,
                 source.as_ref(),

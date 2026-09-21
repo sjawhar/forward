@@ -1,6 +1,5 @@
 //! Per-invocation client state and the subcommand bodies that use it.
 
-use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::ffi::OsStringExt;
@@ -17,7 +16,7 @@ use crate::config::{SourceRoot, Sources};
 use crate::secret::{SecretBytes, SecretName};
 
 pub(super) struct Context {
-    agent: AgentStore,
+    pub(super) agent: AgentStore,
     pub(super) human: HumanNames,
     pub(super) sources: Sources,
 }
@@ -110,17 +109,24 @@ impl Context {
         }
     }
 
+    /// Every key in both tiers. A key present in both is reported here and
+    /// refused on read; the listing itself never fails on one, because this is
+    /// the command the refusal tells the human to run.
     pub(super) fn list(&self) -> Result<(), CliError> {
         let agent = self.agent.all()?;
-        self.reject_duplicates(&agent)?;
         let mut stdout = std::io::stdout().lock();
         for name in agent.keys() {
             writeln!(stdout, "{}", name.as_str()).map_err(CliError::Stdout)?;
         }
         for (name, location) in self.human.iter() {
+            let clash = if agent.contains_key(name) {
+                "; ALSO agent tier -- ambiguous, reads refuse"
+            } else {
+                ""
+            };
             writeln!(
                 stdout,
-                "{}  (human tier: {})",
+                "{}  (human tier: {}{clash})",
                 name.as_str(),
                 location.label
             )
@@ -147,27 +153,19 @@ impl Context {
         Err(CliError::Exec(command.exec()))
     }
 
+    /// The value of one key. Only that key's own tier membership matters: a
+    /// different key sitting in both tiers is that key's problem, not a reason
+    /// to refuse this one.
     fn value(&self, name: &SecretName, ttl_secs: Option<u64>) -> Result<SecretBytes, CliError> {
-        let agent = self.agent.all()?;
         if self.human.contains(name) {
-            self.reject_duplicates(&agent)?;
+            if self.agent.contains(name)? {
+                return Err(CliError::AmbiguousKey(name.clone()));
+            }
             return HumanClient::from_environment()
                 .and_then(|client| client.get(name, ttl_secs))
                 .map_err(CliError::from_client);
         }
-        agent
-            .get(name)
-            .cloned()
-            .ok_or_else(|| CliError::MissingSecret(name.clone()))
-    }
-
-    fn reject_duplicates(&self, agent: &BTreeMap<SecretName, SecretBytes>) -> Result<(), CliError> {
-        for (name, _) in self.human.iter() {
-            if agent.contains_key(name) {
-                return Err(CliError::AmbiguousKey(name.clone()));
-            }
-        }
-        Ok(())
+        self.agent.value(name)
     }
 
     pub(super) fn grants() -> Result<(), CliError> {

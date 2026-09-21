@@ -19,8 +19,25 @@ impl fmt::Display for CliError {
             Self::MissingSecret(name) => write!(formatter, "secret '{}' not found", name.as_str()),
             Self::AmbiguousKey(name) => write!(
                 formatter,
-                "key '{}' exists in both agent and human tiers; refusing ambiguous access",
+                "key '{}' exists in both agent and human tiers; refusing ambiguous access -- keep it in one tier: `secrets list` shows both locations",
                 name.as_str()
+            ),
+            Self::AgentKeyExists(name) => write!(
+                formatter,
+                "key '{}' is an agent-tier key; refusing a human-tier copy -- remove the agent-tier line first (`secrets list` shows where), or choose another name",
+                name.as_str()
+            ),
+            Self::HumanKeyExists(name) => write!(
+                formatter,
+                "key '{}' is a human-tier key; refusing to save an agent-tier copy -- remove the human-tier file first (`secrets list` shows where), or choose another name",
+                name.as_str()
+            ),
+            Self::AgentFileChangedDuringEdit => formatter.write_str(
+                "the agent-tier file changed while it was being edited; nothing saved -- re-run the edit on the current contents",
+            ),
+            Self::SopsEditFailed(status) => write!(
+                formatter,
+                "sops edit exited unsuccessfully ({status}); the agent-tier file is unchanged"
             ),
             Self::SopsStart(error) => write!(formatter, "could not start sops: {error}"),
             Self::SopsFailed => formatter.write_str("sops could not decrypt the agent-tier secrets"),

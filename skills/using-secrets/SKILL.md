@@ -133,7 +133,7 @@ paste its output into a message. A value in a transcript means a rotation.
 | `secrets get KEY --value` | prints the secret |
 | `secrets get KEY --no-request` | status only; never prompts |
 | `secrets KEY [KEY2 ...] -- cmd` | runs `cmd` with the keys in its environment |
-| `secrets list` | every key name and its tier; never decrypts |
+| `secrets list` | every key name and its tier; decrypts agent-tier files locally, never contacts the daemon or prompts; a key in both tiers is marked `ALSO agent tier` |
 | `secrets grants` | which human-tier keys are currently unlocked |
 | `secrets_request(KEY)` tool call | requests approval only; never returns the value |
 
