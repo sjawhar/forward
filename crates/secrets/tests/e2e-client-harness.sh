@@ -340,50 +340,53 @@ fi
 assert_sops_counts 3 0 'stdin-write rotation'
 report '7/14 stored and rotated ciphertext under the human rule; real-sops total=3 daemon=0'
 
+# A human-tier fetch decides the key's tier from encrypted dotenv names and
+# never runs sops on the client; the only real-sops call is the daemon's
+# decrypt on the first, uncached get of each key.
 report '8/14 fetching the human value through the real client'
 first_get="$(run_client get "$human_key" --value)"
 [[ "$first_get" == "$human_value" ]] || fail 'first get returned an unexpected value'
-assert_sops_counts 5 1 'first get'
-report '8/14 get returned the expected value [redacted]; real-sops total=5 daemon=1'
+assert_sops_counts 4 1 'first get'
+report '8/14 get returned the expected value [redacted]; real-sops total=4 daemon=1'
 
 report '9/14 fetching the cached human value through the real client'
 second_get="$(run_client get "$human_key" --value)"
 [[ "$second_get" == "$human_value" ]] || fail 'cached get returned an unexpected value'
-assert_sops_counts 6 1 'cached get'
-report '9/14 cached get returned the expected value [redacted]; real-sops total=6 daemon=1'
+assert_sops_counts 4 1 'cached get'
+report '9/14 cached get returned the expected value [redacted]; real-sops total=4 daemon=1'
 
 report '10/14 injecting the cached value into a child environment'
 injected="$(run_client "$human_key" -- sh -c 'printf %s "$E2E_KEY"')"
 [[ "$injected" == "$human_value" ]] || fail 'injection returned an unexpected child value'
-assert_sops_counts 7 1 'injection'
-report '10/14 injection returned the expected value [redacted]; real-sops total=7 daemon=1'
+assert_sops_counts 4 1 'injection'
+report '10/14 injection returned the expected value [redacted]; real-sops total=4 daemon=1'
 
 report '11/14 fetching a root1 local human key and checking its audit source'
 local_get="$(run_client get "$local_human_key" --value)"
 [[ "$local_get" == "$local_human_value" ]] || fail 'local get returned an unexpected value'
 grep -E --quiet 'source.*dotfiles\.local' "$daemon_log" || fail 'local key audit did not record source=dotfiles.local'
-assert_sops_counts 9 2 'local human get'
-report '11/14 local human get returned the expected value [redacted]; real-sops total=9 daemon=2'
+assert_sops_counts 5 2 'local human get'
+report '11/14 local human get returned the expected value [redacted]; real-sops total=5 daemon=2'
 
 report '12/14 fetching a human key that exists only in the second source root'
 root2_get="$(run_client get "$root2_human_key" --value)"
 [[ "$root2_get" == "$root2_human_value" ]] || fail 'root2 get returned an unexpected value'
-assert_sops_counts 11 3 'root2 human get'
-report '12/14 root2 human get returned the expected value [redacted]; real-sops total=11 daemon=3'
+assert_sops_counts 6 3 'root2 human get'
+report '12/14 root2 human get returned the expected value [redacted]; real-sops total=6 daemon=3'
 
 report '13/14 listing both tiers and active grants'
 listing="$(run_client list)"
 [[ "$listing" == $'AGENT_KEY\nCREATED_KEY  (human tier: dotfiles)\nE2E_KEY  (human tier: dotfiles)\nLOCAL_KEY  (human tier: dotfiles.local)\nPIPED_HUMAN_KEY  (human tier: dotfiles.local)\nROOT2_KEY  (human tier: private)' ]] || fail 'list returned unexpected tier names'
-assert_sops_counts 12 3 'list'
+assert_sops_counts 7 3 'list'
 grants="$(run_client grants)"
 [[ "$grants" =~ $grants_pattern ]] || fail 'grants did not show every session grant'
-assert_sops_counts 12 3 'grants'
-report '13/14 list and grants returned expected redacted state; real-sops total=12 daemon=3'
+assert_sops_counts 7 3 'grants'
+report '13/14 list and grants returned expected redacted state; real-sops total=7 daemon=3'
 
 report '14/14 locking the daemon and confirming every grant is cleared'
 run_client lock
-assert_sops_counts 12 3 'lock'
+assert_sops_counts 7 3 'lock'
 [[ "$(run_client grants)" == 'no active grants' ]] || fail 'lock did not clear the session grant'
-assert_sops_counts 12 3 'post-lock grants'
-report '14/14 lock cleared every grant; real-sops total=12 daemon=3'
+assert_sops_counts 7 3 'post-lock grants'
+report '14/14 lock cleared every grant; real-sops total=7 daemon=3'
 report 'PASS: real daemon, real client, and real sops completed on scratch state'

@@ -44,26 +44,6 @@ fn completions_render_the_subcommands_for_bash() {
 }
 
 #[test]
-fn duplicate_agent_and_human_name_fails_closed_before_output() {
-    let fixture = Fixture::agent("DUP=agent-value\n");
-    fixture.write_human_name("DUP");
-
-    for arguments in [
-        ["get", "DUP"].as_slice(),
-        ["list"].as_slice(),
-        ["DUP", "--", "true"].as_slice(),
-    ] {
-        let output = fixture.run_minimal(arguments);
-
-        assert_ne!(output.status.code(), Some(0));
-        assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("exists in both agent and human tiers")
-        );
-    }
-}
-
-#[test]
 fn get_rejects_path_traversal_before_constructing_a_path() {
     let fixture = Fixture::agent("AGENT_ONLY=agent-value\n");
 

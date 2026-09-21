@@ -516,11 +516,12 @@ fn edit_human_leaves_the_runtime_dir_empty() {
 }
 
 #[test]
-fn edit_human_blocks_on_the_directory_lock() {
+fn edit_human_blocks_on_the_source_root_lock() {
+    // The write lock is the source root's directory, shared with agent-tier edits.
     let fixture = Fixture::human("EXISTING_KEY");
-    let human_dir = fixture.dotfiles_dir().join("secrets.human.d");
-    let target = human_dir.join("NEW_KEY.env");
-    let lock = Flock::lock(fs::File::open(&human_dir).unwrap(), FlockArg::LockExclusive).unwrap();
+    let target = fixture.dotfiles_dir().join("secrets.human.d/NEW_KEY.env");
+    let root = fs::File::open(fixture.dotfiles_dir()).unwrap();
+    let lock = Flock::lock(root, FlockArg::LockExclusive).unwrap();
     let mut child = fixture
         .command(["edit-human", "NEW_KEY"])
         .stdin(Stdio::piped())
@@ -535,7 +536,7 @@ fn edit_human_blocks_on_the_directory_lock() {
     thread::sleep(Duration::from_millis(300));
     assert!(
         child.try_wait().unwrap().is_none(),
-        "the second writer did not block on the human-secret directory lock"
+        "the second writer did not block on the source root lock"
     );
     drop(lock);
     let output = child.wait_with_output().unwrap();

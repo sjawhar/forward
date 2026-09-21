@@ -302,7 +302,8 @@ fn edit_human_without_flags_uses_an_existing_keys_actual_root_and_file() {
 
     let output = Fixture::run_in_tty(fixture.command(["edit-human", "EXISTING"]));
 
-    assert_eq!(output.status.code(), Some(64));
+    // The fake sops refuses an edit invocation; what matters is which file it got.
+    assert_ne!(output.status.code(), Some(0));
     assert_sops_path(&fixture, &expected);
 }
 
@@ -400,7 +401,8 @@ fn edit_human_accepts_correct_source_and_local_assertions_for_an_existing_key() 
         "--local",
     ]));
 
-    assert_eq!(output.status.code(), Some(64));
+    // The fake sops refuses an edit invocation; what matters is which file it got.
+    assert_ne!(output.status.code(), Some(0));
     assert_sops_path(&fixture, &expected);
 }
 

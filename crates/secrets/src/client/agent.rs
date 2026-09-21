@@ -85,18 +85,16 @@ impl AgentStore {
     /// Read non-metadata agent-tier key names without decrypting their values.
     pub(crate) fn names_in(path: &Path) -> Result<Vec<SecretName>, CliError> {
         let encrypted = fs::read(path).map_err(CliError::AgentKeySet)?;
+        Self::names_of(&encrypted)
+    }
+
+    /// Non-metadata key names in dotenv bytes, ciphertext or plaintext (sops
+    /// keeps dotenv names in the clear). Values are not looked at; a caller
+    /// holding plaintext keeps it in its own zeroizing buffer.
+    pub(crate) fn names_of(dotenv: &[u8]) -> Result<Vec<SecretName>, CliError> {
         let mut names = Vec::new();
-        for line in encrypted.split(|byte| *byte == b'\n') {
-            let line = line.strip_suffix(b"\r").unwrap_or(line);
-            if line.is_empty() || line.first() == Some(&b'#') {
-                continue;
-            }
-            let Some(separator) = line.iter().position(|byte| *byte == b'=') else {
-                return Err(CliError::InvalidDotenv);
-            };
-            let raw_name = line.get(..separator).ok_or(CliError::InvalidDotenv)?;
-            let name = std::str::from_utf8(raw_name).map_err(|_| CliError::InvalidDotenv)?;
-            let name = SecretName::parse(name).map_err(|_| CliError::InvalidSecretName)?;
+        for line in assignment_lines(dotenv) {
+            let (name, _) = parse_assignment_line(line)?;
             if !name.as_str().starts_with("sops_") {
                 names.push(name);
             }
@@ -105,22 +103,31 @@ impl AgentStore {
     }
 }
 
+/// The non-empty, non-comment lines of a dotenv body, CR stripped.
+fn assignment_lines(dotenv: &[u8]) -> impl Iterator<Item = &[u8]> {
+    dotenv
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .filter(|line| !line.is_empty() && line.first() != Some(&b'#'))
+}
+
+/// One `NAME=VALUE` line as a parsed name and its raw value bytes.
+fn parse_assignment_line(line: &[u8]) -> Result<(SecretName, &[u8]), CliError> {
+    let separator = line
+        .iter()
+        .position(|byte| *byte == b'=')
+        .ok_or(CliError::InvalidDotenv)?;
+    let (raw_name, raw_value) = line.split_at(separator);
+    let name = std::str::from_utf8(raw_name).map_err(|_| CliError::InvalidDotenv)?;
+    let name = SecretName::parse(name).map_err(|_| CliError::InvalidSecretName)?;
+    let value = raw_value.get(1..).ok_or(CliError::InvalidDotenv)?;
+    Ok((name, value))
+}
+
 fn parse_dotenv(plaintext: &[u8]) -> Result<BTreeMap<SecretName, SecretBytes>, CliError> {
     let mut values = BTreeMap::new();
-    for line in plaintext.split(|byte| *byte == b'\n') {
-        let line = line.strip_suffix(b"\r").unwrap_or(line);
-        if line.is_empty() || line.first() == Some(&b'#') {
-            continue;
-        }
-        let Some(separator) = line.iter().position(|byte| *byte == b'=') else {
-            return Err(CliError::InvalidDotenv);
-        };
-        let (raw_name, raw_value) = line.split_at(separator);
-        let name = std::str::from_utf8(raw_name).map_err(|_| CliError::InvalidDotenv)?;
-        let name = SecretName::parse(name).map_err(|_| CliError::InvalidSecretName)?;
-        let Some(value) = raw_value.strip_prefix(b"=") else {
-            return Err(CliError::InvalidDotenv);
-        };
+    for line in assignment_lines(plaintext) {
+        let (name, value) = parse_assignment_line(line)?;
         if value.contains(&b'\0') {
             return Err(CliError::InvalidDotenv);
         }

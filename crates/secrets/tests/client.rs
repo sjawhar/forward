@@ -30,6 +30,10 @@ mod edit_human;
 mod multi_source;
 #[path = "client/sources.rs"]
 mod sources;
+#[path = "client/staged_edit.rs"]
+mod staged_edit;
+#[path = "client/tiers.rs"]
+mod tiers;
 
 #[test]
 fn exact_payload_accepts_declared_non_nul_bytes() {

@@ -21,8 +21,18 @@ pub enum CliError {
     InvalidTtl(String),
     /// A requested agent-tier key was absent.
     MissingSecret(SecretName),
-    /// A key exists in both storage tiers and access is denied.
+    /// The requested key exists in both storage tiers and access is denied.
     AmbiguousKey(SecretName),
+    /// A human-tier write named a key the agent tier already holds.
+    AgentKeyExists(SecretName),
+    /// An agent-tier edit named a key the human tier already holds.
+    HumanKeyExists(SecretName),
+    /// The agent-tier file was replaced by another writer while sops edited a
+    /// staged copy of it.
+    AgentFileChangedDuringEdit,
+    /// `sops` edited a staged copy of an agent-tier file and exited
+    /// unsuccessfully; the original was not touched.
+    SopsEditFailed(std::process::ExitStatus),
     /// Starting `sops` failed.
     SopsStart(std::io::Error),
     /// `sops` exited unsuccessfully.
@@ -130,6 +140,10 @@ impl std::error::Error for CliError {
             | Self::InvalidTtl(_)
             | Self::MissingSecret(_)
             | Self::AmbiguousKey(_)
+            | Self::AgentKeyExists(_)
+            | Self::HumanKeyExists(_)
+            | Self::AgentFileChangedDuringEdit
+            | Self::SopsEditFailed(_)
             | Self::SopsFailed
             | Self::InvalidDotenv
             | Self::InvalidHumanFile

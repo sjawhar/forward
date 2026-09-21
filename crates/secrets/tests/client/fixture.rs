@@ -1,6 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
-use std::os::unix::fs::{PermissionsExt, symlink};
+use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 
@@ -49,57 +49,11 @@ impl Fixture {
             bin_dir.join("sops"),
         )
         .unwrap();
-        fs::write(
+        symlink(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/fake-editor"),
             &editor,
-            r#"#!/bin/bash
-set -eu
-
-if ! printf '%s' "$FAKE_EDITOR_EXPECTED" | cmp -s - "$1"; then
-  exit 70
-fi
-
-case "$FAKE_EDITOR_MODE" in
-  valid-human)
-    printf '%s=updated\n' "$FAKE_EDITOR_KEY" > "$1"
-    ;;
-  valid-agent)
-    printf '%s\n' 'AGENT_TEST_KEY=updated' > "$1"
-    ;;
-  rename-human)
-    printf '%s=renamed\n' "$FAKE_EDITOR_KEY" > "$1.successor"
-    chmod 600 "$1.successor"
-    mv "$1.successor" "$1"
-    ;;
-  rename-human-wide)
-    printf '%s=renamed\n' "$FAKE_EDITOR_KEY" > "$1.successor"
-    chmod 644 "$1.successor"
-    mv "$1.successor" "$1"
-    ;;
-  rename-agent)
-    printf '%s\n' 'AGENT_TEST_KEY=renamed' > "$1.successor"
-    chmod 600 "$1.successor"
-    mv "$1.successor" "$1"
-    ;;
-  wrong-name)
-    printf '%s\n' 'WRONG_KEY=updated' > "$1"
-    ;;
-  extra-assignment)
-    printf '%s=updated\n%s\n' "$FAKE_EDITOR_KEY" 'EXTRA_KEY=updated' > "$1"
-    ;;
-  empty-value)
-    printf '%s=\n' "$FAKE_EDITOR_KEY" > "$1"
-    ;;
-  fail)
-    exit 71
-    ;;
-  *)
-    exit 72
-    ;;
-esac
-"#,
         )
         .unwrap();
-        fs::set_permissions(&editor, fs::Permissions::from_mode(0o700)).unwrap();
 
         let inherited_path = std::env::var_os("PATH").unwrap();
         let path = std::env::join_paths(
@@ -138,16 +92,16 @@ esac
     fn add_root(&self, name: &str) {
         let root_dir = self.root_dir(name);
         fs::create_dir_all(&root_dir).unwrap();
+        self.add_root_at(name, &root_dir);
+    }
+
+    /// Register `path` as source root `name` without creating it.
+    fn add_root_at(&self, name: &str, path: &Path) {
         let mut config = fs::OpenOptions::new()
             .append(true)
             .open(&self.config_path)
             .unwrap();
-        writeln!(
-            config,
-            "\n[source.{name}]\npath = \"{}\"",
-            root_dir.display()
-        )
-        .unwrap();
+        writeln!(config, "\n[source.{name}]\npath = \"{}\"", path.display()).unwrap();
     }
 
     fn write_human_name_in(&self, root: &str, file_name: &str) {
@@ -312,6 +266,10 @@ esac
 
     fn dotfiles_dir(&self) -> &Path {
         &self.dotfiles_dir
+    }
+
+    fn editor(&self) -> &Path {
+        &self.editor
     }
 
     fn root_dir(&self, root: &str) -> PathBuf {
