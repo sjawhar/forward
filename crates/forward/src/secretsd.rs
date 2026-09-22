@@ -84,7 +84,7 @@ pub enum BrokerError {
         #[source]
         source: std::io::Error,
     },
-    #[error("forward: secretsd peer at {path} did not pass uid and executable verification")]
+    #[error("forward: secretsd peer at {path} is not this user (SO_PEERCRED uid check)")]
     UntrustedPeer { path: PathBuf },
     #[error("forward: secretsd authority subscription closed")]
     SubscriptionClosed,
