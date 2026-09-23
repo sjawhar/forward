@@ -212,9 +212,10 @@ async function ensureRegistered(anchor: SharedAnchor): Promise<SessionState> {
 /// token file and therefore the root session's broker identity. Synchronous:
 /// `ensureTokenFile` re-materializes a deleted token file on the fly.
 ///
-/// The token file travels twice. omp's bash tool ignores a spawnHook's `env`
-/// (it takes no per-call environment) but runs the `command` the hook returns,
-/// so the command itself exports the variable; `env` still carries it for
+/// The token file travels twice. omp's agent bash tool ignores a spawnHook's
+/// `env` (it takes no per-call environment) but runs the `command` the hook
+/// returns, so the command itself exports the variable. `env` still carries it
+/// for omp's `!` user-shell path, which applies the hook's env delta, and for
 /// hosts whose bash tool honours it.
 export function injectSessionToken(spawnCtx: { command?: string; env?: Record<string, string> }): {
 	command?: string;
