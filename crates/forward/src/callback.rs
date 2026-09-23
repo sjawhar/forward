@@ -55,12 +55,47 @@ pub fn request(cfg: &Config, leases: &Leases, port: u16) {
 /// Serve `port` on laptop loopback, relaying each connection to the devbox
 /// bridge. Port `0` binds an ephemeral port and returns the number chosen.
 pub fn request_on(cfg: &Config, leases: &Leases, port: u16) -> Option<u16> {
-    let ttl = Duration::from_secs(cfg.forward_ttl_secs);
+    serve_on(cfg, leases, port, Duration::from_secs(cfg.forward_ttl_secs))
+        .map_err(|error| eprintln!("forward: {error}"))
+        .ok()
+}
+
+/// Why a callback port is not being served.
+///
+/// Displayed without the `forward:` prefix its siblings carry: a caller either
+/// prefixes it for the log, or puts it on the wire for the devbox to report.
+#[derive(Debug, thiserror::Error)]
+pub enum ServeError {
+    #[error("no literal peer address; not serving callback port {port}")]
+    NoPeer { port: u16 },
+    #[error("cannot serve callback port {port}: {source}")]
+    Bind {
+        port: u16,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("cannot determine callback port: {source}")]
+    Unnamed {
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not start serving callback port {port}")]
+    NotStarted { port: u16 },
+}
+
+/// Serve `port` for `ttl`, refreshing a lease already live. The error says why
+/// the port is not served, for a caller that has to report it.
+pub fn serve_on(
+    cfg: &Config,
+    leases: &Leases,
+    port: u16,
+    ttl: Duration,
+) -> Result<u16, ServeError> {
     if port != 0 {
         match leases.refresh(port, ttl) {
             Refresh::Live => {
                 eprintln!("forward: refreshed callback lease for port {port}");
-                return Some(port);
+                return Ok(port);
             }
             Refresh::Releasing => leases.wait_until_released(port),
             Refresh::Absent => {}
@@ -69,29 +104,28 @@ pub fn request_on(cfg: &Config, leases: &Leases, port: u16) -> Option<u16> {
     // Fail closed before binding: a port we cannot relay is a port squatted on
     // some other tool for a whole TTL.
     let Ok(Some(peer)) = cfg.peer_ip() else {
-        eprintln!("forward: no literal peer address; not serving callback port {port}");
-        return None;
+        return Err(ServeError::NoPeer { port });
     };
     let bridge = SocketAddr::new(peer, cfg.bridge_port);
-    let listener = match bind_polling(Ipv4Addr::LOCALHOST.into(), port) {
-        Ok(listener) => listener,
-        Err(error) => {
-            eprintln!("forward: cannot serve callback port {port}: {error}");
-            return None;
-        }
-    };
-    let bound = match listener.local_addr() {
-        Ok(address) => address.port(),
-        Err(error) => {
-            eprintln!("forward: cannot determine callback port: {error}");
-            return None;
-        }
-    };
+    let listener = bind_polling(Ipv4Addr::LOCALHOST.into(), port)
+        .map_err(|source| ServeError::Bind { port, source })?;
+    let bound = listener
+        .local_addr()
+        .map_err(|source| ServeError::Unnamed { source })?
+        .port();
     let stop = Arc::new(AtomicBool::new(false));
-    // Tolerated rather than fatal: a host with IPv6 disabled must still get
-    // callbacks, which is all `ssh -L 127.0.0.1:N` ever delivered.
+    // Tolerated when IPv6 is unavailable: a host with IPv6 disabled must still
+    // get callbacks, which is all `ssh -L 127.0.0.1:N` ever delivered. Not when
+    // another process owns `[::1]:N`: a browser resolving `localhost` to IPv6
+    // would reach that process, not the devbox.
     let ipv6_listener = match bind_polling(Ipv6Addr::LOCALHOST.into(), bound) {
         Ok(listener) => Some(listener),
+        Err(source) if source.kind() == std::io::ErrorKind::AddrInUse => {
+            return Err(ServeError::Bind {
+                port: bound,
+                source,
+            });
+        }
         Err(error) => {
             eprintln!("forward: callback port {bound} has no [::1] listener: {error}");
             None
@@ -110,13 +144,13 @@ pub fn request_on(cfg: &Config, leases: &Leases, port: u16) -> Option<u16> {
                 eprintln!("forward: callback port {bound} released");
             }
         }
-        return None;
+        return Err(ServeError::NotStarted { port: bound });
     }
     if let Some(listener) = ipv6_listener {
         let _ = spawn_accept_loop(listener, bridge, bound, leases.clone(), stop);
     }
     eprintln!("forward: callback port {bound} served on loopback");
-    Some(bound)
+    Ok(bound)
 }
 
 pub fn spawn_reaper(leases: Leases) {

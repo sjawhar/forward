@@ -4,6 +4,8 @@ use std::time::Duration;
 
 #[path = "bridge/arming.rs"]
 mod arming;
+#[path = "bridge/holding.rs"]
+mod holding;
 #[path = "bridge/security.rs"]
 mod security;
 

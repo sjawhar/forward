@@ -12,6 +12,8 @@ mod daemon_support;
 mod forward_lifecycle;
 #[path = "daemon/forwarding.rs"]
 mod forwarding;
+#[path = "daemon/holding.rs"]
+mod holding;
 #[path = "daemon/open_command.rs"]
 mod open_command;
 #[path = "daemon/opening.rs"]
