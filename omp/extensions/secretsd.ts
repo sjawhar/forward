@@ -211,7 +211,17 @@ async function ensureRegistered(anchor: SharedAnchor): Promise<SessionState> {
 /// alike -- so every agent shell in the process tree carries the anchor's
 /// token file and therefore the root session's broker identity. Synchronous:
 /// `ensureTokenFile` re-materializes a deleted token file on the fly.
-export function injectSessionToken(spawnCtx: { env?: Record<string, string> }): { env?: Record<string, string> } {
+///
+/// The token file travels twice. omp's agent bash tool ignores a spawnHook's
+/// `env` (it takes no per-call environment) but runs the `command` the hook
+/// returns, so the command itself exports the variable. The export shares the
+/// command's first line, so `$LINENO` and bash's own `line N` diagnostics are
+/// unchanged. `env` still carries it for omp's `!` user-shell path, which
+/// applies the hook's env delta, and for hosts whose bash tool honours it.
+export function injectSessionToken(spawnCtx: { command?: string; env?: Record<string, string> }): {
+	command?: string;
+	env?: Record<string, string>;
+} {
 	const anchor = getAnchor();
 	if (!anchor) return spawnCtx;
 	// The spawn hook is synchronous and cannot await a broker round trip, so
@@ -234,10 +244,17 @@ export function injectSessionToken(spawnCtx: { env?: Record<string, string> }): 
 			if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) env[k] = v;
 		}
 		env.SECRETSD_SESSION_TOKEN_FILE = anchor.state.tokenFile;
-		return { ...spawnCtx, env };
+		if (spawnCtx.command === undefined) return { ...spawnCtx, env };
+		const command = `export SECRETSD_SESSION_TOKEN_FILE=${shellQuote(anchor.state.tokenFile)}; ${spawnCtx.command}`;
+		return { ...spawnCtx, env, command };
 	} catch {
 		return spawnCtx;
 	}
+}
+
+/// POSIX single-quoting: safe for any byte string except NUL.
+function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 export default function secretsdOmpExtension(pi: ExtensionAPI) {
