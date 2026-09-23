@@ -385,8 +385,9 @@ the shape of a confinement bypass. Four constraints, all required:
 
 - **Peer check** immediately after accept, before the request line is read.
 - **Armed-set gate.** Only ports armed by a local `forward open` invocation, from a
-  URL that actually named them, and only until the lease expires. A reachable peer
-  cannot pick a port; it can only use one a login flow legitimately requested.
+  URL that actually named them, and only until the lease expires; or ports a local
+  `forward port` holds, only while it runs (`2026-09-23-held-ports.md`). A reachable
+  peer cannot pick a port; it can only use one a local process legitimately requested.
 - **Denylist, enforced independently of the armed set:** `12799` above all, because
   devbox loopback `12799` is the far end of the tunnel to the laptop's hardware
   token; plus `12800`, `12802`, and the callback port itself, to prevent loops and

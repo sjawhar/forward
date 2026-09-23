@@ -3,19 +3,13 @@ use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use super::armed::Armed;
+use super::arm_request::{Request, read_request};
+use super::armed::{Armed, HoldRefusal};
+use super::holder::{BUSY, UNSAFE};
 use super::limit::ConnectionLimit;
 
-/// The longest arming request accepted, in bytes.
-///
-/// `ARM 65535 4294967295\n` is 21 bytes, so 64 is generous. The cap stops a
-/// hostile or broken local process from making its handler allocate without
-/// limit; the deadline releases that handler instead.
-const MAX_ARM_LINE: usize = 64;
-/// Maximum elapsed time to read an entire arming request.
-const ARM_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const ARM_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where `forward open` reaches the local bridge.
@@ -99,65 +93,35 @@ pub fn serve_arming(armed: Armed, path: PathBuf) {
 }
 
 fn handle_arming(armed: &Armed, mut stream: UnixStream) {
-    let Some((port, ttl)) = read_request(&mut stream) else {
+    let Some(request) = read_request(&mut stream) else {
         return;
     };
-    if !armed.arm(port, Duration::from_secs(ttl)) {
-        eprintln!("forward: refused unsafe callback port {port}");
-        return;
-    }
-    eprintln!("forward: armed callback port {port} for {ttl}s");
-    let _ = writeln!(stream, "ok");
-}
-
-/// Read one newline-terminated `ARM <port> <ttl_secs>` request.
-///
-/// The line is read byte-by-byte under one cumulative deadline, so the cap and
-/// newline are structural: a truncated line can never reach parsing.
-fn read_request(stream: &mut UnixStream) -> Option<(u16, u64)> {
-    let deadline = Instant::now().checked_add(ARM_REQUEST_TIMEOUT)?;
-    let mut line = Vec::with_capacity(MAX_ARM_LINE);
-    let mut byte = [0_u8; 1];
-
-    while line.len() < MAX_ARM_LINE {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
-            return None;
+    match request {
+        Request::Arm { port, ttl } => {
+            if !armed.arm(port, Duration::from_secs(ttl)) {
+                eprintln!("forward: refused unsafe callback port {port}");
+                return;
+            }
+            eprintln!("forward: accepted arming of callback port {port} for {ttl}s");
+            let _ = writeln!(stream, "ok");
         }
-        match stream.read(&mut byte) {
-            Ok(1) => {}
-            Ok(_) => return None,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return None,
-        }
-        let [received] = byte;
-        if received == b'\n' {
-            return parse_request(&line);
-        }
-        line.push(received);
+        Request::Hold { port } => match armed.hold(port, stream) {
+            Ok(()) => eprintln!("forward: port {port} held by a local process"),
+            Err(HoldRefusal::Unsafe(mut stream)) => {
+                eprintln!("forward: refused to hold unsafe port {port}");
+                let _ = stream.write_all(UNSAFE);
+            }
+            Err(HoldRefusal::Busy(mut stream)) => {
+                eprintln!("forward: refused to hold port {port}: another process holds it");
+                let _ = stream.write_all(BUSY);
+            }
+            Err(HoldRefusal::Vanished) => {
+                eprintln!(
+                    "forward: the holder of port {port} left before its hold was acknowledged"
+                );
+            }
+        },
     }
-    None
-}
-
-fn parse_request(line: &[u8]) -> Option<(u16, u64)> {
-    let request = std::str::from_utf8(line).ok()?;
-    if !request.is_ascii() {
-        return None;
-    }
-    let mut fields = request.split(' ');
-    let (Some("ARM"), Some(port), Some(ttl), None) =
-        (fields.next(), fields.next(), fields.next(), fields.next())
-    else {
-        return None;
-    };
-    if port.is_empty()
-        || ttl.is_empty()
-        || !port.bytes().all(|value| value.is_ascii_digit())
-        || !ttl.bytes().all(|value| value.is_ascii_digit())
-    {
-        return None;
-    }
-    Some((port.parse().ok()?, ttl.parse().ok()?))
 }
 
 /// Arm `ports` on the local bridge, true only if every one was armed.

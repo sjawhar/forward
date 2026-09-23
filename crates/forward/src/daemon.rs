@@ -1,4 +1,6 @@
-use forward::callback::{Leases, MAX_DYNAMIC_FORWARDS, is_dynamic_port, request, spawn_reaper};
+use forward::callback::{
+    Leases, MAX_DYNAMIC_FORWARDS, is_dynamic_port, request, serve_on, spawn_reaper,
+};
 use forward::config::Config;
 use forward::localhost::forward_ports;
 use forward::peer::authorized;
@@ -6,7 +8,7 @@ use forward::policy::{Decision, decide};
 use forward::send::Outcome;
 
 use crate::ratelimit::{OpenDecision, RecentOpens};
-use crate::request::read_url;
+use crate::request::{Request, read_request};
 mod notification;
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -14,11 +16,15 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use notification::notify_url;
 use thiserror::Error;
 use url::Url;
+
+/// The longest laptop hold a devbox may ask for. `forward port` renews well
+/// inside it, so a devbox that vanishes frees its laptop ports soon after.
+const MAX_HOLD: Duration = Duration::from_secs(600);
 
 #[derive(Debug, Error)]
 pub enum DaemonError {
@@ -106,8 +112,16 @@ fn handle_connection(
     recent_opens: Arc<Mutex<RecentOpens>>,
     leases: Leases,
 ) {
-    let Some(url) = read_url(&stream) else {
-        return;
+    let url = match read_request(&stream) {
+        None => return,
+        Some(Request::Hold { port, secs }) => {
+            let reply = hold(&cfg, &leases, port, secs);
+            if let Err(error) = writeln!(stream, "{reply}") {
+                eprintln!("forward: failed to answer the hold on port {port}: {error}");
+            }
+            return;
+        }
+        Some(Request::Open(url)) => url,
     };
     // Callback ports belong to the URL, not to the open decision. A notified
     // URL is handed to the user precisely so they can open it themselves, and
@@ -142,6 +156,22 @@ fn handle_connection(
             "forward: failed to report {} for {url}: {error}",
             outcome.as_wire()
         );
+    }
+}
+
+/// Serve laptop `localhost:<port>` for a devbox `forward port`, opening nothing.
+/// The reply is `held`, or `refused <why>` for the devbox to report.
+fn hold(cfg: &Config, leases: &Leases, port: u16, secs: u64) -> String {
+    if !is_dynamic_port(cfg, port) {
+        eprintln!("forward: refused to hold port {port}: forward's own");
+        return format!("refused port {port} is one of forward's own on the laptop");
+    }
+    match serve_on(cfg, leases, port, Duration::from_secs(secs).min(MAX_HOLD)) {
+        Ok(_) => "held".to_owned(),
+        Err(error) => {
+            eprintln!("forward: refused to hold port {port}: {error}");
+            format!("refused {error}")
+        }
     }
 }
 

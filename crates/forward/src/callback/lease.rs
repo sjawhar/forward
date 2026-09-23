@@ -43,7 +43,10 @@ impl Leases {
         let mut leases = self.inner.lock();
         match leases.get_mut(&port) {
             Some(lease) if !lease.stop.load(Ordering::Relaxed) => {
-                lease.deadline = Instant::now() + ttl;
+                let deadline = Instant::now() + ttl;
+                if lease.deadline < deadline {
+                    lease.deadline = deadline;
+                }
                 Refresh::Live
             }
             Some(_) => Refresh::Releasing,
@@ -136,5 +139,27 @@ mod tests {
         assert!(leases.release(port, &stop));
         assert!(!leases.inner.lock().contains_key(&port));
         assert!(rebind.join().unwrap());
+    }
+
+    #[test]
+    fn refreshing_a_live_lease_never_shortens_it() {
+        // Given: a live lease with a long deadline.
+        let leases = Leases::new();
+        let stop = Arc::new(AtomicBool::new(false));
+        leases.insert(8400, Duration::from_secs(30), Arc::clone(&stop), 1);
+
+        // When: a shorter refresh arrives and the shorter window passes.
+        assert!(matches!(
+            leases.refresh(8400, Duration::from_millis(1)),
+            Refresh::Live
+        ));
+        thread::sleep(Duration::from_millis(20));
+        leases.expire();
+
+        // Then: the lease is still live and can be refreshed again.
+        assert!(matches!(
+            leases.refresh(8400, Duration::from_secs(30)),
+            Refresh::Live
+        ));
     }
 }

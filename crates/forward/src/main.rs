@@ -8,6 +8,7 @@ use forward::{bridge, doctor, send, serve, target};
 mod daemon;
 mod grant;
 mod opener;
+mod port;
 mod process;
 mod ratelimit;
 mod request;
@@ -54,6 +55,19 @@ enum Command {
     Daemon {
         #[arg(long, default_value_t = CHANNEL_PORT)]
         port: u16,
+        #[arg(long)]
+        config: Option<std::path::PathBuf>,
+    },
+    /// Make laptop localhost:<port> reach this process's loopback on the same
+    /// port until stopped. Inside an agent box, that means the box loopback.
+    /// Run it under a supervisor if the port should stay up; exiting ends the
+    /// forward
+    Port {
+        /// Loopback ports to forward, for example `5173 41575`
+        #[arg(required = true)]
+        ports: Vec<u16>,
+        #[arg(long, default_value_t = CHANNEL_PORT)]
+        channel_port: u16,
         #[arg(long)]
         config: Option<std::path::PathBuf>,
     },
@@ -155,6 +169,15 @@ fn main() -> anyhow::Result<()> {
                 }
             }));
             serve::run(&cfg, port).unwrap_or_else(|error| exit_with_error(error));
+            Ok(())
+        }
+        Command::Port {
+            ports,
+            channel_port,
+            config,
+        } => {
+            let (cfg, _) = load_config(config)?;
+            port::run(&cfg, &ports, channel_port).unwrap_or_else(|error| exit_with_error(error));
             Ok(())
         }
         Command::Daemon { port, config } => {

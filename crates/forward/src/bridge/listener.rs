@@ -3,7 +3,7 @@ use std::net::{TcpListener, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use super::Armed;
+use super::armed::{Armed, Upstream};
 use super::limit::ConnectionLimit;
 use super::port_policy::denied_port;
 use crate::config::Config;
@@ -113,42 +113,41 @@ fn handle(cfg: &Config, armed: &Armed, listener_port: u16, mut stream: TcpStream
         refuse(&mut stream, DENIED_PORT_REFUSAL);
         return;
     }
-    if !armed.is_armed(port) {
-        eprintln!("forward: bridge refused unarmed port {port}");
-        refuse(&mut stream, UNARMED_PORT_REFUSAL);
+    let upstream = match armed.connect(port) {
+        Upstream::Connected(upstream) => upstream,
+        Upstream::Unarmed => {
+            eprintln!("forward: bridge refused unarmed port {port}");
+            refuse(&mut stream, UNARMED_PORT_REFUSAL);
+            return;
+        }
+        Upstream::Failed(error) => {
+            eprintln!("forward: bridge {error}");
+            refuse(&mut stream, GENERIC_REFUSAL);
+            return;
+        }
+    };
+    if let Err(error) = stream.set_read_timeout(Some(PIPE_IDLE_TIMEOUT)) {
+        eprintln!("forward: bridge could not set client read timeout: {error}");
+        refuse(&mut stream, GENERIC_REFUSAL);
         return;
     }
-
-    match TcpStream::connect(("127.0.0.1", port)) {
-        Ok(upstream) => {
-            if let Err(error) = stream.set_read_timeout(Some(PIPE_IDLE_TIMEOUT)) {
-                eprintln!("forward: bridge could not set client read timeout: {error}");
-                refuse(&mut stream, GENERIC_REFUSAL);
-                return;
-            }
-            if let Err(error) = stream.set_write_timeout(Some(PIPE_IDLE_TIMEOUT)) {
-                eprintln!("forward: bridge could not set client write timeout: {error}");
-                refuse(&mut stream, GENERIC_REFUSAL);
-                return;
-            }
-            if let Err(error) = upstream.set_read_timeout(Some(PIPE_IDLE_TIMEOUT)) {
-                eprintln!("forward: bridge could not set upstream read timeout: {error}");
-                refuse(&mut stream, GENERIC_REFUSAL);
-                return;
-            }
-            if let Err(error) = upstream.set_write_timeout(Some(PIPE_IDLE_TIMEOUT)) {
-                eprintln!("forward: bridge could not set upstream write timeout: {error}");
-                refuse(&mut stream, GENERIC_REFUSAL);
-                return;
-            }
-            if let Err(error) = bidirectional(stream, upstream) {
-                eprintln!("forward: bridge relay for port {port} ended: {error}");
-            }
-        }
-        Err(error) => {
-            eprintln!("forward: bridge could not reach 127.0.0.1:{port}: {error}");
-            refuse(&mut stream, GENERIC_REFUSAL);
-        }
+    if let Err(error) = stream.set_write_timeout(Some(PIPE_IDLE_TIMEOUT)) {
+        eprintln!("forward: bridge could not set client write timeout: {error}");
+        refuse(&mut stream, GENERIC_REFUSAL);
+        return;
+    }
+    if let Err(error) = upstream.set_read_timeout(Some(PIPE_IDLE_TIMEOUT)) {
+        eprintln!("forward: bridge could not set upstream read timeout: {error}");
+        refuse(&mut stream, GENERIC_REFUSAL);
+        return;
+    }
+    if let Err(error) = upstream.set_write_timeout(Some(PIPE_IDLE_TIMEOUT)) {
+        eprintln!("forward: bridge could not set upstream write timeout: {error}");
+        refuse(&mut stream, GENERIC_REFUSAL);
+        return;
+    }
+    if let Err(error) = bidirectional(stream, upstream) {
+        eprintln!("forward: bridge relay for port {port} ended: {error}");
     }
 }
 

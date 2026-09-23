@@ -68,6 +68,11 @@ pub enum SendError {
          upgrade the daemon so opens can be told apart from handovers"
     )]
     Unreported { target: String, url: String },
+    #[error(
+        "forward: the laptop daemon at {target} did not answer a port hold; it predates \
+         `forward port`, so upgrade forward on the laptop and restart its daemon"
+    )]
+    HoldUnanswered { target: String },
 }
 
 /// Sends one newline-terminated URL to the counterpart's URL channel and returns
@@ -88,6 +93,48 @@ pub enum SendError {
 /// migration step that removes the SSH forwards only after the tailnet path is
 /// verified working.
 pub fn send_url(cfg: &Config, url: &url::Url, channel_port: u16) -> Result<Outcome, SendError> {
+    // A counterpart that answers nothing is a counterpart whose answer we must
+    // not invent: guessing "opened" is exactly the silent success that leaves a
+    // caller waiting on a browser that was never launched.
+    let (target, line) = request(cfg, url.as_str(), channel_port)?;
+    Outcome::from_wire(&line).ok_or_else(|| SendError::Unreported {
+        target: target.to_string(),
+        url: url.to_string(),
+    })
+}
+
+/// What the laptop daemon did with a request to hold one of its ports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoldReply {
+    /// Laptop `localhost:<port>` is served for the requested time.
+    Held,
+    /// The laptop did not serve the port, for the reason given.
+    Refused(String),
+}
+
+/// Ask the laptop daemon to serve its `localhost:<port>` for `secs`, relayed to
+/// this devbox's bridge, without opening anything.
+pub fn send_hold(
+    cfg: &Config,
+    port: u16,
+    secs: u64,
+    channel_port: u16,
+) -> Result<HoldReply, SendError> {
+    let (target, line) = request(cfg, &format!("HOLD {port} {secs}"), channel_port)?;
+    let line = line.trim();
+    if line == "held" {
+        return Ok(HoldReply::Held);
+    }
+    // A daemon from before holds reads the line as a malformed URL and hangs up.
+    line.strip_prefix("refused ")
+        .map(|reason| HoldReply::Refused(reason.to_owned()))
+        .ok_or_else(|| SendError::HoldUnanswered {
+            target: target.to_string(),
+        })
+}
+
+/// Send one line to the counterpart's URL channel and read its one-line answer.
+fn request(cfg: &Config, line: &str, channel_port: u16) -> Result<(SocketAddr, String), SendError> {
     let ip = cfg
         .peer_ip()
         .map_err(|source| SendError::Config { source })?
@@ -99,19 +146,12 @@ pub fn send_url(cfg: &Config, url: &url::Url, channel_port: u16) -> Result<Outco
         target: target.to_string(),
         source,
     })?;
-    writeln!(stream, "{url}")?;
+    writeln!(stream, "{line}")?;
     stream.flush()?;
     stream.set_read_timeout(Some(OUTCOME_TIMEOUT))?;
-
-    // A counterpart that answers nothing is a counterpart whose answer we must
-    // not invent: guessing "opened" is exactly the silent success that leaves a
-    // caller waiting on a browser that was never launched.
-    let mut line = String::new();
-    BufReader::new(&stream).read_line(&mut line)?;
-    Outcome::from_wire(&line).ok_or_else(|| SendError::Unreported {
-        target: target.to_string(),
-        url: url.to_string(),
-    })
+    let mut answer = String::new();
+    BufReader::new(&stream).read_line(&mut answer)?;
+    Ok((target, answer))
 }
 
 fn osc52_sequence(text: &str, in_tmux: bool) -> String {

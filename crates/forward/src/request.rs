@@ -7,22 +7,52 @@ use url::Url;
 const MAX_URL_BYTES: usize = 8_192;
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-pub(crate) fn read_url(stream: &TcpStream) -> Option<Url> {
+/// One request on the URL channel.
+#[derive(Debug)]
+pub(crate) enum Request {
+    /// Open, or hand over, a URL; serving any loopback port it names.
+    Open(Url),
+    /// Serve laptop `localhost:<port>` for `secs` without opening anything.
+    Hold { port: u16, secs: u64 },
+}
+
+pub(crate) fn read_request(stream: &TcpStream) -> Option<Request> {
     let line = String::from_utf8(read_line(stream)?)
         .map_err(|error| {
             eprintln!("forward: invalid daemon URL bytes: {error}");
         })
         .ok()?;
-    let url = Url::parse(line.trim())
+    let line = line.trim();
+    if let Some(hold) = line.strip_prefix("HOLD ") {
+        let hold = parse_hold(hold);
+        if hold.is_none() {
+            eprintln!("forward: malformed hold request {line:?}");
+        }
+        return hold;
+    }
+    let url = Url::parse(line)
         .map_err(|error| {
-            eprintln!("forward: invalid daemon URL {:?}: {error}", line.trim());
+            eprintln!("forward: invalid daemon URL {line:?}: {error}");
         })
         .ok()?;
     if !matches!(url.scheme(), "http" | "https") {
         eprintln!("forward: unsupported URL scheme {:?}: {url}", url.scheme());
         return None;
     }
-    Some(url)
+    Some(Request::Open(url))
+}
+
+/// `<port> <secs>`, each decimal digits only.
+fn parse_hold(fields: &str) -> Option<Request> {
+    let digits = |field: &str| !field.is_empty() && field.bytes().all(|byte| byte.is_ascii_digit());
+    let (port, secs) = fields.split_once(' ')?;
+    if !digits(port) || !digits(secs) {
+        return None;
+    }
+    Some(Request::Hold {
+        port: port.parse().ok()?,
+        secs: secs.parse().ok()?,
+    })
 }
 
 fn read_line(stream: &TcpStream) -> Option<Vec<u8>> {
