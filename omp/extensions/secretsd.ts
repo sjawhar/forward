@@ -214,9 +214,11 @@ async function ensureRegistered(anchor: SharedAnchor): Promise<SessionState> {
 ///
 /// The token file travels twice. omp's agent bash tool ignores a spawnHook's
 /// `env` (it takes no per-call environment) but runs the `command` the hook
-/// returns, so the command itself exports the variable. `env` still carries it
-/// for omp's `!` user-shell path, which applies the hook's env delta, and for
-/// hosts whose bash tool honours it.
+/// returns, so the command itself exports the variable. The export shares the
+/// command's first line, so `$LINENO`, bash's own `line N` diagnostics, and a
+/// job label built from the command's head stay single-line. `env` still
+/// carries it for omp's `!` user-shell path, which applies the hook's env
+/// delta, and for hosts whose bash tool honours it.
 export function injectSessionToken(spawnCtx: { command?: string; env?: Record<string, string> }): {
 	command?: string;
 	env?: Record<string, string>;
@@ -243,11 +245,9 @@ export function injectSessionToken(spawnCtx: { command?: string; env?: Record<st
 			if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) env[k] = v;
 		}
 		env.SECRETSD_SESSION_TOKEN_FILE = anchor.state.tokenFile;
-		const command =
-			spawnCtx.command === undefined
-				? undefined
-				: `export SECRETSD_SESSION_TOKEN_FILE=${shellQuote(anchor.state.tokenFile)}\n${spawnCtx.command}`;
-		return command === undefined ? { ...spawnCtx, env } : { ...spawnCtx, env, command };
+		if (spawnCtx.command === undefined) return { ...spawnCtx, env };
+		const command = `export SECRETSD_SESSION_TOKEN_FILE=${shellQuote(anchor.state.tokenFile)}; ${spawnCtx.command}`;
+		return { ...spawnCtx, env, command };
 	} catch {
 		return spawnCtx;
 	}
