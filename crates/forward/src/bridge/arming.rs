@@ -14,10 +14,16 @@ const ARM_REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Where `forward open` reaches the local bridge.
 ///
-/// A unix socket in the runtime directory, never a TCP port: only local
-/// processes can reach it, and filesystem permissions scope it. Arming grants a
-/// local process nothing it could not already do by connecting to loopback
-/// directly; the gate exists to constrain the *remote* peer.
+/// A unix socket in the runtime directory's `forward/` subdirectory, never a
+/// TCP port: only local processes can reach it, and filesystem permissions
+/// scope it. Arming grants a local process nothing it could not already do by
+/// connecting to loopback directly; the gate exists to constrain the *remote*
+/// peer.
+///
+/// The subdirectory, which the pulse socket shares, is what a container
+/// bind-mounts to reach these sockets. A restarted serve deletes and rebinds
+/// its socket, which a directory mount shows at once, while a mount of the
+/// socket file itself would keep pointing at the deleted one.
 ///
 /// When `XDG_RUNTIME_DIR` is unset the path falls back to systemd's
 /// `/run/user/<uid>` — pam_systemd sets the variable for login sessions, but a
@@ -39,7 +45,7 @@ fn arm_socket_path_in(runtime_dir: Option<PathBuf>) -> PathBuf {
     let dir = runtime_dir
         .filter(|path| !path.as_os_str().is_empty())
         .unwrap_or_else(|| PathBuf::from("/dev/null"));
-    dir.join("forward-arm.sock")
+    dir.join("forward/arm.sock")
 }
 
 /// systemd's runtime directory for this process's own uid, if trustworthy.
@@ -58,6 +64,13 @@ fn trusted_runtime_dir(dir: PathBuf, uid: u32) -> Option<PathBuf> {
 
 /// Serve arming requests on `path` for the life of the process.
 pub fn serve_arming(armed: Armed, path: PathBuf) {
+    if let Err(error) = crate::socket::prepare_private_parent(&path) {
+        eprintln!(
+            "forward: could not prepare the directory of arming socket {}: {error}",
+            path.display()
+        );
+        return;
+    }
     let _ = std::fs::remove_file(&path);
     let Ok(listener) = UnixListener::bind(&path) else {
         eprintln!("forward: could not bind arming socket {}", path.display());
@@ -165,8 +178,29 @@ mod tests {
         let path = arm_socket_path_in(None);
 
         // When/Then: it must not use the predictable global temporary directory.
-        assert_eq!(path, PathBuf::from("/dev/null/forward-arm.sock"));
+        assert_eq!(path, PathBuf::from("/dev/null/forward/arm.sock"));
         assert!(UnixStream::connect(path).is_err());
+    }
+
+    #[test]
+    fn the_arm_and_grant_sockets_share_the_directory_containers_mount() {
+        // Given: this process's runtime directory. When: both sockets derive
+        // their paths from it the way the serve binds them.
+        let arm = arm_socket_path();
+        let grant = crate::browser::request::socket_path();
+
+        // Then: both sit in `forward/`, the one directory an agent box
+        // mounts. A mount of a socket file would keep pointing at the socket
+        // a restarted serve deleted.
+        assert_eq!(
+            arm.parent().and_then(Path::file_name),
+            Some(std::ffi::OsStr::new("forward"))
+        );
+        assert_eq!(grant.parent(), arm.parent());
+        assert_eq!(
+            grant.file_name(),
+            Some(std::ffi::OsStr::new("browser-grant.sock"))
+        );
     }
 
     #[test]

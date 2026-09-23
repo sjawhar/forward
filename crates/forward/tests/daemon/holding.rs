@@ -125,7 +125,8 @@ fn a_daemon_that_predates_holds_is_reported_as_needing_an_upgrade() {
 fn forward_port_exits_nonzero_when_the_bridge_ends_a_hold() {
     // Given: a bridge that accepts one hold and then closes it, and a laptop daemon that holds.
     let dir = tempfile::tempdir().unwrap();
-    let arming = UnixListener::bind(dir.path().join("forward-arm.sock")).unwrap();
+    std::fs::create_dir(dir.path().join("forward")).unwrap();
+    let arming = UnixListener::bind(dir.path().join("forward/arm.sock")).unwrap();
     let laptop = TcpListener::bind("127.0.0.1:0").unwrap();
     let channel = laptop.local_addr().unwrap().port();
     let reservation = TcpListener::bind("127.0.0.1:0").unwrap();

@@ -3,7 +3,6 @@
 //! pulse channel per client connection.
 
 use std::net::{SocketAddr, TcpStream};
-use std::os::unix::fs::PermissionsExt as _;
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::{io, thread};
@@ -33,13 +32,7 @@ pub fn spawn(cfg: &Config) -> Result<(), PulseError> {
     }
 
     let path = socket_path().ok_or(PulseError::RuntimeDir)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| socket_error(&path, source))?;
-        // 0700 even when the directory pre-existed: the socket's own 0600 is
-        // the gate for this uid, but no other uid may traverse or replace it.
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(|source| socket_error(&path, source))?;
-    }
+    crate::socket::prepare_private_parent(&path).map_err(|source| socket_error(&path, source))?;
     let listener = crate::socket::bind(&path).map_err(|source| socket_error(&path, source))?;
     let upstream = SocketAddr::new(peer, cfg.pulse_port);
     eprintln!(

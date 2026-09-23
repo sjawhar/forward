@@ -24,7 +24,8 @@ fn a_deterministic_refusal_never_contacts_the_broker() {
     // moves back ahead of the probe: the broker listener would see a connection.
     let directory = tempfile::tempdir().unwrap();
     let runtime = directory.path();
-    let grant_socket = runtime.join("forward-browser-grant.sock");
+    std::fs::create_dir(runtime.join("forward")).unwrap();
+    let grant_socket = runtime.join("forward/browser-grant.sock");
     let listener = std::os::unix::net::UnixListener::bind(&grant_socket).unwrap();
     let server = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().unwrap();
