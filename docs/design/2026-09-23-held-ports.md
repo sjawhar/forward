@@ -35,8 +35,8 @@ forward serve (host) ── holder for 5173? ──► "DIAL" on the holder's un
 ```
 
 1. **Hold on the devbox side.** `forward port N` connects to the bridge's arming
-   socket (`$XDG_RUNTIME_DIR/forward-arm.sock`, which the agentbox launcher
-   already bind-mounts into every box) and sends `HOLD N`. The serve answers
+   socket (`$XDG_RUNTIME_DIR/forward/arm.sock`, in the directory the agentbox
+   launcher already bind-mounts into every box) and sends `HOLD N`. The serve answers
    `ok` and keeps the connection as the port's holder, or answers `busy` if a
    live holder already has the port, or `unsafe` for a port the bridge must
    never dial.

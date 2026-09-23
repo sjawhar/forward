@@ -47,7 +47,7 @@ pub struct Deps {
     pub binder: Binder,
 }
 pub fn socket_path() -> PathBuf {
-    crate::bridge::arm_socket_path().with_file_name("forward-browser-grant.sock")
+    crate::bridge::arm_socket_path().with_file_name("browser-grant.sock")
 }
 
 pub fn parse(line: &[u8]) -> Option<(u64, Vec<u8>)> {

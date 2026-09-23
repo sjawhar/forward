@@ -392,7 +392,7 @@ the shape of a confinement bypass. Four constraints, all required:
   devbox loopback `12799` is the far end of the tunnel to the laptop's hardware
   token; plus `12800`, `12802`, and the callback port itself, to prevent loops and
   confused-deputy chains through `forward`'s own services.
-- **Local-only arming.** The arming socket is a unix socket in `$XDG_RUNTIME_DIR`,
+- **Local-only arming.** The arming socket is a unix socket in `$XDG_RUNTIME_DIR/forward/`,
   reachable only by local processes and scoped by filesystem permissions. It is
   never exposed on the tailnet. Note that a local devbox process could already
   connect to devbox loopback ports directly, so arming grants it nothing new; the

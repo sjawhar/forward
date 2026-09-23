@@ -135,7 +135,7 @@ fn a_slow_arming_client_does_not_block_other_clients() {
         .spawn()
         .unwrap();
     let _guard = Kill(child);
-    let socket = runtime_dir.path().join("forward-arm.sock");
+    let socket = runtime_dir.path().join("forward/arm.sock");
     wait_for_socket(&socket);
     let mut slow_client = UnixStream::connect(&socket).unwrap();
     slow_client.write_all(b"A").unwrap();
@@ -183,7 +183,7 @@ fn serve_shares_one_armed_set_between_the_socket_and_the_bridge() {
         .spawn()
         .unwrap();
     let _guard = Kill(child);
-    let socket = dir.path().join("forward-arm.sock");
+    let socket = dir.path().join("forward/arm.sock");
     wait_for_socket(&socket);
     wait_for_bridge(bridge_port);
 
