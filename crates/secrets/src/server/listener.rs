@@ -20,24 +20,6 @@ use nix::unistd::geteuid;
 
 use crate::Config;
 
-/// The uid the kernel reports for a peer whose real uid has no mapping in this
-/// process's user namespace. 65534 is the kernel default for
-/// `kernel.overflowuid`; a host that changes it fails closed, refusing such
-/// peers as foreign.
-const OVERFLOW_UID: u32 = 65534;
-
-/// Whether a peer's kernel-reported uid may proceed to identification.
-///
-/// `listener` serves only an owner-only socket node, so the kernel has already
-/// refused every peer that is not this uid in its own user namespace; from a
-/// namespace this process cannot map, that same-uid peer arrives as the overflow
-/// uid. Any other value means the node's mode was bypassed and is refused. The
-/// peer's session is still bound by token and pidfd ancestry in `handle`; this
-/// gate grants nothing.
-pub(super) const fn uid_is_authorized(peer_uid: u32, daemon_uid: u32) -> bool {
-    peer_uid == daemon_uid || peer_uid == OVERFLOW_UID
-}
-
 fn socket_activated() -> bool {
     std::env::var("LISTEN_FDS").is_ok_and(|value| value == "1")
         && std::env::var("LISTEN_PID")
@@ -158,26 +140,6 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().mode() & 0o777;
         assert_eq!(mode, 0o600, "node created with mode {mode:o}");
-    }
-
-    #[test]
-    fn refuses_a_mapped_uid_other_than_the_daemons() {
-        // These values reach the gate only when the daemon shares the peer's
-        // user namespace; the socket mode, not this check, is what keeps them
-        // from connecting at all.
-        assert!(!uid_is_authorized(1000, 1001));
-        assert!(!uid_is_authorized(0, 1000));
-        assert!(!uid_is_authorized(231_072 + 1000, 1000));
-    }
-
-    #[test]
-    fn accepts_the_daemon_uid_and_the_overflow_uid() {
-        // A sysbox container maps its uid 1000 onto a host subordinate uid;
-        // the daemon, in the private user namespace its mount protections
-        // imply, sees that peer as the overflow uid. The owner-only node
-        // already proved the peer is this uid in *some* namespace.
-        assert!(uid_is_authorized(1000, 1000));
-        assert!(uid_is_authorized(OVERFLOW_UID, 1000));
     }
 
     #[test]

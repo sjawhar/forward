@@ -9,6 +9,7 @@ use std::time::Duration;
 #[cfg(test)]
 use std::time::Instant;
 
+use containment::uid::same_user;
 use nix::errno::Errno;
 use nix::sys::signal::{Signal, killpg};
 use nix::sys::socket::sockopt::PeerCredentials;
@@ -35,7 +36,7 @@ mod subscribers;
 mod worker;
 
 use dispatch::{Outcome, dispatch, request_key};
-use listener::{listener, uid_is_authorized};
+use listener::listener;
 use subscribers::{SubscriberHub, publish_current_authority};
 use worker::worker;
 
@@ -241,7 +242,7 @@ fn read_frame(stream: &mut UnixStream) -> std::io::Result<Zeroizing<Vec<u8>>> {
 fn handle(mut stream: UnixStream, shared: &Shared) -> std::io::Result<()> {
     stream.set_read_timeout(Some(CONNECTION_READ_TIMEOUT))?;
     let peer = getsockopt(&stream, PeerCredentials).map_err(std::io::Error::other)?;
-    if !uid_is_authorized(peer.uid(), geteuid().as_raw()) {
+    if !same_user(peer.uid(), geteuid().as_raw()) {
         tracing::warn!(peer_uid = peer.uid(), "connection rejected for foreign uid");
         return Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied));
     }

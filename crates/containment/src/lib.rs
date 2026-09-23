@@ -27,6 +27,7 @@
 
 pub mod anchored;
 pub mod pinned;
+pub mod uid;
 
 /// What a walk step concluded about one process.
 pub(crate) enum Step {

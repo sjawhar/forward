@@ -2,6 +2,7 @@ use std::os::linux::fs::MetadataExt as _;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+use containment::uid::same_user;
 use proto::{BrokerClient, BrokerResponse, ClientError, PROTOCOL_VERSION};
 use zeroize::Zeroizing;
 
@@ -69,7 +70,10 @@ pub(super) fn broker_identity(path: &Path) -> Result<super::BrokerIdentity, Brok
 
 /// Connect and verify the peer, returning the stream and the socket's identity.
 ///
-/// The uid check is the cheap half. The load-bearing half is the socket's
+/// The uid check is the cheap half, and it is the daemon's own rule
+/// ([`containment::uid::same_user`]): inside an agentbox the host broker's uid
+/// has no mapping, so the kernel reports it as the overflow uid, and refusing
+/// that refused every box. The load-bearing half is the socket's
 /// `(device, inode)`: callers fold it into [`super::BrokerIdentity`], so a
 /// rebind of the path is caught as an authority change even when the impostor
 /// replays the real instance string.
@@ -97,7 +101,7 @@ pub(super) fn connect_verified(
     let credentials =
         nix::sys::socket::getsockopt(&stream, nix::sys::socket::sockopt::PeerCredentials)
             .map_err(|_| untrusted())?;
-    if credentials.uid() != nix::unistd::geteuid().as_raw() {
+    if !same_user(credentials.uid(), nix::unistd::geteuid().as_raw()) {
         return Err(untrusted());
     }
     // Read the identity *after* connecting, so a path swapped between the two
