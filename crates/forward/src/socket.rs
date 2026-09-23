@@ -1,14 +1,27 @@
-//! Bind a fixed-path Unix socket without disrupting a live predecessor.
+//! Fixed-path Unix sockets on the devbox.
 //!
-//! Shared by the pcsc and pulse channels: both serve a fixed devbox socket
-//! and must never unlink a socket another process still answers on.
+//! `bind` is shared by the pcsc and pulse channels: both serve a fixed socket
+//! and must never unlink one another process still answers on.
+//! `prepare_private_parent` is shared by every socket in
+//! `$XDG_RUNTIME_DIR/forward/` (pulse, arming, browser grant).
 
 use std::io;
-use std::os::unix::fs::FileTypeExt as _;
+use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 
 use nix::sys::stat::{Mode, umask};
+
+/// Create the socket's parent directory if needed and make it `0700` even
+/// when it already existed: the socket's own `0600` is the gate for this uid,
+/// but no other uid may traverse the directory or replace the socket.
+pub(crate) fn prepare_private_parent(path: &Path) -> io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent)?;
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+}
 
 /// Bind the socket with mode `0600`, refusing to replace a working
 /// predecessor: a served socket is `AddrInUse`, a stale one is unlinked only

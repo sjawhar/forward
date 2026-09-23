@@ -87,6 +87,13 @@ pub fn serve(grants: Grants, cfg: Config, path: PathBuf, slot: crate::browser::p
 
 #[doc(hidden)]
 pub fn serve_with_binder(deps: Deps, cfg: Config, path: PathBuf) {
+    if let Err(error) = crate::socket::prepare_private_parent(&path) {
+        eprintln!(
+            "forward: could not prepare the directory of grant socket {}: {error}",
+            path.display()
+        );
+        return;
+    }
     let _ = std::fs::remove_file(&path);
     let Ok(listener) = UnixListener::bind(&path) else {
         eprintln!("forward: could not bind grant socket {}", path.display());

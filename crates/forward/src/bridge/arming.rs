@@ -64,13 +64,10 @@ fn trusted_runtime_dir(dir: PathBuf, uid: u32) -> Option<PathBuf> {
 
 /// Serve arming requests on `path` for the life of the process.
 pub fn serve_arming(armed: Armed, path: PathBuf) {
-    if let Some(parent) = path.parent()
-        && let Err(error) = std::fs::create_dir_all(parent)
-            .and_then(|()| std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)))
-    {
+    if let Err(error) = crate::socket::prepare_private_parent(&path) {
         eprintln!(
-            "forward: could not prepare the arming socket's directory {}: {error}",
-            parent.display()
+            "forward: could not prepare the directory of arming socket {}: {error}",
+            path.display()
         );
         return;
     }
@@ -186,16 +183,24 @@ mod tests {
     }
 
     #[test]
-    fn every_local_socket_lives_in_the_directory_containers_mount() {
-        // Given: a runtime directory. When: the local socket paths derive from it.
-        let arm = arm_socket_path_in(Some(PathBuf::from("/run/user/1000")));
+    fn the_arm_and_grant_sockets_share_the_directory_containers_mount() {
+        // Given: this process's runtime directory. When: both sockets derive
+        // their paths from it the way the serve binds them.
+        let arm = arm_socket_path();
+        let grant = crate::browser::request::socket_path();
 
-        // Then: arming and the browser-grant socket share `forward/`, the one
-        // directory an agent box mounts. A mount of a socket file would keep
-        // pointing at the socket a restarted serve deleted.
-        assert_eq!(arm.parent(), Some(Path::new("/run/user/1000/forward")));
-        let grant = arm.with_file_name("browser-grant.sock");
+        // Then: both sit in `forward/`, the one directory an agent box
+        // mounts. A mount of a socket file would keep pointing at the socket
+        // a restarted serve deleted.
+        assert_eq!(
+            arm.parent().and_then(Path::file_name),
+            Some(std::ffi::OsStr::new("forward"))
+        );
         assert_eq!(grant.parent(), arm.parent());
+        assert_eq!(
+            grant.file_name(),
+            Some(std::ffi::OsStr::new("browser-grant.sock"))
+        );
     }
 
     #[test]
