@@ -249,6 +249,30 @@ test("two in-process instances share one registration and one token file", async
 	expect(spawnResult.env?.PATH).toBe("/usr/bin");
 });
 
+test("the command a spawnHook returns exports the token file even when its env is discarded", async () => {
+	setup();
+	fakeBroker(process.env.SECRETSD_SOCK as string);
+	await mountSession("root-session");
+	const anchor = getAnchor();
+	if (!anchor) throw new Error("no anchor after session_start");
+
+	const probe = 'printf "%s" "$SECRETSD_SESSION_TOKEN_FILE"';
+	// omp's bash tool drops the hook's env and runs only its command, so run
+	// that command in a shell whose environment lacks the variable.
+	const runInCleanShell = (command: string) =>
+		Bun.spawnSync(["bash", "-c", command], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }).stdout.toString();
+
+	const { command } = injectSessionToken({ command: probe, env: {} });
+	expect(runInCleanShell(command ?? probe)).toBe(anchor.state.tokenFile);
+
+	// Quoting survives a path containing a single quote.
+	const quoted = { ...anchor, state: { ...anchor.state, tokenFile: `${anchor.state.tokenFile}'x` } };
+	setAnchor(quoted);
+	const second = injectSessionToken({ command: probe, env: {} });
+	expect(runInCleanShell(second.command ?? probe)).toBe(quoted.state.tokenFile);
+	setAnchor(anchor);
+});
+
 test("only the owner's session_shutdown unregisters and removes the token file", async () => {
 	const { runtimeDir } = setup();
 	const broker = fakeBroker(process.env.SECRETSD_SOCK as string);
