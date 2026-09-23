@@ -269,8 +269,9 @@ test("the command a spawnHook returns exports the token file even when its env i
 	const lineno = injectSessionToken({ command: 'printf "%s" "$LINENO"', env: {} });
 	expect(runInCleanShell(lineno.command as string)).toBe("1");
 
-	// Quoting survives a path containing a single quote.
-	const quoted = { ...anchor, state: { ...anchor.state, tokenFile: `${anchor.state.tokenFile}'x` } };
+	// Quoting survives a path containing a single quote, `$` and a space, so
+	// double quoting or no quoting fails.
+	const quoted = { ...anchor, state: { ...anchor.state, tokenFile: `${anchor.state.tokenFile}' $x y` } };
 	setAnchor(quoted);
 	const second = injectSessionToken({ command: probe, env: {} });
 	expect(runInCleanShell(second.command as string)).toBe(quoted.state.tokenFile);

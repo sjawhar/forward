@@ -452,7 +452,9 @@ resolved by precedence.
   closed, never serves the agent-tier copy.
 - Token-strip: unset `SECRETSD_SESSION_TOKEN_FILE` inside an agent session
   → request uses the tokenless scope (or is rejected if the PTY is registered),
-  never inherits the session's grant.
+  never inherits the session's grant. On omp the extension re-exports the
+  variable at the start of every bash call, so the strip holds for the rest of
+  the command that performs it.
 - Broker restart mid-session → clear re-approval message, no hang.
 - Recovery path unchanged: `SOPS_AGE_KEY=$(op ...) sops -d
   secrets.human.d/<KEY>.env` on the laptop only.
