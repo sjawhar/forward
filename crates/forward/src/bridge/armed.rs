@@ -142,7 +142,7 @@ impl Armed {
     pub(super) fn connect(&self, port: u16) -> Upstream {
         let holder = self.holders.lock().get(&port).cloned();
         if let Some(holder) = holder {
-            return match holder.dial() {
+            return match holder.dial(port) {
                 Dial::Connected(upstream) => Upstream::Connected(upstream),
                 Dial::Unreachable => Upstream::Failed(format!(
                     "found nothing listening on port {port} where its holder runs"

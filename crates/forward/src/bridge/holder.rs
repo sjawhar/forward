@@ -85,8 +85,8 @@ impl Holder {
         }
     }
 
-    /// Ask the holder for one connection to its loopback port.
-    pub(super) fn dial(&self) -> Dial {
+    /// Ask the holder for one connection to its loopback `port`.
+    pub(super) fn dial(&self, port: u16) -> Dial {
         let mut control = self.control.lock();
         let bounded = control
             .set_read_timeout(Some(DIAL_TIMEOUT))
@@ -99,7 +99,7 @@ impl Holder {
         }
         match receive(&control) {
             Ok((DIALED, Some(socket))) => {
-                stream_from(socket).map_or_else(Dial::Gone, Dial::Connected)
+                stream_from(socket, port).map_or_else(Dial::Gone, Dial::Connected)
             }
             Ok((DIALED, None)) => Dial::Gone("answered + without an attached socket".to_owned()),
             Ok((UNREACHABLE, None)) => Dial::Unreachable,
@@ -187,11 +187,26 @@ fn receive(control: &UnixStream) -> std::io::Result<(u8, Option<OwnedFd>)> {
     Ok((reply, descriptor))
 }
 
-/// Accept only a stream socket: the relay half-closes and reads to EOF.
-fn stream_from(socket: OwnedFd) -> Result<TcpStream, String> {
+/// Accept only a TCP stream whose peer is loopback on the held `port`.
+///
+/// The bridge relays the remote peer over whatever it accepts here, so a
+/// socket connected anywhere else (another port, the denylist's Docker API, a
+/// unix socket) would let a holder of one allowed port expose an unrelated
+/// endpoint. The peer address survives the trip across a network namespace.
+fn stream_from(socket: OwnedFd, port: u16) -> Result<TcpStream, String> {
     match getsockopt(&socket, sockopt::SockType) {
-        Ok(SockType::Stream) => Ok(TcpStream::from(socket)),
-        Ok(other) => Err(format!("sent a {other:?} socket, not a stream")),
-        Err(error) => Err(format!("sent a descriptor that is not a socket: {error}")),
+        Ok(SockType::Stream) => {}
+        Ok(other) => return Err(format!("sent a {other:?} socket, not a stream")),
+        Err(error) => return Err(format!("sent a descriptor that is not a socket: {error}")),
+    }
+    let upstream = TcpStream::from(socket);
+    match upstream.peer_addr() {
+        Ok(peer) if peer.ip().is_loopback() && peer.port() == port => Ok(upstream),
+        Ok(peer) => Err(format!(
+            "sent a socket connected to {peer}, not loopback port {port}"
+        )),
+        Err(error) => Err(format!(
+            "sent a socket that is not a connected TCP socket: {error}"
+        )),
     }
 }

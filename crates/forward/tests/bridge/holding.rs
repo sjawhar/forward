@@ -136,6 +136,44 @@ fn a_holder_that_breaks_protocol_is_released_after_refusing_that_connection() {
 }
 
 #[test]
+fn a_socket_connected_anywhere_but_the_held_port_is_refused() {
+    // Given: a holder of port P, and another loopback server on Q that would
+    // answer — a stand-in for any endpoint a holder is not holding.
+    let dir = tempfile::tempdir().unwrap();
+    let (bridge_port, path) = spawn_bridge_with_arming(&dir);
+    let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+    let held_port = reservation.local_addr().unwrap().port();
+    let elsewhere = spawn_echo_upstream();
+    let mut holder = UnixStream::connect(&path).unwrap();
+    holder
+        .write_all(format!("HOLD {held_port}\n").as_bytes())
+        .unwrap();
+    let mut acknowledgement = [0_u8; 3];
+    holder.read_exact(&mut acknowledgement).unwrap();
+    assert_eq!(&acknowledgement, b"ok\n");
+
+    // When: asked to dial P, the holder hands over a socket connected to Q.
+    let mut client = connect_through(bridge_port, held_port);
+    let mut request = [0_u8; 5];
+    holder.read_exact(&mut request).unwrap();
+    assert_eq!(&request, b"DIAL\n");
+    let wrong = TcpStream::connect(("127.0.0.1", elsewhere)).unwrap();
+    let descriptors = [std::os::fd::AsRawFd::as_raw_fd(&wrong)];
+    nix::sys::socket::sendmsg::<()>(
+        std::os::fd::AsRawFd::as_raw_fd(&holder),
+        &[std::io::IoSlice::new(b"+")],
+        &[nix::sys::socket::ControlMessage::ScmRights(&descriptors)],
+        nix::sys::socket::MsgFlags::empty(),
+        None,
+    )
+    .unwrap();
+
+    // Then: the laptop's connection is refused rather than relayed to Q.
+    client.write_all(b"ping").unwrap();
+    assert_refused(&mut client, "REFUSED\n");
+}
+
+#[test]
 fn a_hold_on_a_port_the_bridge_must_never_dial_is_refused() {
     // Given: a bridge; privileged ports and Docker's API are never dialled.
     let dir = tempfile::tempdir().unwrap();
