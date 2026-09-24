@@ -1,6 +1,6 @@
 # opencode
 
-The OpenCode plugin and the skill that ships with it. TypeScript, run by bun;
+The OpenCode plugin and the skills that ship with it. TypeScript, run by bun;
 `bun run test:secretsd-plugin` from the repo root, and CI gates it.
 
 ## Why it lives here
@@ -67,6 +67,10 @@ Its description triggers on the symptoms an agent is holding when it goes wrong
 (`OPENAI_API_KEY`, `sk-`, `401`, "placeholder"), not on the word "secrets". When
 the CLI surface changes, this file changes with it — it documents behaviour that
 is verified against the shipped binary, not intentions.
+
+`using-forward/SKILL.md` teaches the `forward` CLI's two procedures, the browser
+relay and port holds. It lives here so the one plugin pin that carries
+`using-secrets` carries it too.
 
 ## Size
 
