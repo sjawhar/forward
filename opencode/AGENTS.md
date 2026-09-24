@@ -63,13 +63,14 @@ so a tool result can never carry a secret — two tests assert that.
 the JSON status from `secrets get KEY` as the secret itself and told the human
 their key was a 14-character placeholder. It leads with that mistake.
 
-`using-forward/SKILL.md` teaches the `forward` CLI's two procedures, the browser relay and
-port holds. It lives here so the one plugin pin that carries `using-secrets` carries it too.
-
 Its description triggers on the symptoms an agent is holding when it goes wrong
 (`OPENAI_API_KEY`, `sk-`, `401`, "placeholder"), not on the word "secrets". When
 the CLI surface changes, this file changes with it — it documents behaviour that
 is verified against the shipped binary, not intentions.
+
+`using-forward/SKILL.md` teaches the `forward` CLI's two procedures, the browser
+relay and port holds. It lives here so the one plugin pin that carries `using-
+secrets` carries it too.
 
 ## Size
 
