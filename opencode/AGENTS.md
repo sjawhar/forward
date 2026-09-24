@@ -1,6 +1,6 @@
 # opencode
 
-The OpenCode plugin and the skill that ships with it. TypeScript, run by bun;
+The OpenCode plugin and the skills that ship with it. TypeScript, run by bun;
 `bun run test:secretsd-plugin` from the repo root, and CI gates it.
 
 ## Why it lives here
@@ -62,6 +62,9 @@ so a tool result can never carry a secret — two tests assert that.
 `using-secrets/SKILL.md` teaches agents the CLI. It exists because an agent read
 the JSON status from `secrets get KEY` as the secret itself and told the human
 their key was a 14-character placeholder. It leads with that mistake.
+
+`using-forward/SKILL.md` teaches the `forward` CLI's two procedures, the browser relay and
+port holds. It lives here so the one plugin pin that carries `using-secrets` carries it too.
 
 Its description triggers on the symptoms an agent is holding when it goes wrong
 (`OPENAI_API_KEY`, `sk-`, `401`, "placeholder"), not on the word "secrets". When
