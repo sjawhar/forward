@@ -69,8 +69,8 @@ the CLI surface changes, this file changes with it — it documents behaviour th
 is verified against the shipped binary, not intentions.
 
 `using-forward/SKILL.md` teaches the `forward` CLI's two procedures, the browser
-relay and port holds. It lives here so the one plugin pin that carries `using-
-secrets` carries it too.
+relay and port holds. It lives here so the one plugin pin that carries
+`using-secrets` carries it too.
 
 ## Size
 
