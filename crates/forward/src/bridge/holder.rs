@@ -1,15 +1,14 @@
-use std::io::{IoSlice, IoSliceMut, Write as _};
+use std::io::Write as _;
 use std::net::TcpStream;
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd as _, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use nix::errno::Errno;
-use nix::sys::socket::{
-    ControlMessage, ControlMessageOwned, MsgFlags, SockType, getsockopt, recv, recvmsg, sendmsg,
-    sockopt,
-};
+use nix::sys::socket::{MsgFlags, recv};
 use parking_lot::Mutex;
+
+use crate::fdpass;
 
 /// The bridge's request to a holder for one connection.
 pub(super) const DIAL: &[u8; 5] = b"DIAL\n";
@@ -97,7 +96,7 @@ impl Holder {
         if let Err(error) = control.write_all(DIAL) {
             return Dial::Gone(format!("did not take the request: {error}"));
         }
-        match receive(&control) {
+        match fdpass::receive(&control) {
             Ok((DIALED, Some(socket))) => {
                 stream_from(socket, port).map_or_else(Dial::Gone, Dial::Connected)
             }
@@ -116,75 +115,12 @@ impl Holder {
 
 /// Answer one dial with a connected socket, which the bridge then relays.
 pub(super) fn send_dialed(control: &UnixStream, socket: &TcpStream) -> std::io::Result<()> {
-    let descriptors = [socket.as_raw_fd()];
-    loop {
-        match sendmsg::<()>(
-            control.as_raw_fd(),
-            &[IoSlice::new(&[DIALED])],
-            &[ControlMessage::ScmRights(&descriptors)],
-            MsgFlags::empty(),
-            None,
-        ) {
-            Ok(1) => return Ok(()),
-            Ok(_) => return Err(std::io::ErrorKind::WriteZero.into()),
-            Err(Errno::EINTR) => continue,
-            Err(error) => return Err(error.into()),
-        }
-    }
+    fdpass::send(control, DIALED, socket)
 }
 
 /// Answer one dial with "nothing is listening here".
 pub(super) fn send_unreachable(mut control: &UnixStream) -> std::io::Result<()> {
     control.write_all(&[UNREACHABLE])
-}
-
-/// Read one holder reply: its byte, and the socket it carried if any.
-fn receive(control: &UnixStream) -> std::io::Result<(u8, Option<OwnedFd>)> {
-    let mut reply = [0_u8; 1];
-    let mut space = nix::cmsg_space!(RawFd);
-    let (bytes, truncated, descriptor) = {
-        let mut iov = [IoSliceMut::new(&mut reply)];
-        let message = loop {
-            match recvmsg::<()>(
-                control.as_raw_fd(),
-                &mut iov,
-                Some(&mut space),
-                MsgFlags::MSG_CMSG_CLOEXEC,
-            ) {
-                Ok(message) => break message,
-                Err(Errno::EINTR) => continue,
-                Err(error) => return Err(error.into()),
-            }
-        };
-        let mut descriptor: Option<OwnedFd> = None;
-        for cmsg in message.cmsgs()? {
-            if let ControlMessageOwned::ScmRights(received) = cmsg {
-                for raw in received {
-                    // SAFETY: SCM_RIGHTS installed `raw` in this process for
-                    // this message alone, so nothing else owns it; the
-                    // `OwnedFd` takes its single close obligation.
-                    let owned = unsafe { OwnedFd::from_raw_fd(raw) };
-                    // Anything past the first descriptor is closed here, unused.
-                    if descriptor.is_none() {
-                        descriptor = Some(owned);
-                    }
-                }
-            }
-        }
-        (
-            message.bytes,
-            message.flags.contains(MsgFlags::MSG_CTRUNC),
-            descriptor,
-        )
-    };
-    if bytes == 0 {
-        return Err(std::io::ErrorKind::UnexpectedEof.into());
-    }
-    if truncated {
-        return Err(std::io::Error::other("the attached socket was truncated"));
-    }
-    let [reply] = reply;
-    Ok((reply, descriptor))
 }
 
 /// Accept only a TCP stream whose peer is loopback on the held `port`.
@@ -194,19 +130,12 @@ fn receive(control: &UnixStream) -> std::io::Result<(u8, Option<OwnedFd>)> {
 /// unix socket) would let a holder of one allowed port expose an unrelated
 /// endpoint. The peer address survives the trip across a network namespace.
 fn stream_from(socket: OwnedFd, port: u16) -> Result<TcpStream, String> {
-    match getsockopt(&socket, sockopt::SockType) {
-        Ok(SockType::Stream) => {}
-        Ok(other) => return Err(format!("sent a {other:?} socket, not a stream")),
-        Err(error) => return Err(format!("sent a descriptor that is not a socket: {error}")),
-    }
-    let upstream = TcpStream::from(socket);
-    match upstream.peer_addr() {
-        Ok(peer) if peer.ip().is_loopback() && peer.port() == port => Ok(upstream),
-        Ok(peer) => Err(format!(
+    let (upstream, peer) = fdpass::connected_stream(socket)?;
+    if peer.ip().is_loopback() && peer.port() == port {
+        Ok(upstream)
+    } else {
+        Err(format!(
             "sent a socket connected to {peer}, not loopback port {port}"
-        )),
-        Err(error) => Err(format!(
-            "sent a socket that is not a connected TCP socket: {error}"
-        )),
+        ))
     }
 }

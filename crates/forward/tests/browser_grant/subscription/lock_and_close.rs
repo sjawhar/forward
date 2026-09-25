@@ -16,9 +16,9 @@ fn lock_epoch_ends_an_established_browser_pipe_and_refuses_its_port() {
     let subscription = spawn_subscription(grants.clone(), broker.path(), INERT_READ_TIMEOUT);
     broker.wait_for_attach();
 
-    let (port, client, task) = established_pipe(grants, broker.path());
+    let (endpoint, client, task) = established_pipe(grants, broker.path());
     broker.lock();
-    assert_revoked(client, task, port, Duration::from_secs(5));
+    assert_revoked(client, task, &endpoint, Duration::from_secs(5));
     drop(broker);
     subscription.shutdown();
 }
@@ -31,8 +31,8 @@ fn a_closed_attached_subscription_severs_live_pipes_without_outage_grace() {
     let subscription = spawn_subscription(grants.clone(), broker.path(), INERT_READ_TIMEOUT);
     broker.wait_for_attach();
 
-    let (port, client, task) = established_pipe(grants, broker.path());
+    let (endpoint, client, task) = established_pipe(grants, broker.path());
     broker.drop_subscription();
-    assert_revoked(client, task, port, Duration::from_secs(2));
+    assert_revoked(client, task, &endpoint, Duration::from_secs(2));
     subscription.shutdown();
 }

@@ -1,15 +1,17 @@
 use std::io::{ErrorKind, Read as _, Write as _};
 use std::net::{SocketAddr, SocketAddrV4, TcpListener, TcpStream};
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use forward::browser::grant::{Grant, Grants, ProcessAnchor};
 use forward::browser::peer::process_start;
-use forward::browser::proxy::{self, Resolver};
+use forward::browser::relay::Resolver;
+use forward::secretsd::BrokerIdentity;
 
-#[path = "browser_grant/ownership.rs"]
-mod ownership;
+#[path = "browser_grant/endpoint.rs"]
+mod endpoint;
 #[path = "browser_grant/registry.rs"]
 mod registry;
 #[path = "browser_grant/severance.rs"]
@@ -24,50 +26,47 @@ fn current_anchor() -> ProcessAnchor {
     ProcessAnchor::new(pid, process_start(pid).unwrap())
 }
 
-fn grant(anchor: ProcessAnchor, deadline: Instant) -> Grant {
+fn grant(anchor: ProcessAnchor, deadline: Instant, endpoint_port: u16) -> Grant {
     Grant {
         session: "session-a".to_owned(),
         anchor,
         token: TOKEN.to_vec(),
         deadline,
+        endpoint_port,
     }
 }
-fn insert_grant(grants: &Grants, port: u16, grant: Grant) {
-    // Synthetic authority for tests without a live subscription; nothing ever
-    // observes a competing identity.
-    insert_grant_as(
-        grants,
-        port,
-        forward::secretsd::BrokerIdentity {
-            instance: "broker-a".to_owned(),
-            epoch: 0,
-            socket: forward::secretsd::SocketIdentity {
-                device: 50,
-                inode: 283,
-            },
+
+/// Synthetic authority for tests without a live subscription; nothing ever
+/// observes a competing identity.
+fn authority() -> BrokerIdentity {
+    BrokerIdentity {
+        instance: "broker-a".to_owned(),
+        epoch: 0,
+        socket: forward::secretsd::SocketIdentity {
+            device: 50,
+            inode: 283,
         },
-        grant,
-    );
+    }
+}
+
+fn insert_grant(grants: &Grants, grant: Grant, control: &UnixStream) -> u64 {
+    insert_grant_as(grants, authority(), grant, control)
 }
 
 fn insert_grant_as(
     grants: &Grants,
-    port: u16,
-    authority: forward::secretsd::BrokerIdentity,
+    authority: BrokerIdentity,
     grant: Grant,
-) {
+    control: &UnixStream,
+) -> u64 {
     grants.observe_authority(authority.clone());
-    assert!(grants.insert_if_authority(port, &authority, grant));
+    grants
+        .insert_if_authority(&authority, grant, control)
+        .expect("the grant is inserted under the observed authority")
 }
 
 fn resolver(pid: Option<u32>) -> Resolver {
     Arc::new(move |_peer: SocketAddrV4, _local: SocketAddrV4| pid)
-}
-
-fn listener() -> (TcpListener, u16) {
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
-    (listener, port)
 }
 
 /// An upstream that asserts the header and payload before returning a response.
@@ -105,6 +104,7 @@ fn assert_refused(client: &mut TcpStream, expected: &[u8]) {
     client.read_to_end(&mut reply).unwrap();
     assert_eq!(reply, expected);
 }
+
 fn unconnected_upstream() -> TcpListener {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();

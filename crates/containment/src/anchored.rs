@@ -1,6 +1,6 @@
 //! Containment for a loopback TCP peer, anchored by pid and start time.
 //!
-//! The browser grant proxy is a loopback TCP listener, because a CDP client
+//! A browser grant's endpoint is a loopback TCP listener, because a CDP client
 //! cannot dial a unix socket. That rules out `SO_PEERPIDFD`: there is no pinned
 //! descriptor for the far end of a TCP connection, so the pid is read after the
 //! fact and could in principle be recycled. Pairing it with the kernel start
@@ -45,7 +45,7 @@ impl AnchoredPeer {
 
     /// Whether `pid` descends from this exact process instance.
     ///
-    /// This is the authorization primitive for the grant proxy.
+    /// This is the authorization primitive for a grant's endpoint.
     #[must_use]
     pub fn contains(&self, pid: u32) -> bool {
         self.contains_with(pid, &mut read_process)

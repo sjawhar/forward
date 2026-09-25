@@ -76,8 +76,20 @@ pub fn probe(path: &Path) -> ProbeOutcome {
     }
 }
 
-/// Ask the local daemon for a grant. Returns the bound loopback port.
-pub fn request(path: &Path, ttl_secs: u64, token: &[u8]) -> Result<u16, RequestFailure> {
+/// Ask the local daemon for a grant over `endpoint_port`, the loopback port
+/// the caller has already bound for it.
+///
+/// On success the connection is the grant's control channel and is returned
+/// live: the grant lasts exactly as long as it stays open, so the caller must
+/// hand it to the relay that will serve the endpoint rather than drop it. The
+/// reply is read a byte at a time, leaving nothing buffered away from the
+/// channel its new owner is about to read.
+pub fn request(
+    path: &Path,
+    ttl_secs: u64,
+    token: &[u8],
+    endpoint_port: u16,
+) -> Result<UnixStream, RequestFailure> {
     let mut stream = UnixStream::connect(path).map_err(|_| RequestFailure::Unreachable)?;
     stream
         .set_read_timeout(Some(REPLY_TIMEOUT))
@@ -85,16 +97,19 @@ pub fn request(path: &Path, ttl_secs: u64, token: &[u8]) -> Result<u16, RequestF
         .and_then(|()| stream.write_all(ttl_secs.to_string().as_bytes()))
         .and_then(|()| stream.write_all(b" "))
         .and_then(|()| stream.write_all(token))
+        .and_then(|()| stream.write_all(b" "))
+        .and_then(|()| stream.write_all(endpoint_port.to_string().as_bytes()))
         .and_then(|()| stream.write_all(b"\n"))
         .map_err(|_| RequestFailure::Unreachable)?;
-    let mut reply = String::new();
-    BufReader::new(stream)
-        .read_line(&mut reply)
-        .map_err(|_| RequestFailure::Unreachable)?;
-    let reply = reply.trim_end();
-    if let Ok(port) = reply.parse() {
-        return Ok(port);
+    let reply =
+        super::read_line_with_timeout(&stream, REPLY_TIMEOUT).ok_or(RequestFailure::Unreachable)?;
+    if reply.as_slice() == b"OK" {
+        stream
+            .set_read_timeout(None)
+            .map_err(|_| RequestFailure::Unreachable)?;
+        return Ok(stream);
     }
+    let reply = std::str::from_utf8(&reply).map_err(|_| RequestFailure::Unreachable)?;
     match reply.strip_prefix("REFUSED") {
         Some(reason) => Err(RequestFailure::Refused(reason.trim().to_owned())),
         None => Err(RequestFailure::Unreachable),

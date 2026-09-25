@@ -3,22 +3,22 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-use super::{GrantEntry, Grants};
+use super::Grants;
 
-/// Duplicated descriptors for every pipe a port's grant is serving.
-pub(super) type PipeTable = HashMap<u16, Vec<(u64, (std::net::TcpStream, std::net::TcpStream))>>;
+/// Duplicated descriptors for every pipe a grant is serving, keyed by grant id.
+pub(super) type PipeTable = HashMap<u64, Vec<(u64, (std::net::TcpStream, std::net::TcpStream))>>;
 pub(super) type PipeHandles = Vec<(u64, (std::net::TcpStream, std::net::TcpStream))>;
 
 /// Removes its pipe's handles when the pipe ends of its own accord.
 pub struct PipeGuard {
     pipes: Arc<Mutex<PipeTable>>,
-    port: u16,
+    grant_id: u64,
     id: u64,
 }
 
 impl Grants {
-    /// Register a live pipe's socket pair under `port`, so ending the grant
-    /// ends the pipe.
+    /// Register a live pipe's socket pair under `grant_id`, so ending the
+    /// grant ends the pipe.
     ///
     /// CDP multiplexes a whole session over one long-lived websocket, so a
     /// grant that only refuses *new* connections leaves an established session
@@ -28,30 +28,26 @@ impl Grants {
     /// ends on its own, so a finished pipe does not leak two descriptors.
     pub(crate) fn register_pipe(
         &self,
-        port: u16,
         grant_id: u64,
         client: &std::net::TcpStream,
         laptop: &std::net::TcpStream,
     ) -> std::io::Result<PipeGuard> {
-        // Lock pipes before ports, as `expire` does below: this keeps its
-        // removal from falling between the live-grant check and registration.
+        // Lock pipes before grants, as `expire` does: this keeps its removal
+        // from falling between the live-grant check and registration.
         let mut pipes = self.pipes.lock();
-        let ports = self.ports.lock();
-        if ports
-            .get(&port)
-            .is_none_or(|entry: &GrantEntry| entry.id != grant_id)
-        {
+        let grants = self.grants.lock();
+        if !grants.contains_key(&grant_id) {
             return Err(std::io::Error::from(std::io::ErrorKind::NotFound));
         }
         let handles = (client.try_clone()?, laptop.try_clone()?);
         let id = self
             .next_id
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        pipes.entry(port).or_default().push((id, handles));
-        drop(ports);
+        pipes.entry(grant_id).or_default().push((id, handles));
+        drop(grants);
         Ok(PipeGuard {
             pipes: Arc::clone(&self.pipes),
-            port,
+            grant_id,
             id,
         })
     }
@@ -59,7 +55,7 @@ impl Grants {
 
 impl Drop for PipeGuard {
     fn drop(&mut self) {
-        if let Some(entries) = self.pipes.lock().get_mut(&self.port) {
+        if let Some(entries) = self.pipes.lock().get_mut(&self.grant_id) {
             entries.retain(|(id, _)| *id != self.id);
         }
     }

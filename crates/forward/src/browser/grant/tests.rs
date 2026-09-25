@@ -1,134 +1,108 @@
-use std::net::{TcpListener, TcpStream};
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 use super::*;
 
+mod lifetime;
+
+const ENDPOINT_PORT: u16 = 12811;
+
 fn grant(session: &str, ttl: Duration) -> Grant {
+    at_port(session, ttl, ENDPOINT_PORT)
+}
+
+fn at_port(session: &str, ttl: Duration, endpoint_port: u16) -> Grant {
     Grant {
         session: session.to_owned(),
         anchor: ProcessAnchor::new(1, 1),
         token: b"correct-horse".to_vec(),
         deadline: Instant::now() + ttl,
+        endpoint_port,
     }
 }
 
+/// A stand-in for the control channel a real grant keeps open. The returned
+/// end is the caller's: hold it, or the grant reads as already ended.
+fn control() -> (UnixStream, UnixStream) {
+    UnixStream::pair().unwrap()
+}
+
+fn insert(grants: &Grants, grant: Grant) -> (u64, UnixStream) {
+    let (server, caller) = control();
+    let id = grants
+        .insert(grant, &server)
+        .expect("the grant is inserted");
+    (id, caller)
+}
+
 #[test]
-fn a_live_grant_is_returned_for_its_port() {
+fn a_live_grant_is_returned_for_its_id() {
     let grants = Grants::new();
-    grants.insert(12811, grant("session-a", Duration::from_secs(60)));
-    assert_eq!(grants.live(12811).unwrap().session, "session-a");
+    let (id, _caller) = insert(&grants, grant("session-a", Duration::from_secs(60)));
+    assert_eq!(grants.live(id).unwrap().session, "session-a");
 }
 
 #[test]
 fn an_expired_grant_is_not_returned() {
     let grants = Grants::new();
-    grants.insert(12811, grant("session-a", Duration::from_millis(1)));
+    let (id, _caller) = insert(&grants, grant("session-a", Duration::from_millis(1)));
     std::thread::sleep(Duration::from_millis(5));
-    assert!(grants.live(12811).is_none());
+    assert!(grants.live(id).is_none());
 }
 
 #[test]
-fn an_unknown_port_has_no_grant() {
-    assert!(Grants::new().live(12811).is_none());
+fn an_unknown_id_has_no_grant() {
+    assert!(Grants::new().live(0).is_none());
 }
 
 #[test]
-fn expiring_one_grant_leaves_another_usable() {
-    // The token is shared by every grant, so dropping one must not disarm
-    // the other.
+fn two_grants_on_one_endpoint_port_are_separate_grants() {
+    // Ports are no longer unique: a grant's endpoint lives in its caller's
+    // network namespace, so two agent boxes can hold 12811 at the same time.
+    // This fails if the registry is keyed by port again -- the second insert
+    // would replace the first, and expiring either would end both.
     let grants = Grants::new();
-    grants.insert(12811, grant("session-a", Duration::from_secs(60)));
-    grants.insert(12812, grant("session-b", Duration::from_secs(60)));
-    grants.expire(12811);
-    assert!(grants.live(12811).is_none());
-    assert_eq!(grants.live(12812).unwrap().session, "session-b");
+    let (first, _first_caller) = insert(
+        &grants,
+        at_port("session-a", Duration::from_secs(60), ENDPOINT_PORT),
+    );
+    let (second, _second_caller) = insert(
+        &grants,
+        at_port("session-b", Duration::from_secs(60), ENDPOINT_PORT),
+    );
+
+    grants.expire(first);
+
+    assert!(grants.live(first).is_none());
+    assert_eq!(grants.live(second).unwrap().session, "session-b");
+    assert_eq!(grants.live(second).unwrap().endpoint_port, ENDPOINT_PORT);
 }
 
 #[test]
 fn clones_share_one_registry() {
     let grants = Grants::new();
     let clone = grants.clone();
-    grants.insert(12811, grant("session-a", Duration::from_secs(60)));
-    assert!(clone.live(12811).is_some());
-}
-
-#[test]
-fn replacing_a_grant_retires_its_predecessor() {
-    let grants = Grants::new();
-    grants.insert(12811, grant("session-a", Duration::from_secs(60)));
-    grants.insert(12811, grant("session-b", Duration::from_secs(60)));
-    assert_eq!(grants.live(12811).unwrap().session, "session-b");
-}
-
-#[test]
-fn expiring_a_grant_removes_its_token_from_the_registry() {
-    let grants = Grants::new();
-    grants.insert(12811, grant("session-a", Duration::from_secs(60)));
-    grants.expire(12811);
-    assert!(grants.live(12811).is_none());
-}
-
-#[test]
-fn an_accepted_grant_expiring_before_registration_leaves_no_pipe() {
-    // This fails if `register_pipe` only records handles: an accepted handler
-    // can otherwise outlive the expired authorization in the pipe table.
-    let grants = Grants::new();
-    let port = 12811;
-    grants.insert(port, grant("session-a", Duration::from_secs(60)));
-    let (grant_id, _accepted_grant) = grants.live_with_id(port).expect("grant is live at accept");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (laptop, _) = listener.accept().unwrap();
-
-    grants.expire(port);
-
-    assert!(
-        grants
-            .register_pipe(port, grant_id, &client, &laptop)
-            .is_err()
-    );
-    assert!(grants.pipes.lock().is_empty());
-}
-#[test]
-fn a_reused_port_rejects_a_handler_accepted_under_the_prior_grant() {
-    // This fails if registration looks only at port liveness: a handler that
-    // captured grant A could otherwise register beneath replacement grant B.
-    let grants = Grants::new();
-    let port = 12811;
-    grants.insert(port, grant("session-a", Duration::from_secs(60)));
-    let (grant_id, _accepted_grant) = grants.live_with_id(port).expect("grant A is live");
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
-    let (laptop, _) = listener.accept().unwrap();
-
-    grants.expire(port);
-    grants.insert(port, grant("session-b", Duration::from_secs(60)));
-
-    assert!(
-        grants
-            .register_pipe(port, grant_id, &client, &laptop)
-            .is_err()
-    );
-    assert_eq!(grants.live(port).unwrap().session, "session-b");
-    assert!(grants.pipes.lock().is_empty());
+    let (id, _caller) = insert(&grants, grant("session-a", Duration::from_secs(60)));
+    assert!(clone.live(id).is_some());
 }
 
 #[test]
 fn expiring_a_grant_overwrites_its_removed_token() {
-    let mut ports = HashMap::new();
+    let mut registry = HashMap::new();
     let original = grant("session-a", Duration::from_secs(60));
     let token_len = original.token.len();
-    ports.insert(
-        12811,
+    let (server, _caller) = control();
+    registry.insert(
+        7,
         GrantEntry {
-            id: 0,
             grant: original,
+            control: server,
         },
     );
 
-    let expired = scrub(&mut ports, 12811).expect("the grant is removed");
+    let expired = scrub(&mut registry, 7).expect("the grant is removed");
 
-    assert!(ports.is_empty());
+    assert!(registry.is_empty());
     // SAFETY: `zeroize` clears the Vec length but keeps its allocation;
     // `token_len` bytes are initialized and within that allocation.
     let wiped = unsafe { std::slice::from_raw_parts(expired.grant.token.as_ptr(), token_len) };
@@ -146,19 +120,21 @@ fn a_live_grant_is_found_for_its_process_anchor() {
         crate::browser::peer::process_start(std::process::id()).unwrap(),
     );
     let grants = Grants::new();
-    let mut owned = grant("session-a", Duration::from_secs(60));
+    let mut owned = at_port("session-a", Duration::from_secs(60), 38_987);
     owned.anchor = caller;
-    grants.insert(12811, owned);
-    grants.insert(12812, grant("session-b", Duration::from_secs(60)));
+    let (_, _owned_caller) = insert(&grants, owned);
+    let (_, _other_caller) = insert(&grants, grant("session-b", Duration::from_secs(60)));
 
     let (port, found) = grants.live_for_descendant(caller).unwrap();
-    assert_eq!((port, found.session.as_str()), (12811, "session-a"));
+
+    assert_eq!((port, found.session.as_str()), (38_987, "session-a"));
 }
+
 #[test]
 fn snapshot_live_excludes_expired_grants_and_preserves_a_positive_ttl() {
     let grants = Grants::new();
-    grants.insert(12811, grant("live", Duration::from_secs(60)));
-    grants.insert(12812, grant("expired", Duration::from_millis(1)));
+    let (_, _live_caller) = insert(&grants, grant("live", Duration::from_secs(60)));
+    let (_, _expired_caller) = insert(&grants, grant("expired", Duration::from_millis(1)));
     std::thread::sleep(Duration::from_millis(5));
 
     let snapshot = grants.snapshot_live();
@@ -190,11 +166,16 @@ fn a_grant_redeemed_by_prior_instance_cannot_insert_at_matching_epoch() {
             inode: 283,
         },
     });
+    let (server, _caller) = control();
 
-    assert!(!grants.insert_if_authority(
-        12811,
-        &redeemed,
-        grant("session-a", Duration::from_secs(60))
-    ));
-    assert!(grants.live(12811).is_none());
+    assert!(
+        grants
+            .insert_if_authority(
+                &redeemed,
+                grant("session-a", Duration::from_secs(60)),
+                &server
+            )
+            .is_none()
+    );
+    assert!(grants.snapshot_live().is_empty());
 }

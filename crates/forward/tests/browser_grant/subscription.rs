@@ -7,7 +7,7 @@ use std::time::Duration;
 use forward::browser::grant::Grants;
 use forward::browser::subscription::{SubscriptionTiming, spawn_with_socket};
 
-use super::{assert_refused, current_anchor, grant, insert_grant_as, proxy, spawn_held_upstream};
+use super::spawn_held_upstream;
 
 #[path = "subscription/broker.rs"]
 mod broker;
@@ -61,38 +61,36 @@ fn broker_authority(path: &Path) -> forward::secretsd::BrokerIdentity {
 fn established_pipe(
     grants: Grants,
     broker_path: &Path,
-) -> (u16, std::net::TcpStream, thread::JoinHandle<()>) {
+) -> (
+    super::endpoint::Endpoint,
+    std::net::TcpStream,
+    thread::JoinHandle<()>,
+) {
     let (upstream, established, task) = spawn_held_upstream();
-    let proxy = proxy::bind(grants.clone(), upstream).unwrap();
-    let port = proxy.port();
-    insert_grant_as(
+    let endpoint = super::endpoint::start_as(
         &grants,
-        port,
         broker_authority(broker_path),
-        grant(
-            current_anchor(),
-            std::time::Instant::now() + Duration::from_secs(600),
-        ),
+        upstream,
+        std::time::Instant::now() + Duration::from_secs(600),
+        super::resolver(Some(std::process::id())),
     );
-    proxy.serve();
-    let mut client = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut client = endpoint.connect();
     client.write_all(b"hold").unwrap();
     established
         .recv_timeout(Duration::from_secs(5))
         .expect("pipe did not establish");
-    (port, client, task)
+    (endpoint, client, task)
 }
 
 fn assert_revoked(
     mut client: std::net::TcpStream,
     task: thread::JoinHandle<()>,
-    port: u16,
+    endpoint: &super::endpoint::Endpoint,
     within: Duration,
 ) {
     client.set_read_timeout(Some(within)).unwrap();
     let mut buffer = [0_u8; 16];
     assert!(matches!(client.read(&mut buffer), Ok(0)));
     task.join().unwrap();
-    let mut late = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-    assert_refused(&mut late, b"REFUSED UNGRANTED\n");
+    endpoint.assert_retired(within);
 }

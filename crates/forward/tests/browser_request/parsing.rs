@@ -2,28 +2,25 @@ use forward::browser::request::{GrantStatus, parse, parse_status, parse_ttl};
 
 use super::RECEIPT;
 
+const HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
 #[test]
 fn a_well_formed_request_parses() {
     assert!(matches!(
-        parse(b"GRANT 1800 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
-        Some((1800, receipt)) if receipt.len() == RECEIPT.len()
+        parse(format!("GRANT 1800 {HEX} 38987").as_bytes()),
+        Some((1800, receipt, 38_987)) if receipt.len() == RECEIPT.len()
     ));
 }
 
 #[test]
 fn a_request_without_the_verb_is_rejected() {
-    assert!(
-        parse(b"1800 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").is_none()
-    );
+    assert!(parse(format!("1800 {HEX} 38987").as_bytes()).is_none());
     assert!(parse(b"STATUS").is_none());
 }
 
 #[test]
 fn a_non_numeric_ttl_is_rejected() {
-    assert!(
-        parse(b"GRANT soon aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .is_none()
-    );
+    assert!(parse(format!("GRANT soon {HEX} 38987").as_bytes()).is_none());
 }
 
 #[test]
@@ -34,27 +31,27 @@ fn a_missing_receipt_is_rejected() {
 
 #[test]
 fn a_malformed_receipt_is_rejected() {
-    assert!(parse(b"GRANT 1800 correct-horse").is_none());
-    assert!(
-        parse(b"GRANT 1800 AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
-            .is_none()
-    );
-    assert!(
-        parse(b"GRANT 1800 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ")
-            .is_none()
-    );
+    assert!(parse(b"GRANT 1800 correct-horse 38987").is_none());
+    assert!(parse(format!("GRANT 1800 {} 38987", HEX.to_uppercase()).as_bytes()).is_none());
+    assert!(parse(format!("GRANT 1800 {} 38987", &HEX[1..]).as_bytes()).is_none());
+}
+
+#[test]
+fn a_request_without_a_usable_endpoint_port_is_rejected() {
+    // A grant with no endpoint behind it is unusable, and a trailing field is
+    // a caller speaking a protocol this one does not know.
+    assert!(parse(format!("GRANT 1800 {HEX}").as_bytes()).is_none());
+    assert!(parse(format!("GRANT 1800 {HEX} ").as_bytes()).is_none());
+    assert!(parse(format!("GRANT 1800 {HEX} 0").as_bytes()).is_none());
+    assert!(parse(format!("GRANT 1800 {HEX} 65536").as_bytes()).is_none());
+    assert!(parse(format!("GRANT 1800 {HEX} soon").as_bytes()).is_none());
+    assert!(parse(format!("GRANT 1800 {HEX} 38987 extra").as_bytes()).is_none());
 }
 
 #[test]
 fn a_zero_or_overlong_ttl_is_rejected() {
-    assert!(
-        parse(b"GRANT 0 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .is_none()
-    );
-    assert!(
-        parse(b"GRANT 43201 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-            .is_none()
-    );
+    assert!(parse(format!("GRANT 0 {HEX} 38987").as_bytes()).is_none());
+    assert!(parse(format!("GRANT 43201 {HEX} 38987").as_bytes()).is_none());
 }
 
 #[test]

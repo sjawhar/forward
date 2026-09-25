@@ -83,19 +83,7 @@ enum Command {
     /// Manage browser access
     Browser {
         #[command(subcommand)]
-        action: BrowserCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum BrowserCommand {
-    /// Request browser access for this session (devbox side)
-    Grant {
-        /// Grant lifetime, for example 45s, 30m, or 2h
-        #[arg(long, default_value = "30m")]
-        ttl: String,
-        #[arg(long)]
-        config: Option<std::path::PathBuf>,
+        action: grant::BrowserCommand,
     },
 }
 
@@ -185,9 +173,7 @@ fn main() -> anyhow::Result<()> {
             daemon::run(cfg, &config_path, port).unwrap_or_else(|error| exit_with_error(error));
             Ok(())
         }
-        Command::Browser { action } => match action {
-            BrowserCommand::Grant { ttl, config } => grant::run(&ttl, config),
-        },
+        Command::Browser { action } => grant::run(action),
         Command::Doctor {
             config,
             channel_port,

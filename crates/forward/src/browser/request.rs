@@ -9,6 +9,6 @@ pub use client::{
 pub use line::read_line_with_timeout;
 pub use proto::parse_ttl;
 pub use server::{
-    Binder, Deps, IdentityReader, Redeemer, SessionResolver, parse, serve, serve_with_binder,
+    Deps, IdentityReader, Redeemer, SessionResolver, parse, serve, serve_control, serve_with_deps,
     socket_path,
 };
