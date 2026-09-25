@@ -6,9 +6,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use forward::browser::push::FeedSlot;
-use forward::browser::request::{
-    Deps, IdentityReader, Redeemer, SessionResolver, serve_with_binder,
-};
+use forward::browser::request::{Deps, IdentityReader, Redeemer, SessionResolver, serve_with_deps};
 use forward::secretsd::{BrokerError, BrokerIdentity, RedeemedGrant};
 
 #[path = "browser_request/failures.rs"]
@@ -113,14 +111,13 @@ fn spawn_server(
 ) {
     grants.observe_authority(authority());
     thread::spawn(move || {
-        serve_with_binder(
+        serve_with_deps(
             Deps {
                 grants,
                 slot,
                 resolver,
                 redeemer,
                 identity_reader: accepting_identity_reader(),
-                binder: Arc::new(forward::browser::proxy::bind),
             },
             cfg,
             path,
@@ -129,13 +126,34 @@ fn spawn_server(
 }
 
 fn request_reply(path: &std::path::Path, ttl_secs: u64, receipt: &[u8]) -> String {
+    reply_for_port(path, ttl_secs, receipt, 12_811)
+}
+
+fn reply_for_port(
+    path: &std::path::Path,
+    ttl_secs: u64,
+    receipt: &[u8],
+    endpoint_port: u16,
+) -> String {
     let mut stream = UnixStream::connect(path).unwrap();
     stream.write_all(b"GRANT ").unwrap();
     stream.write_all(ttl_secs.to_string().as_bytes()).unwrap();
     stream.write_all(b" ").unwrap();
     stream.write_all(receipt).unwrap();
+    stream.write_all(b" ").unwrap();
+    stream
+        .write_all(endpoint_port.to_string().as_bytes())
+        .unwrap();
     stream.write_all(b"\n").unwrap();
     let mut reply = String::new();
     BufReader::new(stream).read_line(&mut reply).unwrap();
     reply
+}
+
+/// The caller's own endpoint, bound before it asks for a grant, exactly as
+/// `forward browser grant` binds one.
+fn endpoint() -> (TcpListener, u16) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    (listener, port)
 }

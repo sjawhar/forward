@@ -1,61 +1,54 @@
 use std::io::{Read as _, Write as _};
-use std::net::{TcpListener, TcpStream};
 use std::sync::Arc;
-use std::thread;
 use std::time::{Duration, Instant};
 
 use forward::browser::grant::Grants;
-use forward::browser::proxy::{self, Resolver};
+use forward::browser::relay::Resolver;
 
-use super::{assert_refused, current_anchor, grant, insert_grant, listener, spawn_held_upstream};
+use super::{assert_not_dialed, endpoint, resolver, spawn_held_upstream, unconnected_upstream};
 
 #[test]
-fn expiry_after_accept_refuses_without_piping_the_stale_grant() {
-    // This fails if registration trusts the accept-time grant clone: expiry
-    // then runs before `handle` registers, leaving an unseverable pipe behind.
+fn a_grant_that_ends_before_admission_is_never_piped() {
+    // The endpoint and the registry are in different processes, so a grant can
+    // end while a client is mid-handshake with its relay. This fails if the
+    // ending does not reach the control channel: the connection would be
+    // handed over and piped under a grant that no longer exists.
     let grants = Grants::new();
-    let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
-    let upstream_address = upstream.local_addr().unwrap();
-    let (forwarded, observed) = std::sync::mpsc::channel();
-    let upstream_task = thread::spawn(move || {
-        let (mut stream, _) = upstream.accept().unwrap();
-        let mut header = Vec::new();
-        let mut byte = [0_u8; 1];
-        while stream.read(&mut byte).unwrap() == 1 && byte[0] != b'\n' {
-            header.push(byte[0]);
-        }
-        assert_eq!(header, b"RELAY correct-horse");
-        let mut payload = [0_u8; 4];
-        let received = stream.read(&mut payload).unwrap();
-        if received > 0 {
-            stream.write_all(b"FORWARDED").unwrap();
-        }
-        forwarded.send(received).unwrap();
-    });
-    let (listener, port) = listener();
-    insert_grant(
-        &grants,
-        port,
-        grant(current_anchor(), Instant::now() + Duration::from_secs(60)),
-    );
-    let expiring_grants = grants.clone();
+    let upstream = unconnected_upstream();
+    let ending = Arc::new(parking_lot::Mutex::new(None::<(Grants, u64)>));
+    let ending_for_resolver = Arc::clone(&ending);
     let resolver: Resolver = Arc::new(move |_, _| {
-        expiring_grants.expire(port);
+        if let Some((grants, id)) = ending_for_resolver.lock().take() {
+            grants.expire(id);
+        }
         Some(std::process::id())
     });
-    proxy::spawn_with_listener(grants.clone(), listener, upstream_address, resolver);
+    let endpoint = endpoint::start(
+        &grants,
+        upstream.local_addr().unwrap(),
+        Instant::now() + Duration::from_secs(60),
+        resolver,
+    );
+    *ending.lock() = Some((grants.clone(), endpoint.id));
 
-    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    client.write_all(b"ping").unwrap();
+    let mut client = endpoint.connect();
+    let _ = client.write_all(b"ping");
 
-    assert_refused(&mut client, b"REFUSED UNGRANTED\n");
-    assert_eq!(observed.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
-    upstream_task.join().unwrap();
-    assert!(grants.live(port).is_none());
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut sink = [0_u8; 16];
+    assert!(
+        matches!(client.read(&mut sink), Ok(0) | Err(_)),
+        "a connection was served under a grant that had ended"
+    );
+    assert_not_dialed(&upstream);
+    assert!(grants.live(endpoint.id).is_none());
+    endpoint.assert_retired(Duration::from_secs(5));
 }
 
 #[test]
-fn expiring_a_grant_severs_an_established_pipe() {
+fn expiring_a_grant_severs_an_established_pipe_and_retires_its_endpoint() {
     // The revocation acceptance test. CDP multiplexes a whole session over one
     // long-lived websocket, so a grant ending that only refuses *new*
     // connections leaves the established session driving the browser until its
@@ -63,23 +56,21 @@ fn expiring_a_grant_severs_an_established_pipe() {
     // exactly what it did before pipes were registered with their grant.
     let grants = Grants::new();
     let (upstream, established, task) = spawn_held_upstream();
-    let proxy = proxy::bind(grants.clone(), upstream).unwrap();
-    let port = proxy.port();
-    insert_grant(
+    let endpoint = endpoint::start(
         &grants,
-        port,
-        grant(current_anchor(), Instant::now() + Duration::from_secs(600)),
+        upstream,
+        Instant::now() + Duration::from_secs(600),
+        resolver(Some(std::process::id())),
     );
-    proxy.serve();
 
-    let mut client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+    let mut client = endpoint.connect();
     client.write_all(b"hold").unwrap();
     // The upstream has read the payload, so the pipe is registered and moving.
     established
         .recv_timeout(Duration::from_secs(5))
         .expect("pipe established");
 
-    grants.expire(port);
+    grants.expire(endpoint.id);
 
     // The established connection must end promptly -- the grant's TTL had ten
     // minutes left and the idle timeout is fifteen, so only severance explains
@@ -97,7 +88,6 @@ fn expiring_a_grant_severs_an_established_pipe() {
     );
     task.join().unwrap();
 
-    // And a fresh connection is refused, not proxied.
-    let mut late = TcpStream::connect(("127.0.0.1", port)).unwrap();
-    assert_refused(&mut late, b"REFUSED UNGRANTED\n");
+    // And the endpoint itself is gone, not merely refusing.
+    endpoint.assert_retired(Duration::from_secs(5));
 }

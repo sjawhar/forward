@@ -1,5 +1,17 @@
 use std::io::{BufRead as _, Write as _};
 use std::process::Command;
+use std::time::{Duration, Instant};
+
+#[path = "browser_cli/endpoint.rs"]
+mod endpoint;
+
+fn await_socket(path: &std::path::Path) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while std::os::unix::net::UnixStream::connect(path).is_err() {
+        assert!(Instant::now() < deadline, "request socket never came up");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
 
 #[test]
 fn browser_grant_loads_its_explicit_config() {

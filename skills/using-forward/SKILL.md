@@ -44,7 +44,10 @@ forward browser grant --ttl 30m
 
 It blinks Sami's key and blocks until he taps it (about 20 seconds before it gives up with
 `authorization timed out waiting for the YubiKey touch`). On success it prints the
-session-local endpoint, e.g. `http://127.0.0.1:38987`. `forward doctor` then reads
+session-local endpoint, e.g. `http://127.0.0.1:38987`, and leaves a small `forward browser
+relay` process behind to serve it — that endpoint is served **here**, on the loopback of
+whatever machine ran the command, so it works the same from the host and from inside an
+agent box. `forward doctor` then reads
 `browser grant: live for this session at http://127.0.0.1:38987 (1779s left)`.
 
 **That endpoint is a CDP discovery URL** (`/json/version` answers with Sami's Chrome and a
@@ -79,7 +82,8 @@ rather than navigating Sami's visible tab. If `open` still times out, run `docto
 | Line | Meaning | Do |
 |---|---|---|
 | `browser relay: locked … (no grant)` + `browser grant: none` | Normal locked state | `forward browser grant --ttl 30m` |
-| `browser grant: live at http://127.0.0.1:<port> (Ns left)` | Ready | `browser open` with `app.cdp_url` = that URL |
+| `browser grant: live for this session at http://127.0.0.1:<port> (Ns left)` | Ready; `doctor` asked the endpoint for `/json/version` and it answered | `browser open` with `app.cdp_url` = that URL |
+| the same line plus `— the endpoint does not answer` | The grant is recorded but nothing serves it here: its relay died, or it belongs to a session on another machine | `forward browser grant --ttl 30m` again, from the machine that will use it |
 | `browser relay:` unreachable / refused | Laptop daemon or Tailscale path down | Tell Sami what the line says |
 | `url channel` / `callback bridge` / `pcsc` lines | Other channels; unrelated to browser access | Ignore for this purpose |
 

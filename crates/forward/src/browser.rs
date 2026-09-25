@@ -1,8 +1,8 @@
 pub mod feed;
 pub mod grant;
 pub mod peer;
-pub mod proxy;
 pub mod push;
+pub mod relay;
 pub mod request;
 pub mod subscription;
 use std::io::{self, BufRead, BufReader, Read, Write};

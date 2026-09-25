@@ -2,49 +2,19 @@ use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixListener;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use std::{io, thread};
+use std::thread;
+use std::time::Duration;
 
 use forward::browser::grant::Grants;
-use forward::browser::proxy::ProxyError;
 use forward::browser::push::FeedSlot;
-use forward::browser::request::{
-    Binder, Deps, IdentityReader, Redeemer, SessionResolver, serve_with_binder,
-};
+use forward::browser::request::{Deps, IdentityReader, Redeemer, SessionResolver, serve_with_deps};
 
 use super::super::{
-    RECEIPT, accepting_redeemer, authority, await_socket, feed_acceptor, grant_config,
-    redeemer_with_ttl, request_reply,
+    RECEIPT, authority, await_socket, feed_acceptor, grant_config, redeemer_with_ttl, request_reply,
 };
-use super::spawn_with_binder;
 
 #[test]
-fn a_bind_failure_after_redeem_does_not_publish_a_token() {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("grant.sock");
-    let grants = Grants::new();
-    let (slot, receiver) = feed_acceptor();
-    let binder: Binder = Arc::new(|_, _| {
-        Err(ProxyError::Bind {
-            source: io::Error::other("test bind failure"),
-        })
-    });
-    spawn_with_binder(
-        grants.clone(),
-        path.clone(),
-        slot,
-        accepting_redeemer(),
-        binder,
-    );
-    await_socket(&path);
-
-    assert_eq!(request_reply(&path, 60, RECEIPT), "REFUSED\n");
-    assert!(receiver.try_recv().is_err());
-    assert!(grants.snapshot_live().is_empty());
-}
-
-#[test]
-fn an_instance_change_at_matching_epoch_refuses_before_a_token_or_proxy_survives() {
+fn an_instance_change_at_matching_epoch_refuses_before_a_token_survives() {
     let broker_directory = tempfile::tempdir().unwrap();
     let broker_path = broker_directory.path().join("secretsd.sock");
     let broker_listener = UnixListener::bind(&broker_path).unwrap();
@@ -80,13 +50,6 @@ fn an_instance_change_at_matching_epoch_refuses_before_a_token_or_proxy_survives
     let path = directory.path().join("grant.sock");
     let grants = Grants::new();
     let (slot, receiver) = feed_acceptor();
-    let bound_port = Arc::new(parking_lot::Mutex::new(None));
-    let port_for_binder = Arc::clone(&bound_port);
-    let binder: Binder = Arc::new(move |grants, upstream| {
-        let proxy = forward::browser::proxy::bind(grants, upstream)?;
-        *port_for_binder.lock() = Some(proxy.port());
-        Ok(proxy)
-    });
     let redeem_path = broker_path.clone();
     let redeemer: Redeemer = Arc::new(move |receipt| {
         forward::secretsd::redeem(&redeem_path, receipt, forward::secretsd::CAP_BROWSER)
@@ -96,14 +59,13 @@ fn an_instance_change_at_matching_epoch_refuses_before_a_token_or_proxy_survives
         Arc::new(move || forward::secretsd::broker_identity(&recheck_path));
     let server_grants = grants.clone();
     thread::spawn(move || {
-        serve_with_binder(
+        serve_with_deps(
             Deps {
                 grants: server_grants,
                 slot,
                 resolver: Arc::new(|_pid| Some("session-a".to_owned())) as SessionResolver,
                 redeemer,
                 identity_reader,
-                binder,
             },
             grant_config(),
             path,
@@ -116,16 +78,8 @@ fn an_instance_change_at_matching_epoch_refuses_before_a_token_or_proxy_survives
     broker.join().unwrap();
     assert!(receiver.try_recv().is_err());
     assert!(grants.snapshot_live().is_empty());
-    let port = bound_port.lock().unwrap();
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while TcpStream::connect(("127.0.0.1", port)).is_ok() {
-        assert!(
-            Instant::now() < deadline,
-            "bound proxy listener survived the refusal"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
 }
+
 #[test]
 fn authority_advance_during_feed_ack_refuses_without_a_renewable_grant() {
     // This fails if the post-ACK authority check is removed: a token pushed
@@ -160,23 +114,15 @@ fn authority_advance_during_feed_ack_refuses_without_a_renewable_grant() {
     grants.observe_authority(initial.clone());
     let current = Arc::new(parking_lot::Mutex::new(initial));
     let identity_for_server = Arc::clone(&current);
-    let bound_port = Arc::new(parking_lot::Mutex::new(None));
-    let port_for_binder = Arc::clone(&bound_port);
-    let binder: Binder = Arc::new(move |grants, upstream| {
-        let proxy = forward::browser::proxy::bind(grants, upstream)?;
-        *port_for_binder.lock() = Some(proxy.port());
-        Ok(proxy)
-    });
     let server_grants = grants.clone();
     thread::spawn(move || {
-        serve_with_binder(
+        serve_with_deps(
             Deps {
                 grants: server_grants,
                 slot,
                 resolver: Arc::new(|_pid| Some("session-a".to_owned())) as SessionResolver,
                 redeemer: redeemer_with_ttl(300),
                 identity_reader: Arc::new(move || Ok(identity_for_server.lock().clone())),
-                binder,
             },
             grant_config(),
             path,
@@ -208,13 +154,4 @@ fn authority_advance_during_feed_ack_refuses_without_a_renewable_grant() {
     assert_eq!(request.join().unwrap(), "REFUSED\n");
     feed.join().unwrap();
     assert!(grants.snapshot_live().is_empty());
-    let port = (*bound_port.lock()).expect("a proxy was bound before the first check");
-    let deadline = Instant::now() + Duration::from_secs(1);
-    while TcpStream::connect(("127.0.0.1", port)).is_ok() {
-        assert!(
-            Instant::now() < deadline,
-            "bound proxy listener survived the refused race"
-        );
-        thread::sleep(Duration::from_millis(10));
-    }
 }

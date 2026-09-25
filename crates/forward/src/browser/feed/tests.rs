@@ -1,4 +1,5 @@
 use std::io;
+use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -28,6 +29,7 @@ fn live_grant(token: &[u8]) -> Grant {
         anchor: ProcessAnchor::new(1, 1),
         token: token.to_vec(),
         deadline: std::time::Instant::now() + Duration::from_secs(12 * 60 * 60),
+        endpoint_port: 12811,
     }
 }
 fn relay_token(raw: &[u8]) -> Zeroizing<Vec<u8>> {
@@ -160,7 +162,13 @@ fn a_feed_outage_shorter_than_the_lease_keeps_a_live_grant_usable() {
     let grants = Grants::new();
     let current = authority(1);
     grants.observe_authority(current.clone());
-    assert!(grants.insert_if_authority(12811, &current, live_grant(b"still-valid")));
+    // The stand-in for the control channel a real grant keeps open.
+    let (server, _caller) = UnixStream::pair().unwrap();
+    assert!(
+        grants
+            .insert_if_authority(&current, live_grant(b"still-valid"), &server)
+            .is_some()
+    );
     tokens.set_connected(true);
     tokens.insert(
         relay_token(b"still-valid"),
@@ -189,7 +197,14 @@ fn a_revoked_detached_grant_lapses_and_is_not_republished_on_reattach() {
     let grants = Grants::new();
     let current = authority(1);
     grants.observe_authority(current.clone());
-    assert!(grants.insert_if_authority(12811, &current, live_grant(b"revoked-while-detached"),));
+    // The stand-in for the control channel a real grant keeps open.
+    let (server, _caller) = UnixStream::pair().unwrap();
+    let revoked = live_grant(b"revoked-while-detached");
+    assert!(
+        grants
+            .insert_if_authority(&current, revoked, &server)
+            .is_some()
+    );
     tokens.set_connected(true);
     tokens.insert(
         relay_token(b"revoked-while-detached"),

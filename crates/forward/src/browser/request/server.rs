@@ -5,18 +5,20 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::thread;
-use std::time::{Duration, Instant};
-
-use zeroize::Zeroizing;
+use std::time::Duration;
 
 mod answers;
+mod ceremony;
+mod control;
 
 use answers::{answer_probe, answer_status, peer_pid};
+#[doc(hidden)]
+pub use control::serve as serve_control;
 
 use super::line;
-use crate::browser::grant::{Grant, Grants};
+use crate::browser::LONGEST_TTL;
+use crate::browser::grant::Grants;
 use crate::browser::peer::{anchor_for, session_label};
-use crate::browser::{LONGEST_TTL, proxy};
 use crate::config::Config;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
@@ -29,9 +31,6 @@ pub type Redeemer = Arc<
 pub type IdentityReader = Arc<
     dyn Fn() -> Result<crate::secretsd::BrokerIdentity, crate::secretsd::BrokerError> + Send + Sync,
 >;
-#[doc(hidden)]
-pub type Binder =
-    Arc<dyn Fn(Grants, SocketAddr) -> Result<proxy::BoundProxy, proxy::ProxyError> + Send + Sync>;
 
 /// The collaborators the grant request server threads through every request.
 ///
@@ -44,18 +43,29 @@ pub struct Deps {
     pub resolver: SessionResolver,
     pub redeemer: Redeemer,
     pub identity_reader: IdentityReader,
-    pub binder: Binder,
 }
 pub fn socket_path() -> PathBuf {
     crate::bridge::arm_socket_path().with_file_name("browser-grant.sock")
 }
 
-pub fn parse(line: &[u8]) -> Option<(u64, Vec<u8>)> {
+/// Parse `GRANT <ttl> <receipt> <port>`.
+///
+/// The port is the caller's own loopback endpoint, which it has already bound.
+/// It is reported back by `STATUS` and named in log lines; it authorizes
+/// nothing, because a port number means nothing outside the namespace it was
+/// bound in.
+pub fn parse(line: &[u8]) -> Option<(u64, Vec<u8>, u16)> {
     let text = std::str::from_utf8(line).ok()?.strip_prefix("GRANT ")?;
-    let (ttl, receipt) = text.split_once(' ')?;
+    let mut fields = text.split(' ');
+    let (ttl, receipt, port) = (fields.next()?, fields.next()?, fields.next()?);
+    if fields.next().is_some() {
+        return None;
+    }
     let ttl: u64 = ttl.parse().ok()?;
+    let port: u16 = port.parse().ok()?;
     if ttl == 0
         || ttl > LONGEST_TTL.as_secs()
+        || port == 0
         || receipt.len() != 64
         || !receipt
             .bytes()
@@ -63,13 +73,13 @@ pub fn parse(line: &[u8]) -> Option<(u64, Vec<u8>)> {
     {
         return None;
     }
-    Some((ttl, receipt.as_bytes().to_vec()))
+    Some((ttl, receipt.as_bytes().to_vec(), port))
 }
 
 pub fn serve(grants: Grants, cfg: Config, path: PathBuf, slot: crate::browser::push::FeedSlot) {
     let socket = crate::secretsd::socket_path();
     let redeem_socket = socket.clone();
-    serve_with_binder(
+    serve_with_deps(
         Deps {
             grants,
             slot,
@@ -78,7 +88,6 @@ pub fn serve(grants: Grants, cfg: Config, path: PathBuf, slot: crate::browser::p
                 crate::secretsd::redeem(&redeem_socket, receipt, crate::secretsd::CAP_BROWSER)
             }),
             identity_reader: Arc::new(move || crate::secretsd::broker_identity(&socket)),
-            binder: Arc::new(proxy::bind),
         },
         cfg,
         path,
@@ -86,7 +95,7 @@ pub fn serve(grants: Grants, cfg: Config, path: PathBuf, slot: crate::browser::p
 }
 
 #[doc(hidden)]
-pub fn serve_with_binder(deps: Deps, cfg: Config, path: PathBuf) {
+pub fn serve_with_deps(deps: Deps, cfg: Config, path: PathBuf) {
     if let Err(error) = crate::socket::prepare_private_parent(&path) {
         eprintln!(
             "forward: could not prepare the directory of grant socket {}: {error}",
@@ -123,6 +132,10 @@ pub fn serve_with_binder(deps: Deps, cfg: Config, path: PathBuf) {
     }
 }
 
+/// Answer one request. `STATUS` and `PROBE` are answered and closed here; a
+/// granted `GRANT` keeps its connection as the grant's control channel and
+/// leaves it to a thread of its own, so one live grant cannot stop this loop
+/// from serving every other request.
 fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
     if stream.set_read_timeout(Some(REQUEST_TIMEOUT)).is_err()
         || stream.set_write_timeout(Some(REQUEST_TIMEOUT)).is_err()
@@ -146,94 +159,9 @@ fn handle(deps: &Deps, upstream: Option<SocketAddr>, mut stream: UnixStream) {
         answer_probe(pid, anchor, upstream, stream);
         return;
     }
-    let Some((ttl, receipt)) = parse(line.as_slice()) else {
+    let Some(request) = parse(line.as_slice()) else {
         let _ = stream.write_all(b"REFUSED\n");
         return;
     };
-    let receipt = Zeroizing::new(receipt);
-    let Some(anchor) = anchor else {
-        eprintln!("forward: grant refused: could not anchor requesting pid {pid}");
-        let _ = stream.write_all(b"REFUSED ANCHOR\n");
-        return;
-    };
-    let Some(upstream) = upstream else {
-        eprintln!("forward: grant refused: no peer configured to relay to");
-        let _ = stream.write_all(b"REFUSED UPSTREAM\n");
-        return;
-    };
-    // Descriptive only: the anchor is the authorization boundary, enforced per
-    // CDP connection by the proxy. A caller outside any omp session is still
-    // grantable; the label only names the grant in log lines.
-    let session = (deps.resolver)(pid).unwrap_or_else(|| format!("pid {pid}"));
-    let redeemed = match (deps.redeemer)(receipt.as_slice()) {
-        Ok(redeemed) => redeemed,
-        Err(error) => {
-            eprintln!("forward: grant refused: receipt not redeemed: {error}");
-            let _ = stream.write_all(b"REFUSED RECEIPT\n");
-            return;
-        }
-    };
-    let ttl = ttl.min(redeemed.ttl_secs);
-    let Ok(token) = crate::browser::push::mint_token() else {
-        let _ = stream.write_all(b"REFUSED\n");
-        return;
-    };
-    let mut token = Zeroizing::new(token);
-    let Ok(proxy) = (deps.binder)(deps.grants.clone(), upstream) else {
-        let _ = stream.write_all(b"REFUSED\n");
-        return;
-    };
-    if !authority_is_current(deps, &redeemed.authority) {
-        let _ = stream.write_all(b"REFUSED\n");
-        return;
-    }
-    if !deps.slot.push(token.as_slice(), ttl) {
-        eprintln!("forward: grant refused: laptop feed unavailable");
-        let _ = stream.write_all(b"REFUSED LAPTOP\n");
-        return;
-    }
-    // The feed acknowledgement can wait five seconds. Recheck again immediately
-    // before insertion so a lock or broker restart during that wait cannot
-    // cross this boundary. A refusal leaves the already-pushed laptop token
-    // bounded by the five-minute lease and never renewed.
-    if !authority_is_current(deps, &redeemed.authority) {
-        let _ = stream.write_all(b"REFUSED\n");
-        return;
-    }
-
-    let port = proxy.port();
-    let deadline = Instant::now() + Duration::from_secs(ttl);
-    if !deps.grants.insert_if_authority(
-        port,
-        &redeemed.authority,
-        Grant {
-            session: session.clone(),
-            anchor,
-            token: std::mem::take(&mut *token),
-            deadline,
-        },
-    ) {
-        let _ = stream.write_all(b"REFUSED\n");
-        return;
-    }
-    proxy::reap_at(deps.grants.clone(), port, deadline);
-    proxy.serve();
-    eprintln!(
-        "forward: granted browser access to session {session} on 127.0.0.1:{port} for {ttl}s"
-    );
-    let _ = writeln!(stream, "{port}");
-}
-
-fn authority_is_current(deps: &Deps, redeemed_authority: &crate::secretsd::BrokerIdentity) -> bool {
-    match (deps.identity_reader)() {
-        Ok(current) if current == *redeemed_authority => true,
-        Ok(_) => {
-            eprintln!("forward: grant refused: broker authority changed after redemption");
-            false
-        }
-        Err(error) => {
-            eprintln!("forward: grant refused: could not recheck broker authority: {error}");
-            false
-        }
-    }
+    ceremony::answer(deps, upstream, (pid, anchor), request, stream);
 }

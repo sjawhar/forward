@@ -16,11 +16,11 @@ fn a_same_instance_reconnect_after_a_subscription_gap_expires_grants_by_epoch() 
     let subscription = spawn_subscription(grants.clone(), broker.path(), INERT_READ_TIMEOUT);
     broker.wait_for_attach();
 
-    let (port, client, task) = established_pipe(grants, broker.path());
+    let (endpoint, client, task) = established_pipe(grants, broker.path());
     broker.drop_subscription();
     broker.lock();
     broker.wait_for_reattach();
-    assert_revoked(client, task, port, Duration::from_secs(5));
+    assert_revoked(client, task, &endpoint, Duration::from_secs(5));
     subscription.shutdown();
 }
 
@@ -34,10 +34,10 @@ fn a_broker_restart_at_epoch_zero_revokes_the_prior_instance_grants() {
     let subscription = spawn_subscription(grants.clone(), broker.path(), INERT_READ_TIMEOUT);
     broker.wait_for_attach();
 
-    let (port, client, task) = established_pipe(grants, broker.path());
+    let (endpoint, client, task) = established_pipe(grants, broker.path());
     broker.drop_subscription();
     broker.wait_for_reattach();
-    assert_revoked(client, task, port, Duration::from_secs(2));
+    assert_revoked(client, task, &endpoint, Duration::from_secs(2));
     subscription.shutdown();
 }
 
@@ -51,9 +51,9 @@ fn a_malformed_subscription_event_revokes_without_outage_grace() {
     let subscription = spawn_subscription(grants.clone(), broker.path(), INERT_READ_TIMEOUT);
     broker.wait_for_attach();
 
-    let (port, client, task) = established_pipe(grants, broker.path());
+    let (endpoint, client, task) = established_pipe(grants, broker.path());
     broker.corrupt();
-    assert_revoked(client, task, port, Duration::from_secs(2));
+    assert_revoked(client, task, &endpoint, Duration::from_secs(2));
     drop(broker);
     subscription.shutdown();
 }
@@ -68,9 +68,9 @@ fn a_malformed_hello_revokes_without_outage_grace() {
     let subscription = spawn_subscription(grants.clone(), broker.path(), INERT_READ_TIMEOUT);
     broker.wait_for_attach();
 
-    let (port, client, task) = established_pipe(grants, broker.path());
+    let (endpoint, client, task) = established_pipe(grants, broker.path());
     broker.drop_subscription();
     broker.wait_for_reattach();
-    assert_revoked(client, task, port, Duration::from_secs(2));
+    assert_revoked(client, task, &endpoint, Duration::from_secs(2));
     subscription.shutdown();
 }

@@ -1,16 +1,15 @@
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use forward::browser::grant::Grants;
 use forward::browser::push::FeedSlot;
-use forward::browser::request::{Binder, read_line_with_timeout};
+use forward::browser::request::read_line_with_timeout;
 
 use super::super::{RECEIPT, accepting_redeemer, await_socket, request_reply};
-use super::spawn_with_binder;
+use super::spawn_failing_server;
 
 #[test]
 fn a_non_draining_feed_refuses_then_releases_the_grant_loop() {
@@ -25,8 +24,7 @@ fn a_non_draining_feed_refuses_then_releases_the_grant_loop() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("grant.sock");
     let grants = Grants::new();
-    let binder: Binder = Arc::new(forward::browser::proxy::bind);
-    spawn_with_binder(grants, path.clone(), slot, accepting_redeemer(), binder);
+    spawn_failing_server(grants, path.clone(), slot, accepting_redeemer());
     await_socket(&path);
 
     let started = Instant::now();
@@ -41,13 +39,11 @@ fn a_non_draining_feed_refuses_then_releases_the_grant_loop() {
 fn a_stalled_grant_line_is_refused_without_pinning_the_server() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("grant.sock");
-    let binder: Binder = Arc::new(forward::browser::proxy::bind);
-    spawn_with_binder(
+    spawn_failing_server(
         Grants::new(),
         path.clone(),
         FeedSlot::new(),
         accepting_redeemer(),
-        binder,
     );
     await_socket(&path);
     let mut stalled = UnixStream::connect(&path).unwrap();

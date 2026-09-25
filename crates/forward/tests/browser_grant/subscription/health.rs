@@ -16,9 +16,9 @@ fn a_silent_attached_subscription_severs_live_pipes_at_the_read_deadline() {
         spawn_subscription(grants.clone(), broker.path(), Duration::from_millis(250));
     broker.wait_for_attach();
 
-    let (port, client, task) = established_pipe(grants, broker.path());
+    let (endpoint, client, task) = established_pipe(grants, broker.path());
     broker.mute();
-    assert_revoked(client, task, port, Duration::from_secs(2));
+    assert_revoked(client, task, &endpoint, Duration::from_secs(2));
     subscription.shutdown();
 }
 #[test]
@@ -30,8 +30,8 @@ fn a_capacity_refusal_after_attach_revokes_without_outage_grace() {
     let subscription = spawn_subscription(grants.clone(), broker.path(), INERT_READ_TIMEOUT);
     broker.wait_for_attach();
 
-    let (port, client, task) = established_pipe(grants, broker.path());
+    let (endpoint, client, task) = established_pipe(grants, broker.path());
     broker.drop_subscription();
-    assert_revoked(client, task, port, Duration::from_secs(2));
+    assert_revoked(client, task, &endpoint, Duration::from_secs(2));
     subscription.shutdown();
 }

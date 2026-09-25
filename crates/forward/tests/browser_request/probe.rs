@@ -27,8 +27,9 @@ fn probe_reply(path: &std::path::Path) -> String {
 #[test]
 fn a_caller_outside_any_omp_session_is_still_granted() {
     // The session label enforces nothing: the anchor is the containment
-    // boundary, checked per CDP connection by the proxy. This fails if a
-    // label gate returns to the grant path and refuses plain shells again.
+    // boundary, checked per CDP connection by the caller's own relay. This
+    // fails if a label gate returns to the grant path and refuses plain
+    // shells again.
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("grant.sock");
     let grants = forward::browser::grant::Grants::new();
@@ -43,9 +44,12 @@ fn a_caller_outside_any_omp_session_is_still_granted() {
     );
     await_socket(&path);
 
-    let port = request(&path, 60, RECEIPT).expect("a grant must not require an omp session");
+    let (_listener, port) = super::endpoint();
+    let control =
+        request(&path, 60, RECEIPT, port).expect("a grant must not require an omp session");
     receiver.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(grants.live(port).is_some());
+    assert_eq!(grants.snapshot_live().len(), 1);
+    drop(control);
 }
 
 #[test]
@@ -89,10 +93,10 @@ fn probe_refuses_deterministically_without_an_upstream() {
 
     assert_eq!(probe_reply(&path), "REFUSED UPSTREAM\n");
     assert_eq!(probe(&path), ProbeOutcome::Refused("UPSTREAM".to_owned()));
-    assert_eq!(
-        request(&path, 60, RECEIPT),
-        Err(RequestFailure::Refused("UPSTREAM".to_owned()))
-    );
+    assert!(matches!(
+        request(&path, 60, RECEIPT, super::endpoint().1),
+        Err(RequestFailure::Refused(reason)) if reason == "UPSTREAM"
+    ));
 }
 
 #[test]
@@ -102,10 +106,10 @@ fn client_failures_distinguish_refusal_from_a_missing_daemon() {
     let directory = tempfile::tempdir().unwrap();
     let missing = directory.path().join("nobody-home.sock");
     assert_eq!(probe(&missing), ProbeOutcome::Unreachable);
-    assert_eq!(
-        request(&missing, 60, RECEIPT),
+    assert!(matches!(
+        request(&missing, 60, RECEIPT, super::endpoint().1),
         Err(RequestFailure::Unreachable)
-    );
+    ));
 
     let path = directory.path().join("grant.sock");
     let grants = forward::browser::grant::Grants::new();
@@ -120,10 +124,10 @@ fn client_failures_distinguish_refusal_from_a_missing_daemon() {
     );
     await_socket(&path);
 
-    assert_eq!(
-        request(&path, 60, RECEIPT),
-        Err(RequestFailure::Refused("RECEIPT".to_owned()))
-    );
+    assert!(matches!(
+        request(&path, 60, RECEIPT, super::endpoint().1),
+        Err(RequestFailure::Refused(reason)) if reason == "RECEIPT"
+    ));
 }
 
 #[test]
@@ -145,7 +149,9 @@ fn a_probed_socket_still_serves_a_following_grant() {
     await_socket(&path);
 
     assert_eq!(probe(&path), ProbeOutcome::Grantable);
-    request(&path, 60, RECEIPT).expect("the grant after a probe must succeed");
+    let (_listener, port) = super::endpoint();
+    let control = request(&path, 60, RECEIPT, port).expect("the grant after a probe succeeds");
+    drop(control);
     receiver.recv_timeout(Duration::from_secs(5)).unwrap();
 }
 

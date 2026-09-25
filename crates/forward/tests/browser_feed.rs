@@ -108,26 +108,37 @@ fn live_grants_are_re_pushed_on_the_renewal_tick() {
         },
     };
     grants.observe_authority(authority.clone());
-    assert!(grants.insert_if_authority(
-        12811,
-        &authority,
-        Grant {
-            session: "live".to_owned(),
-            anchor: ProcessAnchor::new(1, 1),
-            token: b"renewed-token".to_vec(),
-            deadline: Instant::now() + Duration::from_secs(5 * 60),
-        },
-    ));
-    assert!(grants.insert_if_authority(
-        12812,
-        &authority,
-        Grant {
-            session: "expired".to_owned(),
-            anchor: ProcessAnchor::new(1, 1),
-            token: b"expired-token".to_vec(),
-            deadline: Instant::now() - Duration::from_secs(1),
-        },
-    ));
+    let (server, _caller) = std::os::unix::net::UnixStream::pair().unwrap();
+    assert!(
+        grants
+            .insert_if_authority(
+                &authority,
+                Grant {
+                    session: "live".to_owned(),
+                    anchor: ProcessAnchor::new(1, 1),
+                    token: b"renewed-token".to_vec(),
+                    deadline: Instant::now() + Duration::from_secs(5 * 60),
+                    endpoint_port: 12811,
+                },
+                &server,
+            )
+            .is_some()
+    );
+    assert!(
+        grants
+            .insert_if_authority(
+                &authority,
+                Grant {
+                    session: "expired".to_owned(),
+                    anchor: ProcessAnchor::new(1, 1),
+                    token: b"expired-token".to_vec(),
+                    deadline: Instant::now() - Duration::from_secs(1),
+                    endpoint_port: 12812,
+                },
+                &server,
+            )
+            .is_some()
+    );
 
     spawn_listener(&cfg, FeedSlot::new(), grants).unwrap();
     let mut feed = TcpStream::connect(("127.0.0.1", port)).unwrap();
