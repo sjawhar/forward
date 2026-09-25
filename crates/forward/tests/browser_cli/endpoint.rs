@@ -174,12 +174,19 @@ fn a_granted_endpoint_answers_json_version_in_the_callers_namespace() {
     )
     .unwrap();
     super::await_socket(&runtime.join("forward/browser-grant.sock"));
+    // The CLI refuses to ask for a touch without a session token or a terminal,
+    // and `output()` gives it no terminal. Supplying the token here keeps the
+    // test from passing only where the runner happens to export one, and from
+    // handing a real session's token to this stand-in broker.
+    let token_file = runtime.join("session.token");
+    std::fs::write(&token_file, "endpoint-test-session").unwrap();
 
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
         .args(["browser", "grant", "--ttl", "45s", "--config"])
         .arg(&config)
         .env("XDG_RUNTIME_DIR", runtime)
         .env("SECRETSD_SOCK", runtime.join("secretsd.sock"))
+        .env("SECRETSD_SESSION_TOKEN_FILE", &token_file)
         .output()
         .unwrap();
 
