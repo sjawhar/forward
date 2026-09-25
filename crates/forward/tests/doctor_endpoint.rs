@@ -122,3 +122,33 @@ fn the_probe_recognises_the_relays_own_refusal() {
     client.read_to_end(&mut answer).unwrap();
     assert_eq!(answer, b"REFUSED SESSION\n");
 }
+
+#[test]
+fn a_peer_dribbling_bytes_cannot_hold_doctor_past_its_budget() {
+    // The whole read shares one deadline. This fails if the timeout is re-armed
+    // per read: fifteen bytes at one every four seconds would pin `doctor` for
+    // a minute on a single row, and a port a grant record merely asserts is
+    // exactly where a peer that wants to do that would sit.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        // The refusal's own bytes, so only the pace can be what is rejected.
+        for byte in b"REFUSED SESSION\n" {
+            if std::io::Write::write_all(&mut stream, &[*byte]).is_err() {
+                return;
+            }
+            thread::sleep(Duration::from_secs(2));
+        }
+    });
+
+    let started = std::time::Instant::now();
+    let served = endpoint_is_served(port);
+    let waited = started.elapsed();
+
+    assert!(!served, "an incomplete refusal was taken as proof");
+    assert!(
+        waited < Duration::from_secs(8),
+        "doctor waited {waited:?} on one dribbling peer; the read deadline is 3s"
+    );
+}

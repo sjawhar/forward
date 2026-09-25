@@ -116,9 +116,16 @@ impl Grants {
     /// An entry found past its deadline here is ended through [`Self::expire`]
     /// rather than dropped in place: dropping the row alone would leave the
     /// caller's relay serving an endpoint for a grant nothing holds, and the
-    /// reaper's later `expire` would find nothing left to close. The lock is
-    /// released first so `expire` can take pipes before grants, as every other
-    /// removal path does.
+    /// reaper's later `expire` would find nothing left to close.
+    ///
+    /// **This is a read with a side effect, and callers are part of its
+    /// contract.** It may take the pipes lock and then the grants lock, and it
+    /// may shut down the grant's control channel and every pipe the grant was
+    /// serving. That is sound today only because its one non-test caller is
+    /// `request::server::control`, which holds no lock of this registry when
+    /// it asks. A new caller that holds the grants lock, or that calls this
+    /// from inside another `Grants` method, deadlocks; one that cannot afford
+    /// the severance must read `deadline` itself instead of calling this.
     pub fn live(&self, id: u64) -> Option<Grant> {
         {
             let grants = self.grants.lock();

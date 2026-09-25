@@ -1,12 +1,15 @@
 use std::io::Read as _;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::browser::relay::SESSION_REFUSAL;
 use crate::browser::request::{self, GrantStatus};
 
-/// Long enough for a loopback accept and one refusal under load, short enough
-/// that `doctor` stays a command a human waits through.
+/// The whole probe's budget: the connect, and then every read together. Long
+/// enough for a loopback accept and one refusal under load, short enough that
+/// `doctor` stays a command a human waits through. It is one deadline, not a
+/// per-read timeout: a peer dribbling a byte at a time must not be able to
+/// hold `doctor` for a multiple of it.
 const ENDPOINT_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Report whether the invoking session holds a live grant. Informational,
@@ -72,15 +75,16 @@ pub fn endpoint_is_served(port: u16) -> bool {
     let Ok(mut stream) = TcpStream::connect_timeout(&address, ENDPOINT_PROBE_TIMEOUT) else {
         return false;
     };
-    if stream
-        .set_read_timeout(Some(ENDPOINT_PROBE_TIMEOUT))
-        .is_err()
-    {
+    let Some(deadline) = Instant::now().checked_add(ENDPOINT_PROBE_TIMEOUT) else {
         return false;
-    }
+    };
     let mut answer = [0_u8; SESSION_REFUSAL.len()];
     let mut seen = 0;
     while let Some(rest) = answer.get_mut(seen..).filter(|rest| !rest.is_empty()) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
+            break;
+        }
         match stream.read(rest) {
             Ok(0) => break,
             Ok(count) => seen = seen.saturating_add(count),
