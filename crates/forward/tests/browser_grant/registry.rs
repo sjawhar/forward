@@ -52,28 +52,30 @@ fn a_connection_for_a_grant_that_is_no_longer_live_is_refused_without_dialing() 
 }
 
 #[test]
-fn a_connection_for_an_expired_grant_is_refused_without_dialing() {
-    // This fails if a past deadline is treated as a live authorization: the
-    // registry still holds the row until something looks at it.
+fn an_expired_grant_is_refused_and_its_endpoint_retired_by_the_read_that_found_it() {
+    // Two things at once, because the second is how the first leaks. A past
+    // deadline must not be treated as a live authorization; and the read that
+    // notices the deadline is a removal like any other, so it has to close the
+    // grant's control channel. It fails if that read drops the registry row on
+    // its own: the refusal still happens, the reaper's later `expire` finds
+    // nothing left to close, and the caller's relay serves an endpoint for a
+    // grant that no longer exists until the machine reboots. No reaper is
+    // armed here, so nothing else can retire it.
     let grants = Grants::new();
     let upstream = unconnected_upstream();
-    let (server, _caller) = UnixStream::pair().unwrap();
-    let id = super::insert_grant(
+    let endpoint = endpoint::start(
         &grants,
-        super::grant(
-            super::current_anchor(),
-            Instant::now() - Duration::from_secs(1),
-            12_811,
-        ),
-        &server,
+        upstream.local_addr().unwrap(),
+        Instant::now() - Duration::from_secs(1),
+        resolver(Some(std::process::id())),
     );
-    let channel = control_only(&grants, id, upstream.local_addr().unwrap());
-    let (mut client, accepted, _listener) = accepted_pair();
 
-    channel.hand_over(&accepted);
+    let mut client = endpoint.connect();
+    client.write_all(b"ping").unwrap();
 
     assert_refused(&mut client, b"REFUSED UNGRANTED\n");
     assert_not_dialed(&upstream);
+    endpoint.assert_retired(Duration::from_secs(5));
 }
 
 #[test]

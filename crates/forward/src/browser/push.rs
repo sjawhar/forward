@@ -46,7 +46,13 @@ impl FeedSlot {
         *slot = Some(stream);
     }
 
-    fn is_attached(&self) -> bool {
+    /// Whether the devbox side holds the laptop's feed connection.
+    ///
+    /// The laptop's own `RelayTokens::is_connected` is a different fact: it
+    /// says the client dialled, which happens strictly before the listener
+    /// here accepts and installs the stream. Anything that waits on the
+    /// laptop's flag and then pushes can find this slot still empty.
+    pub fn is_attached(&self) -> bool {
         self.inner.lock().is_some()
     }
 

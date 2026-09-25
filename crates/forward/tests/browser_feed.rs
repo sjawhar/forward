@@ -78,9 +78,14 @@ fn the_devbox_feed_slot_pushes_a_token_to_the_laptop_feed_client() {
 
     spawn_listener(&cfg, slot.clone(), Grants::new()).unwrap();
     forward::browser::feed::spawn_client(&cfg, laptop_tokens.clone()).unwrap();
+    // Both ends, because they become ready at different moments: the laptop
+    // client's flag is set when it dials, and the devbox listener installs
+    // the accepted stream in the slot some time after that. Waiting on the
+    // laptop's flag alone leaves the push racing an empty slot, which is a
+    // real failure roughly once in twenty runs on a loaded machine.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !laptop_tokens.is_connected() {
-        assert!(Instant::now() < deadline, "laptop feed did not attach");
+    while !laptop_tokens.is_connected() || !slot.is_attached() {
+        assert!(Instant::now() < deadline, "the feed did not attach");
         std::thread::sleep(Duration::from_millis(10));
     }
 

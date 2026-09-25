@@ -47,8 +47,9 @@ It blinks Sami's key and blocks until he taps it (about 20 seconds before it giv
 session-local endpoint, e.g. `http://127.0.0.1:38987`, and leaves a small `forward browser
 relay` process behind to serve it — that endpoint is served **here**, on the loopback of
 whatever machine ran the command, so it works the same from the host and from inside an
-agent box. `forward doctor` then reads
-`browser grant: live for this session at http://127.0.0.1:38987 (1779s left)`.
+agent box. `forward doctor` then reads `browser grant: live for this session at
+http://127.0.0.1:38987 (1779s left) — endpoint served here; the laptop side is not probed
+from forward`.
 
 **That endpoint is a CDP discovery URL** (`/json/version` answers with Sami's Chrome and a
 `webSocketDebuggerUrl`). Hand it to the `browser` tool as `app.cdp_url`; do not use
@@ -82,8 +83,8 @@ rather than navigating Sami's visible tab. If `open` still times out, run `docto
 | Line | Meaning | Do |
 |---|---|---|
 | `browser relay: locked … (no grant)` + `browser grant: none` | Normal locked state | `forward browser grant --ttl 30m` |
-| `browser grant: live for this session at http://127.0.0.1:<port> (Ns left)` | Ready; `doctor` asked the endpoint for `/json/version` and it answered | `browser open` with `app.cdp_url` = that URL |
-| the same line plus `— the endpoint does not answer` | The grant is recorded but nothing serves it here: its relay died, or it belongs to a session on another machine | `forward browser grant --ttl 30m` again, from the machine that will use it |
+| `browser grant: live … (Ns left) — endpoint served here; the laptop side is not probed from forward` | Ready as far as this machine can tell: a relay is serving that port here. `doctor` sends it nothing and reads the relay's own `REFUSED SESSION` as the proof, so this says nothing about Sami's Chrome — the `browser relay` row does | `browser open` with `app.cdp_url` = that URL |
+| the same line plus `— no endpoint is served here` | The grant is recorded but nothing serves it here: its relay died, or the grant belongs to a session on another machine | `forward browser grant --ttl 30m` again, from the machine that will use it |
 | `browser relay:` unreachable / refused | Laptop daemon or Tailscale path down | Tell Sami what the line says |
 | `url channel` / `callback bridge` / `pcsc` lines | Other channels; unrelated to browser access | Ignore for this purpose |
 

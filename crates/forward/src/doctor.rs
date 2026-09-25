@@ -194,6 +194,11 @@ fn print_line(message: impl Display) {
 
 mod browser;
 mod grant;
+
+/// Test seam: the `browser grant` row's endpoint check, on its own.
+#[doc(hidden)]
+pub use grant::endpoint_is_served;
+
 mod pcsc;
 mod pulse;
 

@@ -1,12 +1,12 @@
-use std::io::{Read as _, Write as _};
+use std::io::Read as _;
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::time::Duration;
 
+use crate::browser::relay::SESSION_REFUSAL;
 use crate::browser::request::{self, GrantStatus};
 
-/// The endpoint answers from the laptop's Chrome, two machines away, so this
-/// is longer than a loopback round trip and still short enough that `doctor`
-/// stays a command a human waits through.
+/// Long enough for a loopback accept and one refusal under load, short enough
+/// that `doctor` stays a command a human waits through.
 const ENDPOINT_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Report whether the invoking session holds a live grant. Informational,
@@ -14,7 +14,7 @@ const ENDPOINT_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 pub(super) fn report() {
     super::print_line(line(
         request::status(&request::socket_path()),
-        &endpoint_answers,
+        &endpoint_is_served,
     ));
 }
 
@@ -23,7 +23,7 @@ pub(super) fn report() {
 /// live in `forward serve`'s registry while nothing at all listens where the
 /// session must dial. Reporting the record alone is how `doctor` came to read
 /// green against an endpoint that refused every connection.
-fn line(status: GrantStatus, answers: &dyn Fn(u16) -> bool) -> String {
+fn line(status: GrantStatus, served: &dyn Fn(u16) -> bool) -> String {
     match status {
         GrantStatus::Unreachable => {
             "browser grant: info — grant status unavailable; no valid STATUS reply from the local request socket"
@@ -39,19 +39,35 @@ fn line(status: GrantStatus, answers: &dyn Fn(u16) -> bool) -> String {
             let row = format!(
                 "browser grant: live for this session at http://127.0.0.1:{port} ({remaining_secs}s left)"
             );
-            if answers(port) {
-                row
+            if served(port) {
+                format!("{row} — endpoint served here; the laptop side is not probed from forward")
             } else {
-                format!(
-                    "{row} — the endpoint does not answer; forward browser grant --ttl 30m"
-                )
+                format!("{row} — no endpoint is served here; forward browser grant --ttl 30m")
             }
         }
     }
 }
 
-/// Ask the endpoint the question the session's browser tool asks first.
-fn endpoint_answers(port: u16) -> bool {
+/// Whether a relay is serving this grant's endpoint in this namespace.
+///
+/// "Served" means exactly one thing: the relay answered `REFUSED SESSION`.
+///
+/// The probe sends nothing at all. It must not put bytes of its own on a port
+/// a registry record merely asserts, and it could not earn a CDP answer even
+/// if it wanted one: every `forward` process suppresses its core dumps, which
+/// also makes its `/proc/<pid>/fd` unreadable to the relay, so the relay
+/// cannot attribute this connection and refuses it. That refusal is the proof
+/// being looked for, since nothing else on this loopback speaks it. Silence, a
+/// closed port and every other answer are not proof of anything and read as
+/// unserved — including, deliberately, an admitted connection: a probe that
+/// sends nothing gets nothing back from Chrome, so there is no second thing to
+/// accept here, only a second way to be wrong.
+///
+/// What this does *not* check is the far end: whether the laptop feed is
+/// attached, whether Chrome is up, whether the token is still good. The
+/// `browser relay` and `browser feed` rows are where those live.
+#[doc(hidden)]
+pub fn endpoint_is_served(port: u16) -> bool {
     let address = SocketAddr::from((Ipv4Addr::LOCALHOST, port));
     let Ok(mut stream) = TcpStream::connect_timeout(&address, ENDPOINT_PROBE_TIMEOUT) else {
         return false;
@@ -59,19 +75,21 @@ fn endpoint_answers(port: u16) -> bool {
     if stream
         .set_read_timeout(Some(ENDPOINT_PROBE_TIMEOUT))
         .is_err()
-        || stream
-            .set_write_timeout(Some(ENDPOINT_PROBE_TIMEOUT))
-            .is_err()
-        || stream
-            .write_all(
-                b"GET /json/version HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
-            )
-            .is_err()
     {
         return false;
     }
-    let mut status = [0_u8; 5];
-    stream.read_exact(&mut status).is_ok() && &status == b"HTTP/"
+    let mut answer = [0_u8; SESSION_REFUSAL.len()];
+    let mut seen = 0;
+    while let Some(rest) = answer.get_mut(seen..).filter(|rest| !rest.is_empty()) {
+        match stream.read(rest) {
+            Ok(0) => break,
+            Ok(count) => seen = seen.saturating_add(count),
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+    }
+    let answer = answer.get(..seen).unwrap_or_default();
+    answer.starts_with(SESSION_REFUSAL)
 }
 
 #[cfg(test)]
@@ -97,7 +115,8 @@ mod tests {
         );
         assert!(live.contains("http://127.0.0.1:12811"));
         assert!(live.contains("900s left"));
-        assert!(!live.contains("does not answer"));
+        assert!(live.contains("endpoint served here"), "got {live}");
+        assert!(!live.contains("no endpoint"), "got {live}");
     }
 
     #[test]
@@ -113,7 +132,7 @@ mod tests {
         );
 
         assert!(live.contains("http://127.0.0.1:36029"), "got {live}");
-        assert!(live.contains("the endpoint does not answer"), "got {live}");
+        assert!(live.contains("no endpoint is served here"), "got {live}");
         assert!(
             live.contains("forward browser grant --ttl 30m"),
             "got {live}"

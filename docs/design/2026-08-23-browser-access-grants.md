@@ -213,11 +213,25 @@ capability until the supervised service recovers.
 alongside the PC/SC rows. `browser grant` is session-relative: no grant is
 informational rather than unhealthy, and its no-grant row prints the exact
 command `forward browser grant --ttl 30m`. A recorded grant is not a usable
-one — the endpoint is a separate process in the caller's namespace — so the row
-probes `GET /json/version` on the reported endpoint and says when it does not
-answer. Reporting the registry record alone is how `doctor` came to read green
-against an endpoint that refused every connection. The browser relay row can
-report a locked relay without disclosing the target list; the feed row is a
+one — the endpoint is a separate process in the caller's namespace — so the
+row also asks whether anything is serving that endpoint here. Reporting the
+registry record alone is how `doctor` came to read green against an endpoint
+that refused every connection.
+
+That question is asked by connecting and **sending nothing**, and "served"
+means exactly one thing: the relay answered `REFUSED SESSION`. `doctor` must
+not put bytes of its own on a port a registry record merely asserts, and it
+could not earn a CDP answer if it tried: every `forward` process suppresses
+its core dumps, which also makes its `/proc/<pid>/fd` unreadable to the relay,
+so the relay cannot attribute the connection and refuses it. That refusal is
+the proof — nothing else on this loopback speaks it — and the row says exactly
+what was proven: `endpoint served here; the laptop side is not probed from
+forward`. A closed port, silence, and every other answer read as `no endpoint
+is served here`, including an admitted connection: a probe that sends nothing
+is never answered by Chrome either, so there is no second proof to look for.
+Whether the laptop feed is attached and whether Chrome is up remain the
+`browser relay` and `browser feed` rows' business; the relay row can report a
+locked relay without disclosing the target list, and the feed row is a
 reachability probe, not evidence that a particular token is present.
 
 ## Verification
@@ -225,7 +239,7 @@ reachability probe, not evidence that a particular token is present.
 Run `forward doctor` from the session that will use the browser endpoint. Then
 run `forward browser grant --ttl 30m`, complete the broker's touch ceremony,
 and use the printed loopback URL as that session's `app.cdp_url`. `doctor` must
-then report the grant as live *and* answering. A second session must not be
+then report the grant as live *and* served here. A second session must not be
 treated as the owner of that endpoint, and a new connection after the grant
 deadline must be refused. Run it once from a host session and once from inside
 an agent box: the box is where the two namespace failures above were, and a

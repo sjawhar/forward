@@ -73,11 +73,14 @@ fn grant(ttl: &str, config: Option<PathBuf>) -> anyhow::Result<()> {
         eprintln!("forward: grant refused: could not anchor this command to a calling session");
         std::process::exit(1);
     };
+    // Bound before the ceremony for the same reason the probe runs before it:
+    // a local bind failure is a refusal this command can predict, and a
+    // predictable refusal must never cost a touch or a single-use receipt.
+    let (listener, port) = bind_endpoint();
     // The broker runs the YubiKey ceremony; this blocks through the touch
     // window and prints nothing until it resolves.
     let receipt = forward::secretsd::authorize(forward::secretsd::CAP_BROWSER)
         .unwrap_or_else(|error| crate::exit_with_error(error));
-    let (listener, port) = bind_endpoint();
     let granted = request(&socket, ttl_secs, &receipt, port);
     drop(receipt);
     let control = match granted {

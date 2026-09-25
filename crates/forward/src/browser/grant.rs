@@ -111,17 +111,24 @@ impl Grants {
         self.revoke_all();
     }
 
-    /// Return the unexpired grant for `id`, scrubbing a stale backstop entry.
+    /// Return the unexpired grant for `id`, ending a stale backstop entry.
+    ///
+    /// An entry found past its deadline here is ended through [`Self::expire`]
+    /// rather than dropped in place: dropping the row alone would leave the
+    /// caller's relay serving an endpoint for a grant nothing holds, and the
+    /// reaper's later `expire` would find nothing left to close. The lock is
+    /// released first so `expire` can take pipes before grants, as every other
+    /// removal path does.
     pub fn live(&self, id: u64) -> Option<Grant> {
-        let mut grants = self.grants.lock();
-        let expired = grants
-            .get(&id)
-            .is_some_and(|entry| entry.grant.deadline <= Instant::now());
-        if expired {
-            drop(scrub(&mut grants, id));
-            return None;
+        {
+            let grants = self.grants.lock();
+            let entry = grants.get(&id)?;
+            if entry.grant.deadline > Instant::now() {
+                return Some(entry.grant.clone());
+            }
         }
-        grants.get(&id).map(|entry| entry.grant.clone())
+        self.expire(id);
+        None
     }
 
     /// Live tokens with their remaining lifetimes for feed re-push after the

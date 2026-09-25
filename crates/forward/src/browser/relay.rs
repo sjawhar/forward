@@ -21,7 +21,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use nix::sys::socket::{SockType, getsockopt, sockopt};
+use nix::sys::socket::{
+    AddressFamily, SockType, SockaddrLike as _, SockaddrStorage, getsockname, getsockopt, sockopt,
+};
 
 use crate::browser::grant::ProcessAnchor;
 use crate::fdpass;
@@ -34,7 +36,10 @@ pub use spawn::{CONTROL_FD, LISTENER_FD, spawn};
 /// The relay's only message to `forward serve`: one admitted CDP connection,
 /// attached to this byte as a descriptor.
 pub(crate) const CONNECTION: u8 = b'+';
-const SESSION_REFUSAL: &[u8] = b"REFUSED SESSION\n";
+/// What the endpoint answers a connection it cannot attribute to the grant.
+/// `doctor` reads it as proof that a relay is serving this grant here: nothing
+/// else on this loopback speaks it.
+pub(crate) const SESSION_REFUSAL: &[u8] = b"REFUSED SESSION\n";
 /// Waiting after a failed accept avoids a tight EMFILE error loop.
 const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_millis(50);
 
@@ -147,25 +152,50 @@ fn admits(resolver: &Resolver, stream: &TcpStream, anchor: ProcessAnchor) -> boo
 }
 
 /// Take ownership of the two descriptors `spawn` placed in this process.
+///
+/// Each is checked for what it must be, not merely that it is a socket: fd 3
+/// is a listening INET stream and fd 4 is a connected unix stream. Without
+/// that, a hand-run `browser relay` with unrelated descriptors on 3 and 4
+/// would get a misleading failure somewhere later instead of the message
+/// below, which tells the reader the one thing that is wrong.
 fn inherited() -> Result<(TcpListener, UnixStream), RelayError> {
-    for fd in [LISTENER_FD, CONTROL_FD] {
-        // SAFETY: borrowed for this check alone, and never closed through the
-        // borrow; ownership is taken below only once both have been verified.
-        let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-        if !matches!(
-            getsockopt(&borrowed, sockopt::SockType),
-            Ok(SockType::Stream)
-        ) {
-            return Err(RelayError::Inherited { fd });
-        }
+    if !is_endpoint_listener(LISTENER_FD) {
+        return Err(RelayError::Inherited { fd: LISTENER_FD });
+    }
+    if !is_control_channel(CONTROL_FD) {
+        return Err(RelayError::Inherited { fd: CONTROL_FD });
     }
     // SAFETY: `spawn` placed the grant's listener and control channel on
-    // exactly these descriptors in the child it exec'd, and nothing else in
-    // this process has taken ownership of either.
+    // exactly these descriptors in the child it exec'd, nothing else in this
+    // process has taken ownership of either, and both were just verified.
     let listener = unsafe { TcpListener::from_raw_fd(LISTENER_FD) };
     // SAFETY: as above, for the control channel's descriptor.
     let control = unsafe { UnixStream::from_raw_fd(CONTROL_FD) };
     Ok((listener, control))
+}
+
+fn is_endpoint_listener(fd: RawFd) -> bool {
+    // SAFETY: borrowed for these checks alone, and never closed through the
+    // borrow; ownership is taken by the caller only once they have passed.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    matches!(
+        getsockopt(&borrowed, sockopt::SockType),
+        Ok(SockType::Stream)
+    ) && matches!(getsockopt(&borrowed, sockopt::AcceptConn), Ok(true))
+        && matches!(family(fd), Some(AddressFamily::Inet | AddressFamily::Inet6))
+}
+
+fn is_control_channel(fd: RawFd) -> bool {
+    // SAFETY: as in `is_endpoint_listener`.
+    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+    matches!(
+        getsockopt(&borrowed, sockopt::SockType),
+        Ok(SockType::Stream)
+    ) && family(fd) == Some(AddressFamily::Unix)
+}
+
+fn family(fd: RawFd) -> Option<AddressFamily> {
+    getsockname::<SockaddrStorage>(fd).ok()?.family()
 }
 
 #[cfg(test)]
