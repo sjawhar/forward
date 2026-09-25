@@ -126,9 +126,9 @@ fn the_probe_recognises_the_relays_own_refusal() {
 #[test]
 fn a_peer_dribbling_bytes_cannot_hold_doctor_past_its_budget() {
     // The whole read shares one deadline. This fails if the timeout is re-armed
-    // per read: fifteen bytes at one every four seconds would pin `doctor` for
-    // a minute on a single row, and a port a grant record merely asserts is
-    // exactly where a peer that wants to do that would sit.
+    // per read: the refusal's sixteen bytes at one every two seconds would pin
+    // `doctor` for about half a minute on a single row, and a port a grant record
+    // merely asserts is exactly where a peer that wants to do that would sit.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     thread::spawn(move || {

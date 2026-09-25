@@ -5,11 +5,11 @@ use std::time::{Duration, Instant};
 use crate::browser::relay::SESSION_REFUSAL;
 use crate::browser::request::{self, GrantStatus};
 
-/// The whole probe's budget: the connect, and then every read together. Long
-/// enough for a loopback accept and one refusal under load, short enough that
-/// `doctor` stays a command a human waits through. It is one deadline, not a
-/// per-read timeout: a peer dribbling a byte at a time must not be able to
-/// hold `doctor` for a multiple of it.
+/// The probe's budget, spent twice at most: once on the connect, then once on
+/// every read together. Long enough for a loopback accept and one refusal under
+/// load, short enough that `doctor` stays a command a human waits through. The
+/// reads share one deadline rather than a per-read timeout: a peer dribbling a
+/// byte at a time must not be able to hold `doctor` for a multiple of it.
 const ENDPOINT_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Report whether the invoking session holds a live grant. Informational,
