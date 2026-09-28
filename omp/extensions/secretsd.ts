@@ -303,7 +303,9 @@ export default function secretsdOmpExtension(pi: ExtensionAPI) {
 		refreshBrokerIdentity();
 	});
 
-	pi.on("session_info_changed", async (_event, ctx: ExtensionContext) => {
+	/// Re-key the tree when the owner's session id changes. Registered below
+	/// under every name a host may emit for that, because the hosts disagree.
+	const reKeyOnSessionIdChange = async (_event: unknown, ctx: ExtensionContext) => {
 		// A subagent's own session id never changes, and it must never mint the
 		// whole tree a second identity -- only the owner re-keys the anchor.
 		if (!isOwner) return;
@@ -348,7 +350,31 @@ export default function secretsdOmpExtension(pi: ExtensionAPI) {
 			// Broker down must not block the session switch; the next request
 			// (secrets_request or a bash spawn) reports why.
 		}
-	});
+	};
+
+	// Each host declares only its own name for a session id change, and they
+	// are not the same name. The omp fork emits `session_switch` (and
+	// `session_branch`) and contains no `session_info_changed` at all; the
+	// pinned upstream `@earendil-works/pi-coding-agent` types declare
+	// `session_info_changed` and neither of the others. Registering all three
+	// is what makes a re-key reach this extension on either host: before this,
+	// secretsd listened only for the upstream name, so on omp the handler was
+	// dead and a re-keyed session kept serving the retired token.
+	//
+	// Registering is safe where an event never fires -- `pi.on` only records a
+	// handler by name -- and safe where more than one fires, because the
+	// handler returns early once the id already matches, so the second is a
+	// no-op. All three are omp session-identity events, so omp rebuilds the
+	// shell spawn environment after they run and the fresh token path reaches
+	// the next shell. The cast covers the two names the pinned upstream types
+	// do not declare; there is no overload for them to satisfy.
+	const onSessionIdentityEvent = pi.on.bind(pi) as unknown as (
+		event: string,
+		handler: (event: unknown, ctx: ExtensionContext) => Promise<void>,
+	) => void;
+	for (const event of ["session_info_changed", "session_switch", "session_branch"]) {
+		onSessionIdentityEvent(event, reKeyOnSessionIdChange);
+	}
 
 	pi.on("session_shutdown", async () => {
 		requestAbort.abort();
