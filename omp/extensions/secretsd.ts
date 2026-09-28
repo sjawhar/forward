@@ -6,12 +6,14 @@
  * stays single-sourced:
  *
  * - registers the session with the secretsd broker and writes its token file
- * - overrides the bash tool so SECRETSD_SESSION_TOKEN_FILE is present, letting
- *   `secrets` CLI calls inside agent shells act with this session's identity
- *   (human-tier keys included, after approval)
- * - mirrors SECRETSD_SESSION_TOKEN_FILE into the omp process environment so
- *   children spawned outside the bash tool (MCP stdio servers, LSP servers)
- *   inherit the tree's broker identity as well
+ * - mirrors SECRETSD_SESSION_TOKEN_FILE into the omp process environment, which
+ *   is how every child inherits the tree's broker identity: agent shells (omp
+ *   rebuilds its cached shell spawn environment from it), MCP stdio servers and
+ *   LSP servers alike, letting `secrets` CLI calls inside them act with this
+ *   session's identity (human-tier keys included, after approval)
+ * - keeps that identity usable through a side-effect-only `tool_call` /
+ *   `user_bash` hook, which re-materializes a deleted token file and recovers
+ *   from a daemon restart without replacing the bash tool or touching commands
  * - registers the secrets_request tool for YubiKey-gated approval requests
  * - exposes the bundled using-secrets skill
  * - unregisters and removes the token file on shutdown
@@ -34,12 +36,12 @@
  * process as the root (in-process `loadExtensions`, not a spawned child), the
  * daemon's `SO_PEERPIDFD` ancestry pin taken at REGISTER names that one shared
  * process regardless of which instance happened to call `register`. This is
- * what makes spawnHook and secrets_request in a subagent act as the root
+ * what makes a subagent's shells and secrets_request act as the root
  * session -- extending docs/design.md's "the token-file path is inherited by
  * everything the session spawns" from a single session's process tree to the
  * whole in-process session tree.
  */
-import { createBashTool, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -96,11 +98,11 @@ export function getAnchor(): SharedAnchor | undefined {
 
 export function setAnchor(anchor: SharedAnchor | undefined): void {
 	(globalThis as Record<PropertyKey, unknown>)[SHARED_ANCHOR_KEY] = anchor;
-	// Mirror the anchor's token file into the process environment so children
-	// spawned outside the bash tool (MCP stdio servers, LSP servers) inherit
-	// the tree's broker identity. The bash spawnHook still injects per spawn
-	// (and re-materializes deleted token files); this covers every other
-	// spawn path, which inherits the omp process env verbatim.
+	// Mirror the anchor's token file into the process environment. This is the
+	// ONLY way the identity travels: omp rebuilds its cached shell spawn
+	// environment from `process.env` once the session-identity handlers have
+	// run, so every agent shell inherits it, and children spawned outside the
+	// bash tool (MCP stdio servers, LSP servers) inherit that env verbatim.
 	if (anchor) process.env.SECRETSD_SESSION_TOKEN_FILE = anchor.state.tokenFile;
 	else delete process.env.SECRETSD_SESSION_TOKEN_FILE;
 }
@@ -156,7 +158,7 @@ function ensureTokenFile(anchor: SharedAnchor): void {
 /// register or re-register on `anchor`'s behalf calls this first -- and, for
 /// `ensureRegistered`, again right before actually sending REGISTER -- so a
 /// call that started against a live anchor (a probe fired from
-/// `injectSessionToken`, a queued `secrets_request`) can never resume after
+/// `refreshBrokerIdentity`, a queued `secrets_request`) can never resume after
 /// `session_shutdown` or a `session_info_changed` re-key has retired it.
 function assertAnchorLive(anchor: SharedAnchor): void {
 	if (getAnchor() !== anchor || anchor.abort.signal.aborted) {
@@ -207,54 +209,35 @@ async function ensureRegistered(anchor: SharedAnchor): Promise<SessionState> {
 	return anchor.state;
 }
 
-/// The bash tool's spawnHook in every instance -- owner and every subagent
-/// alike -- so every agent shell in the process tree carries the anchor's
-/// token file and therefore the root session's broker identity. Synchronous:
-/// `ensureTokenFile` re-materializes a deleted token file on the fly.
+/// The side effects the bash hook performs on the way past, for every agent
+/// shell in the process tree -- owner and subagent alike. It returns nothing
+/// and changes nothing the model or the user can see.
 ///
-/// The token file travels twice. omp's agent bash tool ignores a spawnHook's
-/// `env` (it takes no per-call environment) but runs the `command` the hook
-/// returns, so the command itself exports the variable. The export shares the
-/// command's first line, so `$LINENO` and bash's own `line N` diagnostics are
-/// unchanged. `env` still carries it for omp's `!` user-shell path, which
-/// applies the hook's env delta, and for hosts whose bash tool honours it.
-export function injectSessionToken(spawnCtx: { command?: string; env?: Record<string, string> }): {
-	command?: string;
-	env?: Record<string, string>;
-} {
+/// The token file itself does NOT travel from here: `setAnchor` mirrors it into
+/// the omp process environment, and omp's own bash tool spawns with that. Until
+/// v3.5.1 this extension instead REPLACED the bash tool to inject the variable,
+/// which silently cost every parameter omp's own tool declares -- `async`,
+/// named services, `cwd`, `pty` -- because the replacement carried the legacy
+/// schema. Rewriting the command to carry an `export` is the other way to lose:
+/// a `tool_call` revision is what omp schedules, renders and persists, so every
+/// bash call in the transcript would open with the token path.
+export function refreshBrokerIdentity(): void {
 	const anchor = getAnchor();
-	if (!anchor) return spawnCtx;
-	// The spawn hook is synchronous and cannot await a broker round trip, so
-	// this probe's result always arrives after THIS command has already
-	// spawned with whatever token file is on disk. What it buys: if the
-	// daemon restarted, the probe's handshake carries a new instance id,
-	// which flips `anchor.registered` false and re-registers the SAME token
-	// in the background -- so the *next* `secrets <KEY> -- cmd` (the skill's
-	// "run the command once more") finds a live registration instead of
-	// repeating the same TIMEOUT. Mirrors opencode's per-command
-	// shell.env re-registration, just fired here instead of awaited there.
+	if (!anchor) return;
+	// Fired, not awaited: this resolves after the command it precedes has
+	// already spawned. What it buys is the NEXT call -- if the daemon
+	// restarted, the probe's handshake carries a new instance id, which flips
+	// `anchor.registered` false and re-registers the SAME token in the
+	// background, so the skill's "run the command once more" finds a live
+	// registration instead of repeating the same TIMEOUT.
 	void ensureRegistered(anchor).catch(() => {});
 	try {
 		ensureTokenFile(anchor);
-		// Drop env names the spawn validator rejects (e.g. exported bash
-		// functions encoded as `BASH_FUNC_name%%`). The default tool never
-		// round-trips these; a spawnHook-supplied env does.
-		const env: Record<string, string> = {};
-		for (const [k, v] of Object.entries(spawnCtx.env ?? {})) {
-			if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) env[k] = v;
-		}
-		env.SECRETSD_SESSION_TOKEN_FILE = anchor.state.tokenFile;
-		if (spawnCtx.command === undefined) return { ...spawnCtx, env };
-		const command = `export SECRETSD_SESSION_TOKEN_FILE=${shellQuote(anchor.state.tokenFile)}; ${spawnCtx.command}`;
-		return { ...spawnCtx, env, command };
 	} catch {
-		return spawnCtx;
+		// A token file that cannot be re-materialized is reported by the
+		// `secrets` call that needs it, never by failing the bash call that
+		// was about to run.
 	}
-}
-
-/// POSIX single-quoting: safe for any byte string except NUL.
-function shellQuote(value: string): string {
-	return `'${value.replaceAll("'", `'\\''`)}'`;
 }
 
 export default function secretsdOmpExtension(pi: ExtensionAPI) {
@@ -306,9 +289,18 @@ export default function secretsdOmpExtension(pi: ExtensionAPI) {
 			// session; tools report the details.
 			ctx.ui.notify(`secretsd: registration deferred (${String(err)})`, "warning");
 		}
+	});
 
-		// Override bash so every agent shell carries the anchor's token file.
-		pi.registerTool(createBashTool(process.cwd(), { spawnHook: injectSessionToken }));
+	// Side-effect only, by contract: omp owns the bash tool, its schema and its
+	// spawn environment. Returning a revision here would put an `export` into
+	// the persisted call; registering our own tool would drop half its
+	// parameters. `user_bash` is omp's `!` shell, which never emits `tool_call`.
+	pi.on("tool_call", async (event) => {
+		if (event.toolName === "bash") refreshBrokerIdentity();
+	});
+
+	pi.on("user_bash", async () => {
+		refreshBrokerIdentity();
 	});
 
 	pi.on("session_info_changed", async (_event, ctx: ExtensionContext) => {

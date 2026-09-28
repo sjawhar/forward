@@ -4,7 +4,7 @@ import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import { PROTOCOL_VERSION } from "../../opencode/plugins/secretsd.ts";
-import secretsdOmpExtension, { getAnchor, injectSessionToken, setAnchor } from "./secretsd.ts";
+import secretsdOmpExtension, { getAnchor, setAnchor } from "./secretsd.ts";
 
 // allow: SIZE_OK -- every process-shared-anchor scenario belongs in one file,
 // mirroring opencode/plugins/secretsd.test.ts.
@@ -222,7 +222,7 @@ test("two in-process instances share one registration and one token file", async
 	const broker = fakeBroker(process.env.SECRETSD_SOCK as string);
 
 	await mountSession("root-session");
-	await mountSession("subagent-session");
+	const subagent = await mountSession("subagent-session");
 
 	// Exactly one REGISTER reached the broker, even though two sessions
 	// (root + subagent) each ran their own session_start. The trailing HELLO
@@ -241,40 +241,53 @@ test("two in-process instances share one registration and one token file", async
 	expect(existsSync(join(runtimeDir, "secretsd", "root-session.token"))).toBe(true);
 	expect(existsSync(join(runtimeDir, "secretsd", "subagent-session.token"))).toBe(false);
 
-	// injectSessionToken is the literal spawnHook both instances' bash tools
-	// were built with; it must inject the anchor's (root's) token file, not a
-	// per-instance one, regardless of which instance's shell invoked it.
-	const spawnResult = injectSessionToken({ env: { PATH: "/usr/bin" } });
-	expect(spawnResult.env?.SECRETSD_SESSION_TOKEN_FILE).toBe(anchor?.state.tokenFile);
-	expect(spawnResult.env?.PATH).toBe("/usr/bin");
+	// Both instances registered the same side-effect-only hook. Whichever
+	// instance's shell is about to spawn, it must repair the ANCHOR's (root's)
+	// token file and never mint a per-instance one.
+	rmSync(join(runtimeDir, "secretsd", "root-session.token"));
+	await subagent.handlers.tool_call(
+		{ type: "tool_call", toolCallId: "call-1", toolName: "bash", input: { command: "true" } },
+		undefined,
+	);
+	expect(existsSync(join(runtimeDir, "secretsd", "root-session.token"))).toBe(true);
+	expect(existsSync(join(runtimeDir, "secretsd", "subagent-session.token"))).toBe(false);
 });
 
-test("the command a spawnHook returns exports the token file even when its env is discarded", async () => {
+test("secretsd registers no bash tool and leaves the call it observes untouched", async () => {
 	setup();
 	fakeBroker(process.env.SECRETSD_SOCK as string);
-	await mountSession("root-session");
+	const { handlers, tools } = await mountSession("root-session");
 	const anchor = getAnchor();
 	if (!anchor) throw new Error("no anchor after session_start");
 
-	const probe = 'printf "%s" "$SECRETSD_SESSION_TOKEN_FILE"';
-	// omp's bash tool drops the hook's env and runs only its command, so run
-	// that command in a shell whose environment lacks the variable.
-	const runInCleanShell = (command: string) =>
-		Bun.spawnSync(["bash", "-c", command], { env: { PATH: process.env.PATH ?? "/usr/bin:/bin" } }).stdout.toString();
+	// Through v3.5.1 this extension registered its own bash, built from the
+	// legacy schema, which silently dropped every parameter omp's own tool
+	// declares: `async` (so no background job could ever be started), named
+	// services, `cwd`, `pty`. omp's tool owns the schema; we register none.
+	expect(tools.bash).toBeUndefined();
 
-	const { command } = injectSessionToken({ command: probe, env: {} });
-	expect(runInCleanShell(command as string)).toBe(anchor.state.tokenFile);
+	// The hook returns no revision and leaves the call byte-identical, so
+	// nothing omp schedules, renders or persists carries an `export` line.
+	const command = 'printf "%s" "$SECRETSD_SESSION_TOKEN_FILE"';
+	const bashCall = { type: "tool_call", toolCallId: "call-1", toolName: "bash", input: { command } };
+	expect(await handlers.tool_call(bashCall, undefined)).toBeUndefined();
+	expect(bashCall.input.command).toBe(command);
 
-	// The export stays on the command's first line: line numbers are unchanged.
-	const lineno = injectSessionToken({ command: 'printf "%s" "$LINENO"', env: {} });
-	expect(runInCleanShell(lineno.command as string)).toBe("1");
+	// What it does do: a token file deleted under a live session is back
+	// before the shell that needs it spawns.
+	rmSync(anchor.state.tokenFile);
+	await handlers.tool_call(bashCall, undefined);
+	expect(existsSync(anchor.state.tokenFile)).toBe(true);
 
-	// Quoting survives a path containing a single quote, `$` and a space, so
-	// double quoting or no quoting fails.
-	const quoted = { ...anchor, state: { ...anchor.state, tokenFile: `${anchor.state.tokenFile}' $x y` } };
-	setAnchor(quoted);
-	const second = injectSessionToken({ command: probe, env: {} });
-	expect(runInCleanShell(second.command as string)).toBe(quoted.state.tokenFile);
+	// omp's `!` user shell never emits tool_call, so it gets the same repair.
+	rmSync(anchor.state.tokenFile);
+	await handlers.user_bash({ type: "user_bash", command: "true", excludeFromContext: false, cwd: "/" }, undefined);
+	expect(existsSync(anchor.state.tokenFile)).toBe(true);
+
+	// Any other tool is none of our business.
+	rmSync(anchor.state.tokenFile);
+	await handlers.tool_call({ type: "tool_call", toolCallId: "call-2", toolName: "read", input: {} }, undefined);
+	expect(existsSync(anchor.state.tokenFile)).toBe(false);
 });
 
 test("only the owner's session_shutdown unregisters and removes the token file", async () => {
