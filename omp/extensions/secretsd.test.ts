@@ -382,6 +382,41 @@ test("owner session_info_changed re-registers with a fresh token; a non-owner's 
 	expect(broker.received).toContain("UNREGISTER\tsession=root-session");
 });
 
+test("omp's own re-key event re-keys too, though the pinned types never declare it", async () => {
+	const { runtimeDir } = setup();
+	fakeBroker(process.env.SECRETSD_SOCK as string);
+
+	const owner = await mountSession("root-session");
+	const originalToken = getAnchor()?.state.token;
+
+	// omp's fork emits `session_switch` and contains no
+	// `session_info_changed`, so while that upstream name was the only one
+	// registered, a re-key on omp reached nobody and the session kept serving
+	// a retired token.
+	expect(typeof owner.handlers.session_switch).toBe("function");
+	expect(typeof owner.handlers.session_branch).toBe("function");
+
+	await owner.handlers.session_switch(undefined, {
+		sessionManager: { getSessionId: () => "root-session-2" },
+	});
+
+	const anchor = getAnchor();
+	expect(anchor?.ownerSessionId).toBe("root-session-2");
+	expect(anchor?.state.token).not.toBe(originalToken);
+	expect(existsSync(join(runtimeDir, "secretsd", "root-session.token"))).toBe(false);
+	expect(existsSync(join(runtimeDir, "secretsd", "root-session-2.token"))).toBe(true);
+	// The process-env mirror follows the re-key; that is how the next shell
+	// omp spawns gets the new path rather than the retired one.
+	expect(process.env.SECRETSD_SESSION_TOKEN_FILE).toBe(anchor?.state.tokenFile);
+
+	// A host emitting more than one of these names re-keys once: the second
+	// finds the id already current and returns before minting anything.
+	await owner.handlers.session_info_changed(undefined, {
+		sessionManager: { getSessionId: () => "root-session-2" },
+	});
+	expect(getAnchor()?.state.token).toBe(anchor?.state.token);
+});
+
 test("a restarted daemon re-registers the same token on the next request", async () => {
 	setup();
 	// A mutable instance id in the handshake response stands in for a daemon
