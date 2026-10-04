@@ -45,15 +45,15 @@ fn production_source_contains_no_legacy_ssh_transport() {
     // When: comments are excluded.
     let legacy_references: Vec<_> = source_paths
         .iter()
-            // Test modules name the retired transport deliberately; the scan is
-            // about production code. Excludes both `tests.rs` and any file
-            // inside a `tests/` module directory.
-            .filter(|path| {
-                !path.ends_with("tests.rs")
-                    && !path
-                        .components()
-                        .any(|component| component.as_os_str() == "tests")
-            })
+        // Test modules name the retired transport deliberately; the scan is
+        // about production code. Excludes both `tests.rs` and any file
+        // inside a `tests/` module directory.
+        .filter(|path| {
+            !path.ends_with("tests.rs")
+                && !path
+                    .components()
+                    .any(|component| component.as_os_str() == "tests")
+        })
         .filter_map(|path| {
             let executable_source = std::fs::read_to_string(path)
                 .unwrap()
