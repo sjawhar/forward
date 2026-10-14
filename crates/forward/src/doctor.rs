@@ -206,4 +206,7 @@ mod pulse;
 mod browser_tests;
 
 #[cfg(test)]
+mod browser_peer_tests;
+
+#[cfg(test)]
 mod tests;

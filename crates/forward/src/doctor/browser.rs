@@ -52,8 +52,8 @@ pub(super) fn evaluate_with(
             relay_target_port,
             request,
         ),
-        Err(local_error) if has_routable_listen(cfg) && !cfg.peer.is_empty() => {
-            report_devbox_peer(cfg, local_error, well_known_port, request)
+        Err(local_error) if relay_dialed_at_peer(cfg) => {
+            report_devbox_peer(cfg, local_error, request)
         }
         result => report_probe(
             result,
@@ -70,26 +70,34 @@ fn has_routable_listen(cfg: &Config) -> bool {
     matches!(cfg.listen_ip(), Ok(address) if !address.is_loopback())
 }
 
-fn report_devbox_peer(
-    cfg: &Config,
-    local_error: String,
-    well_known_port: u16,
-    request: &mut Request,
-) -> (bool, String) {
-    match probe(request, &cfg.peer, well_known_port, "/json/version") {
+/// Whether this pair's devbox side reaches the laptop's relay somewhere other
+/// than its own listen address. A granted connection dials `peer:relay_port`
+/// (`browser::request::server`), so when nothing answers at the listen address
+/// the peer is the relay to check. That holds on the tailnet, and for a
+/// loopback pair whose ends differ, such as an SSH tunnel that gives each
+/// devbox its own laptop address while its connections arrive from 127.0.0.1.
+fn relay_dialed_at_peer(cfg: &Config) -> bool {
+    matches!(
+        (cfg.listen_ip(), cfg.peer_ip()),
+        (Ok(listen), Ok(Some(peer))) if listen.to_canonical() != peer.to_canonical()
+    )
+}
+
+fn report_devbox_peer(cfg: &Config, local_error: String, request: &mut Request) -> (bool, String) {
+    match probe(request, &cfg.peer, cfg.relay_port, "/json/version") {
         Err(peer_error) => (
             false,
             format!(
-                "browser relay: FAIL — neither local listener {}:{} ({local_error}) nor laptop peer {}:{well_known_port} ({peer_error}) answered",
-                cfg.listen, cfg.relay_port, cfg.peer
+                "browser relay: FAIL — neither local listener {}:{} ({local_error}) nor laptop peer {}:{} ({peer_error}) answered",
+                cfg.listen, cfg.relay_port, cfg.peer, cfg.relay_port
             ),
         ),
         result => report_probe(
             result,
             &cfg.peer,
-            well_known_port,
+            cfg.relay_port,
             &cfg.peer,
-            well_known_port,
+            cfg.relay_port,
             request,
         ),
     }
