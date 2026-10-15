@@ -153,9 +153,15 @@ A value goes in through stdin, never argv: argv shows up in `ps`, in shell histo
 # agent tier, without an editor
 secrets list    # stop if it shows KEY  (human tier: …)
 <producer> | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY"]'
+
+# a JSON credential: compact it to one line first
+<producer> | jq -c . | secrets edit-human KEY --source <name>
+<producer> | jq -c . | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY"]'
 ```
 
 `<producer>` is the command that prints the value on stdout, such as a password manager's CLI or another tool's export command. Typing the value into the command line, as in `printf '<value>' | …`, puts it in the transcript and the shell history all the same.
+
+The value must be one line; a trailing newline is dropped. Pretty-printed JSON spans several lines, so compact it with `jq -c .` as above. A multi-line value fails loudly and writes nothing: `edit-human` reports `piped secret 'KEY' must be one single-line assignment value`, and `sops set` reports `Value for --set is not valid JSON`, because `jq -R .` turned each line into its own JSON string.
 
 A key in a shared file, `secrets.human.d/KEY.env` or `secrets.env`, lives in the root's repository: commit and push that file, so the other machines get it. `--local` and `secrets edit-local` write machine-local files that are never committed. `edit-human` refuses a name the agent tier already holds, and the human tier refuses a name present in two roots. To rename a human-tier key, write it under the new name and delete the old file in the same change.
 
