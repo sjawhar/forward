@@ -137,6 +137,17 @@ paste its output into a message. A value in a transcript means a rotation.
 | `secrets grants` | which human-tier keys are currently unlocked |
 | `secrets_request(KEY)` tool call | requests approval only; never returns the value |
 
+## Storing a secret
+
+A value goes in through stdin, never argv: argv shows up in `ps`, in shell history and in transcripts.
+
+| Tier | Create or rotate `KEY` |
+|---|---|
+| human | `<producer> \| secrets edit-human KEY --source <root>` reads one line from stdin and encrypts it straight into the root's `secrets.human.d/`; no plaintext file is written. `--local` writes the machine-local, uncommitted file instead. Creating a key needs no touch; reading it later does. |
+| agent | `secrets edit --source <root>` opens the root's shared `secrets.env` in an editor (`secrets edit-local` the machine-local one). Without an editor: `<producer> \| jq -R . \| sops set --value-stdin <root path>/secrets.env '["KEY"]'`. |
+
+`secrets sources` lists each root and its path. Commit and push the changed file in the root's repository, so the other machines get it. `edit-human` refuses a name the agent tier already holds, and the human tier refuses a name present in two roots. To rename a human-tier key, write it under the new name and delete the old file in the same change.
+
 ## Two tiers
 
 `secrets list` marks each key. **Agent-tier** keys resolve locally and need no approval.
