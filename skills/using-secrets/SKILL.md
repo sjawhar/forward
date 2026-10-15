@@ -1,6 +1,6 @@
 ---
 name: using-secrets
-description: "Use BEFORE running any command that needs an API key, token, password, or credential, and whenever a secret looks missing, wrong, truncated, or like a placeholder. This machine has no secrets in the environment — every key comes from the `secrets` CLI, and `secrets get KEY` does NOT print the value. Triggers on: secrets get, secrets list, API key, API token, access token, credential, OPENAI_API_KEY, ANTHROPIC_API_KEY, AIRTABLE_TOKEN, SLACK_MCP_XOXP_TOKEN, GROQ_API_KEY, DEEL_API_KEY, sk-, xoxp-, export KEY=, env var for a command, 'key is a placeholder', 'key looks wrong', 'invalid api key', 401, 403, authentication failed, sops, YubiKey touch, secretsd, secrets_request, SecretsRequest, grant expired, key blinking, TIMEOUT, TOO_MANY_PENDING."
+description: "Use BEFORE running any command that needs an API key, token, password, or credential, when storing, adding, or rotating one, and whenever a secret looks missing, wrong, truncated, or like a placeholder. This machine has no secrets in the environment — every key comes from the `secrets` CLI, and `secrets get KEY` does NOT print the value. Triggers on: secrets get, secrets list, API key, API token, access token, credential, OPENAI_API_KEY, ANTHROPIC_API_KEY, AIRTABLE_TOKEN, SLACK_MCP_XOXP_TOKEN, GROQ_API_KEY, DEEL_API_KEY, sk-, xoxp-, export KEY=, env var for a command, 'key is a placeholder', 'key looks wrong', 'invalid api key', 401, 403, authentication failed, sops, YubiKey touch, secretsd, secrets_request, SecretsRequest, grant expired, key blinking, TIMEOUT, TOO_MANY_PENDING, store a secret, add a key, add a secret, save a token, rotate a credential, rotate a key, secrets edit-human, secrets edit, secrets edit-local, secrets sources, sops set."
 ---
 
 # Using `secrets` and the `secrets_request` tool
@@ -136,6 +136,34 @@ paste its output into a message. A value in a transcript means a rotation.
 | `secrets list` | every key name and its tier; decrypts agent-tier files locally, never contacts the daemon or prompts; a key in both tiers is marked `ALSO agent tier` |
 | `secrets grants` | which human-tier keys are currently unlocked |
 | `secrets_request(KEY)` tool call | requests approval only; never returns the value |
+
+## Storing a secret
+
+A value goes in through stdin, never argv: argv shows up in `ps`, in shell history and in transcripts. `secrets sources` prints each source root as `source <name>: <path>`. `--source` takes the `<name>`; the files live under the `<path>`.
+
+| Tier | Create or rotate `KEY` |
+|---|---|
+| human | Piped into `secrets edit-human KEY --source <name>`, one line on stdin is encrypted straight into the root's `secrets.human.d/`; no plaintext file is written. `--local` writes the machine-local, uncommitted file instead. Creating a key needs no touch; reading it later does. |
+| agent | `secrets edit --source <name>` opens the root's shared `secrets.env` in an editor, and `secrets edit-local --source <name>` the machine-local `secrets.local.env`. Without an editor, pipe the value through `jq -R .` (sops takes a JSON string) into `sops set --value-stdin` on a file that already exists. `sops set` writes the file itself and skips the CLI's check for a human-tier key of the same name, so run `secrets list` first: if it shows `KEY  (human tier: …)`, choose another name. |
+
+```bash
+# human tier
+<producer> | secrets edit-human KEY --source <name>
+
+# agent tier, without an editor
+secrets list    # stop if it shows KEY  (human tier: …)
+<producer> | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY"]'
+
+# a JSON credential: compact it to one line first
+<producer> | jq -c . | secrets edit-human KEY --source <name>
+<producer> | jq -c . | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY"]'
+```
+
+`<producer>` is the command that prints the value on stdout, such as a password manager's CLI or another tool's export command. Typing the value into the command line, as in `printf '<value>' | …`, puts it in the transcript and the shell history all the same.
+
+The value must be one line; a trailing newline is dropped. Pretty-printed JSON spans several lines, so compact it with `jq -c .` as above. A multi-line value fails loudly and writes nothing: `edit-human` reports `piped secret 'KEY' must be one single-line assignment value`, and `sops set` reports `Value for --set is not valid JSON`, because `jq -R .` turned each line into its own JSON string.
+
+A key in a shared file, `secrets.human.d/KEY.env` or `secrets.env`, lives in the root's repository: commit and push that file, so the other machines get it. `--local` and `secrets edit-local` write machine-local files that are never committed. `edit-human` refuses a name the agent tier already holds, and the human tier refuses a name present in two roots. To rename a human-tier key, write it under the new name and delete the old file in the same change.
 
 ## Two tiers
 
