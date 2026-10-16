@@ -136,20 +136,6 @@ pub fn send_hold(
 
 /// Send one line to the counterpart's URL channel and read its one-line answer.
 fn request(cfg: &Config, line: &str, channel_port: u16) -> Result<(SocketAddr, String), SendError> {
-    request_with_dial(cfg, line, channel_port, |target, timeout| {
-        TcpStream::connect_timeout(&target, timeout)
-    })
-}
-
-fn request_with_dial<F>(
-    cfg: &Config,
-    line: &str,
-    channel_port: u16,
-    dial: F,
-) -> Result<(SocketAddr, String), SendError>
-where
-    F: FnOnce(SocketAddr, Duration) -> std::io::Result<TcpStream>,
-{
     let ip = cfg
         .peer_ip()
         .map_err(|source| SendError::Config { source })?
@@ -158,9 +144,11 @@ where
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let target = SocketAddr::new(ip, channel_port);
     let mut stream =
-        dial(target, PEER_CONNECT_TIMEOUT).map_err(|source| SendError::Unreachable {
-            target: target.to_string(),
-            source,
+        TcpStream::connect_timeout(&target, PEER_CONNECT_TIMEOUT).map_err(|source| {
+            SendError::Unreachable {
+                target: target.to_string(),
+                source,
+            }
         })?;
     writeln!(stream, "{line}")?;
     stream.flush()?;

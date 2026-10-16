@@ -1,3 +1,9 @@
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use socket2::{Domain, Protocol, Socket, Type};
+
 use super::*;
 
 /// Accepts one connection, reads the URL line, and answers with `reply`
@@ -16,6 +22,37 @@ fn counterpart(reply: &'static str) -> (u16, std::thread::JoinHandle<String>) {
         received
     });
     (port, handle)
+}
+
+/// Fill a loopback listener's accept queue without accepting any streams.
+///
+/// The final short dial proves the queue is saturated before the request under
+/// test runs, avoiding an external or routable black-hole address.
+fn saturated_listener() -> (Socket, SocketAddr, Vec<TcpStream>) {
+    let listener = Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)).unwrap();
+    listener
+        .bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into())
+        .unwrap();
+    listener.listen(1).unwrap();
+    let target = listener.local_addr().unwrap().as_socket().unwrap();
+    let mut queued = Vec::new();
+    loop {
+        match TcpStream::connect_timeout(&target, Duration::from_millis(50)) {
+            Ok(stream) => {
+                queued.push(stream);
+                assert!(queued.len() < 16, "listener accept queue did not saturate");
+            }
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return (listener, target, queued);
+            }
+            Err(error) => panic!("could not fill listener accept queue: {error}"),
+        }
+    }
 }
 
 #[test]
@@ -133,25 +170,26 @@ fn unreachable_peer_is_reported_with_its_target() {
 }
 
 #[test]
-fn request_bounds_a_peer_dial_and_reports_a_timeout_as_unreachable() {
-    // Given: a configured peer and a dialer that deterministically times out.
+fn send_url_bounds_the_production_dial_when_a_local_listener_queue_is_full() {
+    // Given: a local listener whose accept queue rejects another handshake.
+    let (listener, target, queued) = saturated_listener();
     let mut cfg = Config::default_values_for_test();
-    cfg.peer = "198.51.100.1".to_owned();
-    let mut requested_timeout = None;
+    cfg.peer = target.ip().to_string();
+    let url = url::Url::parse("https://example.com").unwrap();
+    let (done, result) = mpsc::channel();
 
-    // When: the URL channel asks the dialer to reach that peer.
-    let error = request_with_dial(&cfg, "https://example.com", 12_800, |_, timeout| {
-        requested_timeout = Some(timeout);
-        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "offline"))
-    })
-    .expect_err("a timed-out peer must be unreachable");
+    // When: the public URL sender dials the saturated endpoint.
+    let handle = std::thread::spawn(move || {
+        done.send(send_url(&cfg, &url, target.port())).unwrap();
+    });
+    let outcome = result.recv_timeout(crate::PEER_CONNECT_TIMEOUT + Duration::from_secs(2));
+    drop(queued);
+    drop(listener);
+    handle.join().unwrap();
 
-    // Then: the dial is bounded and preserves the existing unreachable result.
-    assert_eq!(requested_timeout, Some(crate::PEER_CONNECT_TIMEOUT));
-    assert!(matches!(
-        error,
-        SendError::Unreachable { target, .. } if target == "198.51.100.1:12800"
-    ));
+    // Then: the production dial reports the usual unreachable error within its bound.
+    let error = outcome.expect("production dial did not respect its timeout");
+    assert!(matches!(error, Err(SendError::Unreachable { .. })));
 }
 
 #[test]

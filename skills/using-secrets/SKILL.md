@@ -158,6 +158,7 @@ secrets list    # stop if it shows KEY  (human tier: …)
 <producer> | jq -c . | secrets edit-human KEY --source <name>
 secrets list    # stop if it shows KEY  (human tier: …)
 <producer> | jq -c . | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY"]'
+```
 
 `<producer>` is the command that prints the value on stdout, such as a password manager's CLI or another tool's export command. Typing the value into the command line, as in `printf '<value>' | …`, puts it in the transcript and the shell history all the same.
 
