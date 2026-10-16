@@ -12,6 +12,23 @@ static DAEMON_TEST_LOCK: Mutex<()> = Mutex::new(());
 const TEST_PORT_BASE: u16 = 20_000;
 static NEXT_TEST_PORT: AtomicU16 = AtomicU16::new(TEST_PORT_BASE);
 
+fn with_safe_optional_ports(config_body: &str) -> String {
+    let mut config = config_body.to_owned();
+    if !config.contains("relay_port") {
+        config.push_str("\nrelay_port = 0\n");
+    }
+    if !config.contains("pcsc_port") {
+        config.push_str("\npcsc_port = 0\n");
+    }
+    if !config.contains("grant_port") {
+        config.push_str("\ngrant_port = 0\n");
+    }
+    if !config.contains("pulse_port") {
+        config.push_str("\npulse_port = 0\n");
+    }
+    config
+}
+
 pub fn stub(dir: &Path, name: &str, body: &str) -> String {
     let path = dir.join(name);
     std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
@@ -59,6 +76,7 @@ pub fn start(dir: &Path, config_body: &str) -> (Daemon, u16) {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config = dir.join("config.toml");
+    let config_body = with_safe_optional_ports(config_body);
     std::fs::write(&config, config_body).unwrap();
     let port = test_port();
     let existing_path = std::env::var_os("PATH").unwrap_or_default();
@@ -111,6 +129,7 @@ pub fn start_expecting_failure(dir: &Path, config_body: &str) -> String {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let config = dir.join("config.toml");
+    let config_body = with_safe_optional_ports(config_body);
     std::fs::write(&config, config_body).unwrap();
     let port = test_port();
     let output = Command::new(env!("CARGO_BIN_EXE_forward"))
