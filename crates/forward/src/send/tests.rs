@@ -133,6 +133,28 @@ fn unreachable_peer_is_reported_with_its_target() {
 }
 
 #[test]
+fn request_bounds_a_peer_dial_and_reports_a_timeout_as_unreachable() {
+    // Given: a configured peer and a dialer that deterministically times out.
+    let mut cfg = Config::default_values_for_test();
+    cfg.peer = "198.51.100.1".to_owned();
+    let mut requested_timeout = None;
+
+    // When: the URL channel asks the dialer to reach that peer.
+    let error = request_with_dial(&cfg, "https://example.com", 12_800, |_, timeout| {
+        requested_timeout = Some(timeout);
+        Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "offline"))
+    })
+    .expect_err("a timed-out peer must be unreachable");
+
+    // Then: the dial is bounded and preserves the existing unreachable result.
+    assert_eq!(requested_timeout, Some(crate::PEER_CONNECT_TIMEOUT));
+    assert!(matches!(
+        error,
+        SendError::Unreachable { target, .. } if target == "198.51.100.1:12800"
+    ));
+}
+
+#[test]
 fn malformed_peer_is_reported_rather_than_falling_back_to_loopback() {
     // Given: a peer that is not an address, which Config::validate rejects.
     let mut cfg = Config::default_values_for_test();

@@ -5,6 +5,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
+use crate::PEER_CONNECT_TIMEOUT;
 use crate::config::{Config, ConfigError};
 
 /// How long to wait for the daemon to report what it did with a URL. The
@@ -135,6 +136,20 @@ pub fn send_hold(
 
 /// Send one line to the counterpart's URL channel and read its one-line answer.
 fn request(cfg: &Config, line: &str, channel_port: u16) -> Result<(SocketAddr, String), SendError> {
+    request_with_dial(cfg, line, channel_port, |target, timeout| {
+        TcpStream::connect_timeout(&target, timeout)
+    })
+}
+
+fn request_with_dial<F>(
+    cfg: &Config,
+    line: &str,
+    channel_port: u16,
+    dial: F,
+) -> Result<(SocketAddr, String), SendError>
+where
+    F: FnOnce(SocketAddr, Duration) -> std::io::Result<TcpStream>,
+{
     let ip = cfg
         .peer_ip()
         .map_err(|source| SendError::Config { source })?
@@ -142,10 +157,11 @@ fn request(cfg: &Config, line: &str, channel_port: u16) -> Result<(SocketAddr, S
         // Once peer is configured, this fallback no longer applies.
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let target = SocketAddr::new(ip, channel_port);
-    let mut stream = TcpStream::connect(target).map_err(|source| SendError::Unreachable {
-        target: target.to_string(),
-        source,
-    })?;
+    let mut stream =
+        dial(target, PEER_CONNECT_TIMEOUT).map_err(|source| SendError::Unreachable {
+            target: target.to_string(),
+            source,
+        })?;
     writeln!(stream, "{line}")?;
     stream.flush()?;
     stream.set_read_timeout(Some(OUTCOME_TIMEOUT))?;
