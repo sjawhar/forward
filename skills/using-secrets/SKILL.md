@@ -144,7 +144,7 @@ A value goes in through stdin, never argv: argv shows up in `ps`, in shell histo
 | Tier | Create or rotate `KEY` |
 |---|---|
 | human | Piped into `secrets edit-human KEY --source <name>`, one line on stdin is encrypted straight into the root's `secrets.human.d/`; no plaintext file is written. `--local` writes the machine-local, uncommitted file instead. Creating a key needs no touch; reading it later does. |
-| agent | `secrets edit --source <name>` opens the root's shared `secrets.env` in an editor, and `secrets edit-local --source <name>` the machine-local `secrets.local.env`. Without an editor, pipe the value through `jq -R .` (sops takes a JSON string) into `sops set --value-stdin` on a file that already exists. `sops set` writes the file itself and skips the CLI's check for a human-tier key of the same name, so run `secrets list` first: if it shows `KEY  (human tier: …)`, choose another name. |
+| agent | `secrets edit --source <name>` opens the root's shared `secrets.env` in an editor, and `secrets edit-local --source <name>` the machine-local `secrets.local.env`. To create an absent file, use the matching `secrets edit` route first. Without an editor, once the file exists, pipe the value through `jq -R .` (sops takes a JSON string) into `sops set --value-stdin`. `sops set` cannot create a missing file and skips the CLI's check for a human-tier key of the same name, so run `secrets list` first: if it shows `KEY  (human tier: …)`, choose another name. |
 
 ```bash
 # human tier
@@ -156,8 +156,8 @@ secrets list    # stop if it shows KEY  (human tier: …)
 
 # a JSON credential: compact it to one line first
 <producer> | jq -c . | secrets edit-human KEY --source <name>
+secrets list    # stop if it shows KEY  (human tier: …)
 <producer> | jq -c . | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY"]'
-```
 
 `<producer>` is the command that prints the value on stdout, such as a password manager's CLI or another tool's export command. Typing the value into the command line, as in `printf '<value>' | …`, puts it in the transcript and the shell history all the same.
 
