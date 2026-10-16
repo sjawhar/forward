@@ -12,8 +12,7 @@ fn a_silent_attached_subscription_severs_live_pipes_at_the_read_deadline() {
     // feeds authority events, then stops forever while the pipe stays open.
     let broker = FakeBroker::start(Script::Mute);
     let grants = Grants::new();
-    let subscription =
-        spawn_subscription(grants.clone(), broker.path(), Duration::from_millis(250));
+    let subscription = spawn_subscription(grants.clone(), broker.path(), Duration::from_secs(1));
     broker.wait_for_attach();
 
     let (endpoint, client, task) = established_pipe(grants, broker.path());

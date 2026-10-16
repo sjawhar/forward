@@ -1,6 +1,6 @@
 use std::net::TcpListener;
 
-use super::daemon_support::{start, start_expecting_failure, stub};
+use super::daemon_support::{start, start_expecting_failure, stub, test_port};
 
 #[test]
 fn startup_logs_effective_config() {
@@ -90,17 +90,17 @@ fn a_pulse_bind_failure_is_fatal_and_names_the_address() {
 
 #[test]
 fn startup_announces_the_pulse_channel() {
-    // Given: a default-port daemon config with a counterpart.
+    // Given: a daemon with a configured counterpart and isolated pulse port.
     let dir = tempfile::tempdir().unwrap();
     let opener = stub(dir.path(), "opener", "true");
+    let pulse_port = test_port();
 
     // When: the daemon starts.
     let (daemon, _port) = start(
         dir.path(),
-        &format!("opener = [\"{opener}\"]\npeer = \"127.0.0.1\"\n"),
+        &format!("opener = [\"{opener}\"]\npeer = \"127.0.0.1\"\npulse_port = {pulse_port}\n"),
     );
 
-    // Then: the pulse listener announces itself on the default port, proving
-    // the daemon spawned the channel before serving URLs.
-    daemon.wait_for_log("forward: pulse channel on 127.0.0.1:12806");
+    // Then: the pulse listener announces its configured address before serving URLs.
+    daemon.wait_for_log(&format!("forward: pulse channel on 127.0.0.1:{pulse_port}"));
 }

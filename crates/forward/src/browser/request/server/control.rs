@@ -15,9 +15,9 @@ use std::time::Duration;
 use crate::bridge::limit::ConnectionLimit;
 use crate::browser::grant::Grants;
 use crate::browser::relay;
-use crate::fdpass;
 use crate::pipe::bidirectional;
 use crate::refusal::refuse;
+use crate::{PEER_CONNECT_TIMEOUT, fdpass};
 
 /// The maximum idle read or blocked-write interval for a proxied CDP session.
 const PIPE_IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -83,7 +83,7 @@ fn relay_one(grants: &Grants, id: u64, upstream: SocketAddr, socket: OwnedFd) {
         refuse(&mut stream, UNGRANTED_REFUSAL);
         return;
     };
-    let Ok(mut laptop) = TcpStream::connect(upstream) else {
+    let Ok(mut laptop) = TcpStream::connect_timeout(&upstream, PEER_CONNECT_TIMEOUT) else {
         refuse(&mut stream, GENERIC_REFUSAL);
         return;
     };

@@ -5,6 +5,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 
+use crate::PEER_CONNECT_TIMEOUT;
 use crate::config::{Config, ConfigError};
 
 /// How long to wait for the daemon to report what it did with a URL. The
@@ -142,10 +143,13 @@ fn request(cfg: &Config, line: &str, channel_port: u16) -> Result<(SocketAddr, S
         // Once peer is configured, this fallback no longer applies.
         .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
     let target = SocketAddr::new(ip, channel_port);
-    let mut stream = TcpStream::connect(target).map_err(|source| SendError::Unreachable {
-        target: target.to_string(),
-        source,
-    })?;
+    let mut stream =
+        TcpStream::connect_timeout(&target, PEER_CONNECT_TIMEOUT).map_err(|source| {
+            SendError::Unreachable {
+                target: target.to_string(),
+                source,
+            }
+        })?;
     writeln!(stream, "{line}")?;
     stream.flush()?;
     stream.set_read_timeout(Some(OUTCOME_TIMEOUT))?;

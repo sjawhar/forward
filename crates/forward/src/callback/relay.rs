@@ -3,10 +3,11 @@ use std::net::{SocketAddr, TcpStream};
 use std::time::Duration;
 
 use super::PIPE_IDLE_TIMEOUT;
+use crate::PEER_CONNECT_TIMEOUT;
 use crate::pipe::bidirectional;
 
 pub(super) fn relay(bridge: SocketAddr, browser: TcpStream, port: u16) {
-    let mut upstream = match TcpStream::connect(bridge) {
+    let mut upstream = match TcpStream::connect_timeout(&bridge, PEER_CONNECT_TIMEOUT) {
         Ok(upstream) => upstream,
         Err(error) => {
             eprintln!("forward: cannot reach callback bridge at {bridge}: {error}");

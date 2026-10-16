@@ -1,3 +1,9 @@
+use std::net::{Ipv4Addr, SocketAddr, TcpStream};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use socket2::{Domain, Protocol, Socket, Type};
+
 use super::*;
 
 /// Accepts one connection, reads the URL line, and answers with `reply`
@@ -16,6 +22,77 @@ fn counterpart(reply: &'static str) -> (u16, std::thread::JoinHandle<String>) {
         received
     });
     (port, handle)
+}
+
+/// Bind a loopback listener without accepting connections.
+fn loopback_listener() -> Option<(Socket, SocketAddr)> {
+    let listener = match Socket::new(Domain::IPV4, Type::STREAM, Some(Protocol::TCP)) {
+        Ok(listener) => listener,
+        Err(error) => {
+            eprintln!("forward send timeout regression check inconclusive: {error}");
+            return None;
+        }
+    };
+    if let Err(error) = listener.bind(&SocketAddr::from((Ipv4Addr::LOCALHOST, 0)).into()) {
+        eprintln!("forward send timeout regression check inconclusive: {error}");
+        return None;
+    }
+    if let Err(error) = listener.listen(1) {
+        eprintln!("forward send timeout regression check inconclusive: {error}");
+        return None;
+    }
+    let target = match listener
+        .local_addr()
+        .ok()
+        .and_then(|address| address.as_socket())
+    {
+        Some(target) => target,
+        None => {
+            eprintln!("forward send timeout regression check inconclusive: no listener address");
+            return None;
+        }
+    };
+    Some((listener, target))
+}
+
+/// Fill a loopback listener's accept queue; refusing or non-stalling hosts are inconclusive.
+fn fill_accept_queue(target: SocketAddr) -> Option<Vec<TcpStream>> {
+    let mut queued = Vec::new();
+    for _ in 0..16 {
+        match TcpStream::connect_timeout(&target, Duration::from_millis(50)) {
+            Ok(stream) => queued.push(stream),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock
+                ) =>
+            {
+                return Some(queued);
+            }
+            Err(error) => {
+                eprintln!("forward send timeout regression check inconclusive: {error}");
+                return None;
+            }
+        }
+    }
+    eprintln!("forward send timeout regression check inconclusive: listener queue did not stall");
+    None
+}
+
+fn saturated_listener() -> Option<(Socket, SocketAddr, Vec<TcpStream>)> {
+    let (listener, target) = loopback_listener()?;
+    let queued = fill_accept_queue(target)?;
+    Some((listener, target, queued))
+}
+
+#[test]
+fn a_refused_loopback_listener_makes_queue_saturation_inconclusive() {
+    let Some((listener, target)) = loopback_listener() else {
+        return;
+    };
+    drop(listener);
+
+    assert!(fill_accept_queue(target).is_none());
 }
 
 #[test]
@@ -130,6 +207,31 @@ fn unreachable_peer_is_reported_with_its_target() {
         Err(SendError::Unreachable { target, .. }) => assert_eq!(target, "127.0.0.1:9"),
         other => panic!("expected Unreachable, got {other:?}"),
     }
+}
+
+#[test]
+fn send_url_bounds_the_production_dial_when_a_local_listener_queue_is_full() {
+    // Given: a local listener whose accept queue rejects another handshake.
+    let Some((listener, target, queued)) = saturated_listener() else {
+        return;
+    };
+    let mut cfg = Config::default_values_for_test();
+    cfg.peer = target.ip().to_string();
+    let url = url::Url::parse("https://example.com").unwrap();
+    let (done, result) = mpsc::channel();
+
+    // When: the public URL sender dials the saturated endpoint.
+    let handle = std::thread::spawn(move || {
+        done.send(send_url(&cfg, &url, target.port())).unwrap();
+    });
+    let outcome = result.recv_timeout(crate::PEER_CONNECT_TIMEOUT + Duration::from_secs(2));
+    drop(queued);
+    drop(listener);
+    handle.join().unwrap();
+
+    // Then: the production dial reports the usual unreachable error within its bound.
+    let error = outcome.expect("production dial did not respect its timeout");
+    assert!(matches!(error, Err(SendError::Unreachable { .. })));
 }
 
 #[test]

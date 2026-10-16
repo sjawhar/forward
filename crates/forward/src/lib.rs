@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 pub mod bridge;
 pub mod browser;
 pub mod callback;
@@ -17,3 +19,6 @@ pub mod send;
 pub mod serve;
 mod socket;
 pub mod target;
+
+/// Bounds outbound peer dials so an absent laptop cannot wait for kernel SYN retries.
+pub(crate) const PEER_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
