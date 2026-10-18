@@ -155,30 +155,32 @@ secrets list    # stop if it shows KEY  (human tier: …)
 <producer> | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY"]'
 
 # a JSON credential: compact it to one line first
+# human tier
 <producer> | jq -c . | secrets edit-human KEY --source <name>
+# agent tier
 secrets list    # stop if it shows KEY  (human tier: …)
 <producer> | jq -c . | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY"]'
 
-# a multi-line non-JSON value
-base64 < FILE | tr -d '\n' | secrets edit-human KEY_B64 --source <name>
+# a multi-line value that is not JSON: base64 it to one line, under a name ending _B64
+# human tier
+<producer> | base64 | tr -d '\n' | secrets edit-human KEY_B64 --source <name>
+# agent tier
 secrets list    # stop if it shows KEY_B64  (human tier: …)
-base64 < FILE | tr -d '\n' | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY_B64"]'
+<producer> | base64 | tr -d '\n' | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY_B64"]'
 
-# consume it without printing it
-secrets KEY_B64 -- sh -c 'printf %s "$KEY_B64" | openssl base64 -d -A | <consumer>'
-
-# if the consumer needs a file
-file=$(mktemp)
-chmod 600 "$file"
-trap 'rm -f "$file"' EXIT
-secrets KEY_B64 -- sh -c 'printf %s "$KEY_B64" | openssl base64 -d -A > "$1"' sh "$file"
-<consumer> "$file"
-rm -f "$file"
+# read it back decoded, never printed, into a consumer that reads the key on stdin
+secrets KEY_B64 -- sh -c 'printf %s "$KEY_B64" | base64 -d | <consumer>'
+# or into a private file that sh removes on exit
+secrets KEY_B64 -- sh -c 'f=$(mktemp) && trap "rm -f \"\$f\"" EXIT && printf %s "$KEY_B64" | base64 -d > "$f" && <consumer> "$f"'
+# or, for a file over about 96 KiB, piped in instead of injected
+secrets get KEY_B64 --value | sh -c 'f=$(mktemp) && trap "rm -f \"\$f\"" EXIT && base64 -d > "$f" && test -s "$f" && <consumer> "$f"'
 ```
 
-`<producer>` is the command that prints the value on stdout, such as a password manager's CLI or another tool's export command. Typing the value into the command line, as in `printf '<value>' | …`, puts it in the transcript and the shell history all the same.
+`<producer>` is the command that prints the value on stdout, such as a password manager's CLI or another tool's export command; when the value is already a file, `base64 < FILE` replaces `<producer> | base64`. Typing the value into the command line, as in `printf '<value>' | …`, puts it in the transcript and the shell history all the same.
 
-The stored value must be one line; a trailing newline is dropped. Pretty-printed JSON spans several lines, so compact it with `jq -c .` as above. Use the `KEY_B64` route for a multi-line non-JSON value. Direct multi-line input fails loudly and writes nothing: `edit-human` reports `piped secret 'KEY' must be one single-line assignment value`, and `sops set` reports `Value for --set is not valid JSON`, because `jq -R .` turned each line into its own JSON string. `jq -Rs .` is a trap: it stores the value, but sops's dotenv format writes each newline as the two characters `\n`, so it reads back as one line.
+The stored value must be one line; a trailing newline is dropped. Pretty-printed JSON spans several lines, so compact it with `jq -c .` as above; any other multi-line value, such as a PEM or OpenSSH private key, goes in base64-encoded under a name ending `_B64`. Piped in as is, a multi-line value fails loudly and writes nothing: `edit-human` reports `piped secret 'KEY' must be one single-line assignment value`, and `sops set` reports `Value for --set is not valid JSON`, because `jq -R .` turned each line into its own JSON string. `jq -Rs .` is no way around that: it stores the value, but sops's dotenv format writes each newline as the two characters `\n`, so the value reads back as one line.
+
+A human-tier read returns at most 4096 bytes, so a human-tier `_B64` key holds a file of at most 3072 bytes (`wc -c < FILE`), too few for a 4096-bit RSA key; a larger file fits only the agent tier, because a larger human-tier key stores without error and then fails every read with `secretsd returned an invalid response`. The stdin form needs a consumer that reads the key from stdin, such as `ssh-keygen -y -f /dev/stdin`; otherwise use a file form, which skips `<consumer>` when `base64 -d` rejects a corrupt value. Keep the file and its `trap` inside that `sh -c`: omp's bash tool does not run a subshell's `EXIT` trap, so `( file=$(mktemp); trap … EXIT; … )` there leaves the decoded key on disk. Injection fails with `Argument list too long` once the encoded value passes the kernel's 128 KiB limit on one environment string, at about 96 KiB of file; the piped form has no such limit, and its `test -s` keeps a failed read from reaching `<consumer>`.
 
 A key in a shared file, `secrets.human.d/KEY.env` or `secrets.env`, lives in the root's repository: commit and push that file, so the other machines get it. `--local` and `secrets edit-local` write machine-local files that are never committed. `edit-human` refuses a name the agent tier already holds, and the human tier refuses a name present in two roots. To rename a human-tier key, write it under the new name and delete the old file in the same change.
 
