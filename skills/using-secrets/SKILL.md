@@ -158,11 +158,27 @@ secrets list    # stop if it shows KEY  (human tier: …)
 <producer> | jq -c . | secrets edit-human KEY --source <name>
 secrets list    # stop if it shows KEY  (human tier: …)
 <producer> | jq -c . | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY"]'
+
+# a multi-line non-JSON value
+base64 < FILE | tr -d '\n' | secrets edit-human KEY_B64 --source <name>
+secrets list    # stop if it shows KEY_B64  (human tier: …)
+base64 < FILE | tr -d '\n' | jq -R . | sops set --value-stdin <path>/secrets.env '["KEY_B64"]'
+
+# consume it without printing it
+secrets KEY_B64 -- sh -c 'printf %s "$KEY_B64" | openssl base64 -d -A | <consumer>'
+
+# if the consumer needs a file
+file=$(mktemp)
+chmod 600 "$file"
+trap 'rm -f "$file"' EXIT
+secrets KEY_B64 -- sh -c 'printf %s "$KEY_B64" | openssl base64 -d -A > "$1"' sh "$file"
+<consumer> "$file"
+rm -f "$file"
 ```
 
 `<producer>` is the command that prints the value on stdout, such as a password manager's CLI or another tool's export command. Typing the value into the command line, as in `printf '<value>' | …`, puts it in the transcript and the shell history all the same.
 
-The value must be one line; a trailing newline is dropped. Pretty-printed JSON spans several lines, so compact it with `jq -c .` as above. A multi-line value fails loudly and writes nothing: `edit-human` reports `piped secret 'KEY' must be one single-line assignment value`, and `sops set` reports `Value for --set is not valid JSON`, because `jq -R .` turned each line into its own JSON string.
+The stored value must be one line; a trailing newline is dropped. Pretty-printed JSON spans several lines, so compact it with `jq -c .` as above. Use the `KEY_B64` route for a multi-line non-JSON value. Direct multi-line input fails loudly and writes nothing: `edit-human` reports `piped secret 'KEY' must be one single-line assignment value`, and `sops set` reports `Value for --set is not valid JSON`, because `jq -R .` turned each line into its own JSON string. `jq -Rs .` is a trap: it stores the value, but sops's dotenv format writes each newline as the two characters `\n`, so it reads back as one line.
 
 A key in a shared file, `secrets.human.d/KEY.env` or `secrets.env`, lives in the root's repository: commit and push that file, so the other machines get it. `--local` and `secrets edit-local` write machine-local files that are never committed. `edit-human` refuses a name the agent tier already holds, and the human tier refuses a name present in two roots. To rename a human-tier key, write it under the new name and delete the old file in the same change.
 
