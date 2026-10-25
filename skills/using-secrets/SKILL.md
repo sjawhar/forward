@@ -1,13 +1,36 @@
 ---
 name: using-secrets
-description: "Use BEFORE running any command that needs an API key, token, password, or credential, when storing, adding, or rotating one, and whenever a secret looks missing, wrong, truncated, or like a placeholder. This machine has no secrets in the environment — every key comes from the `secrets` CLI, and `secrets get KEY` does NOT print the value. Triggers on: secrets get, secrets list, API key, API token, access token, credential, OPENAI_API_KEY, ANTHROPIC_API_KEY, AIRTABLE_TOKEN, SLACK_MCP_XOXP_TOKEN, GROQ_API_KEY, DEEL_API_KEY, sk-, xoxp-, export KEY=, env var for a command, 'key is a placeholder', 'key looks wrong', 'invalid api key', 401, 403, authentication failed, sops, YubiKey touch, secretsd, secrets_request, SecretsRequest, grant expired, key blinking, TIMEOUT, TOO_MANY_PENDING, store a secret, add a key, add a secret, save a token, rotate a credential, rotate a key, secrets edit-human, secrets edit, secrets edit-local, secrets sources, sops set."
+description: "Use BEFORE running any command that needs an API key, token, password, or credential, when storing, adding, or rotating one, and whenever a secret looks missing, wrong, truncated, or like a placeholder. This machine has no secrets in the environment — a Legion credential broker session gets keys from `secret-run`, any other from the `secrets` CLI, and `secrets get KEY` does NOT print the value. Triggers on: secrets get, secrets list, API key, API token, access token, credential, OPENAI_API_KEY, ANTHROPIC_API_KEY, AIRTABLE_TOKEN, SLACK_MCP_XOXP_TOKEN, GROQ_API_KEY, DEEL_API_KEY, sk-, xoxp-, export KEY=, env var for a command, 'key is a placeholder', 'key looks wrong', 'invalid api key', 401, 403, authentication failed, sops, YubiKey touch, secretsd, secrets_request, SecretsRequest, grant expired, key blinking, TIMEOUT, TOO_MANY_PENDING, store a secret, add a key, add a secret, save a token, rotate a credential, rotate a key, secrets edit-human, secrets edit, secrets edit-local, secrets sources, sops set."
 ---
 
 # Using `secrets` and the `secrets_request` tool
 
-Every credential on this machine comes from `secrets` (CLI) or `secrets_request` (the MCP
-tool, shown as `SecretsRequest` in OpenCode). Nothing is pre-exported into the environment,
-so a bare `echo $OPENAI_API_KEY` is empty and that is not a bug.
+## In an agent session the Legion credential broker serves
+
+When `agent-secrets identity` exits 0, this session gets its keys from the Legion credential
+broker, not from secretsd. Run a command that needs a key through `secret-run`:
+
+```bash
+secret-run [--reason R] [--wait D] [--ttl D] KEY... -- cmd [args...]
+```
+
+`secret-run` asks the credential broker and runs `cmd` with each granted key in its
+environment. A human-tier key then waits up to `--wait` (default 30m) for the human to approve
+it in Dispatch, not for a YubiKey touch; the waiting message says who approves it and where.
+`--ttl` ends the grant after that long, instead of when the session ends. `D` is a Go
+duration, such as `30s` or `5m`. In such a session `secret-run` never falls back to secretsd.
+In any other session or shell, it runs `secrets KEY... -- cmd` and drops `--reason`, `--wait`
+and `--ttl`.
+
+The credential broker's key names can differ from secretsd's: its `GITHUB_ADMIN_PAT` is
+secretsd's `GITHUB_ADMIN_PAT_THEOREM`. `agent-secrets secret list` shows the keys the
+credential broker holds.
+
+The rest of this skill describes secretsd, and there "the broker" and "the daemon" mean
+secretsd. secretsd is for the human's own shells and for sessions the Legion credential broker
+does not serve. There, every credential comes from `secrets` (CLI) or `secrets_request` (the
+MCP tool, shown as `SecretsRequest` in OpenCode). Nothing is pre-exported into the
+environment, so a bare `echo $OPENAI_API_KEY` is empty and that is not a bug.
 
 ## The one mistake to never make
 
@@ -187,7 +210,7 @@ A key in a shared file, `secrets.human.d/KEY.env` or `secrets.env`, lives in the
 ## Two tiers
 
 `secrets list` marks each key. **Agent-tier** keys resolve locally and need no approval.
-**Human-tier** keys are unlocked by a physical YubiKey touch: one request per key per
+In secretsd, **human-tier** keys are unlocked by a physical YubiKey touch: one request per key per
 session makes the human's key blink, and every later request for that same key in that same
 session is free. In omp, "that same session" is the whole session tree — root or any of its
 subagents share one grant. In OpenCode, registration is per session id; a sibling session
