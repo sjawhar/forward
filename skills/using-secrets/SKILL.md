@@ -5,6 +5,8 @@ description: "Use BEFORE running any command that needs an API key, token, passw
 
 # Using `secrets` and the `secrets_request` tool
 
+A credential a service or app uses is a resource declared in infrastructure code, minted from a seed credential a person created. Never mint a downstream credential by hand — not by curling a provider API with an admin token, and not by requesting a one-off broker secret to do it. Revert any credential minted out of band.
+
 ## In an agent session the Legion credential broker serves
 
 When `agent-secrets identity` exits 0, this session gets its keys from the Legion credential
