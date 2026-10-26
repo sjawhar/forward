@@ -28,9 +28,13 @@ use crate::config::SourceRoot;
 /// A symlinked agent file is edited through its referent: the stage sits
 /// beside the real file and replaces it, and the link stays a link.
 pub(super) fn edit_agent(path: &Path, roots: &[SourceRoot]) -> Result<(), CliError> {
-    let target = std::fs::canonicalize(path).map_err(CliError::AgentKeySet)?;
+    let read_failure = |path: &Path| {
+        let path = path.to_path_buf();
+        move |error| CliError::AgentKeySet { path, error }
+    };
+    let target = std::fs::canonicalize(path).map_err(read_failure(path))?;
     let directory = target.parent().ok_or(CliError::InstallEditedSecret)?;
-    let before = std::fs::read(&target).map_err(CliError::AgentKeySet)?;
+    let before = std::fs::read(&target).map_err(read_failure(&target))?;
     let stage = Builder::new()
         .prefix(".secretsd-edit-")
         .suffix(".env")
@@ -44,12 +48,15 @@ pub(super) fn edit_agent(path: &Path, roots: &[SourceRoot]) -> Result<(), CliErr
     let status = Command::new("sops")
         .arg(stage.path())
         .status()
-        .map_err(CliError::SopsStart)?;
+        .map_err(|error| CliError::SopsStart {
+            path: stage.path().to_path_buf(),
+            error,
+        })?;
     if !status.success() {
         return Err(CliError::SopsEditFailed(status));
     }
     super::ensure_no_human_clash(&AgentStore::names_in(stage.path())?, roots)?;
-    if std::fs::read(&target).map_err(CliError::AgentKeySet)? != before {
+    if std::fs::read(&target).map_err(read_failure(&target))? != before {
         return Err(CliError::AgentFileChangedDuringEdit);
     }
     stage

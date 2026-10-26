@@ -3,6 +3,10 @@ use std::io::Write;
 use super::{CliError, ClientError, caller_tty};
 use crate::secret::SecretName;
 
+mod provenance;
+
+pub(super) use provenance::Provenance;
+
 #[derive(Clone, Copy)]
 pub(super) enum GetOutput {
     /// Ask the broker to grant the key, then report status. Blocks for the
@@ -14,40 +18,27 @@ pub(super) enum GetOutput {
     Value,
 }
 
-pub(super) fn write_status(name: &SecretName, status: TierStatus) -> Result<(), CliError> {
+/// Print the one-line JSON status object, naming the store that answers.
+pub(super) fn write_status(name: &SecretName, provenance: &Provenance) -> Result<(), CliError> {
     let mut stdout = std::io::stdout().lock();
-    // A key name is validated as [A-Za-z_][A-Za-z0-9_]*, so it needs no escaping.
-    match status {
-        TierStatus::Agent => writeln!(stdout, r#"{{"key":"{}","tier":"agent"}}"#, name.as_str()),
-        TierStatus::Human {
-            grant_active,
-            ttl_secs,
-        } => {
-            let ttl_json = ttl_secs.map_or_else(|| "null".to_owned(), |ttl| ttl.to_string());
-            writeln!(
-                stdout,
-                r#"{{"key":"{}","tier":"human","grant":{grant_active},"ttl":{ttl_json}}}"#,
-                name.as_str()
-            )
-        }
-    }
-    .map_err(CliError::Stdout)
+    writeln!(stdout, "{}", provenance.status_json(name)).map_err(CliError::Stdout)
 }
 
-#[derive(Clone, Copy)]
-pub(super) enum TierStatus {
-    Agent,
-    Human {
-        grant_active: bool,
-        /// The live grant's remaining lifetime, when the caller asked for a
-        /// specific `--ttl` and the broker reported one back.
-        ttl_secs: Option<u64>,
-    },
+/// Write one line naming each key's store, before any value leaves this process.
+///
+/// Values never appear here: the line is the provenance of what is about to be
+/// handed over, which is what a reader needs to tell two secrets CLIs apart.
+pub(super) fn announce(injected: &[(&str, &Provenance)]) -> Result<(), CliError> {
+    let named: Vec<String> = injected
+        .iter()
+        .map(|(name, provenance)| format!("{name} from {}", provenance.describe()))
+        .collect();
+    let mut stderr = std::io::stderr().lock();
+    writeln!(stderr, "secrets: {}", named.join("; ")).map_err(CliError::SourceNotice)
 }
 
-pub(super) fn active_grant(name: &SecretName, grants: &[u8]) -> Result<bool, CliError> {
-    let listing = std::str::from_utf8(grants)
-        .map_err(|_| CliError::from_client(ClientError::InvalidResponse))?;
+pub(super) fn active_grant(name: &SecretName, grants: &[u8]) -> Result<bool, ClientError> {
+    let listing = std::str::from_utf8(grants).map_err(|_| ClientError::InvalidResponse)?;
     let caller_scope = if std::env::var_os("SECRETSD_SESSION_TOKEN_FILE").is_some() {
         CallerScope::Session
     } else {

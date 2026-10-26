@@ -144,6 +144,14 @@ impl BrokerClient {
         Self::new(socket_path)
     }
 
+    /// Borrow the socket path this client contacts.
+    ///
+    /// Callers name it in output and refusals: it is what distinguishes this
+    /// store from any other broker a machine runs.
+    pub fn socket_path(&self) -> &Path {
+        &self.socket_path
+    }
+
     /// Verify that the connected broker speaks exactly this protocol version.
     pub fn hello(&self) -> Result<(), ClientError> {
         self.hello_fields().map(drop)

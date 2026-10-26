@@ -6,6 +6,10 @@ use crate::proto::ErrCode;
 const AGENT_NOTICE: &str = "AGENT NOTICE: ask the human; do not retry-loop.";
 
 impl fmt::Display for CliError {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exhaustive arm per variant keeps every message in one readable place"
+    )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(
@@ -16,10 +20,14 @@ impl fmt::Display for CliError {
             Self::InvalidTtl(raw) => {
                 write!(formatter, "invalid --ttl \"{raw}\"; use 45s, 30m, or 2h")
             }
-            Self::MissingSecret(name) => write!(formatter, "secret '{}' not found", name.as_str()),
-            Self::AmbiguousKey(name) => write!(
+            Self::MissingSecret { name, searched } => write!(
                 formatter,
-                "key '{}' exists in both agent and human tiers; refusing ambiguous access -- keep it in one tier: `secrets list` shows both locations",
+                "secret '{}' not found; looked in {searched}",
+                name.as_str()
+            ),
+            Self::AmbiguousKey { name, agent, human } => write!(
+                formatter,
+                "key '{}' exists in both the agent tier, source {agent}, and the human tier, source {human}; refusing ambiguous access -- keep it in one tier: `secrets list` shows both locations",
                 name.as_str()
             ),
             Self::AgentKeyExists(name) => write!(
@@ -39,11 +47,35 @@ impl fmt::Display for CliError {
                 formatter,
                 "sops edit exited unsuccessfully ({status}); the agent-tier file is unchanged"
             ),
-            Self::SopsStart(error) => write!(formatter, "could not start sops: {error}"),
-            Self::SopsFailed => formatter.write_str("sops could not decrypt the agent-tier secrets"),
-            Self::InvalidDotenv => formatter.write_str("sops returned invalid dotenv data"),
-            Self::AgentKeySet(error) => write!(formatter, "could not read agent-tier key set: {error}"),
-            Self::HumanDirectory(error) => write!(formatter, "could not list human-tier keys: {error}"),
+            Self::SopsStart { path, error } => {
+                write!(formatter, "could not start sops for {}: {error}", path.display())
+            }
+            Self::SopsFailed(Some(path)) => write!(
+                formatter,
+                "sops could not decrypt the agent-tier file {}",
+                path.display()
+            ),
+            Self::SopsFailed(None) => {
+                formatter.write_str("sops could not decrypt the agent-tier secrets")
+            }
+            Self::InvalidDotenv(Some(path)) => write!(
+                formatter,
+                "sops returned invalid dotenv data for {}",
+                path.display()
+            ),
+            Self::InvalidDotenv(None) => {
+                formatter.write_str("sops returned invalid dotenv data")
+            }
+            Self::AgentKeySet { path, error } => write!(
+                formatter,
+                "could not read agent-tier key names from {}: {error}",
+                path.display()
+            ),
+            Self::HumanDirectory { path, error } => write!(
+                formatter,
+                "could not list human-tier keys in {}: {error}",
+                path.display()
+            ),
             Self::InvalidHumanFile => {
                 formatter.write_str("human-tier directory contains an invalid key filename")
             }
@@ -100,10 +132,23 @@ impl fmt::Display for CliError {
                 name.as_str()
             ),
             Self::Hardening(error) => write!(formatter, "could not disable core dumps: {error}"),
-            Self::Broker(code) => write!(formatter, "{AGENT_NOTICE} {}", broker_guidance(*code)),
-            Self::BrokerTransport(error) => write!(formatter, "{AGENT_NOTICE} {error}"),
+            Self::Broker { code, socket } => write!(
+                formatter,
+                "{AGENT_NOTICE} {} (asked the secretsd daemon on {})",
+                broker_guidance(*code),
+                socket.display()
+            ),
+            Self::BrokerTransport { error, socket } => write!(
+                formatter,
+                "{AGENT_NOTICE} {error} (asked the secretsd daemon on {})",
+                socket.display()
+            ),
             Self::Exec(error) => write!(formatter, "could not execute command: {error}"),
             Self::Stdout(error) => write!(formatter, "could not write secret value: {error}"),
+            Self::SourceNotice(error) => write!(
+                formatter,
+                "could not name the source of the requested secrets: {error}"
+            ),
         }
     }
 }

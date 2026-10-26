@@ -56,11 +56,21 @@ fn get_rejects_path_traversal_before_constructing_a_path() {
 }
 
 #[test]
-fn inject_form_sets_values_only_in_the_child_environment() {
+fn inject_form_sets_values_only_in_the_child_environment_and_names_each_store() {
     let fixture = Fixture::agent("A=one\nB=two\n");
 
     let output = fixture.run_minimal(["A", "B", "--", "sh", "-c", "printf '%s:%s' \"$A\" \"$B\""]);
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"one:two");
+    // One line, before the exec, naming every injected key's store and no value.
+    let shared = fixture.dotfiles_dir().join("secrets.env");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "secrets: A from agent tier, source dotfiles ({}); B from agent tier, source dotfiles ({})\n",
+            shared.display(),
+            shared.display()
+        )
+    );
 }

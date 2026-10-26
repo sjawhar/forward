@@ -19,10 +19,22 @@ pub enum CliError {
     InvalidSecretName,
     /// A `--ttl` value did not match `45s`, `30m`, or `2h`.
     InvalidTtl(String),
-    /// A requested agent-tier key was absent.
-    MissingSecret(SecretName),
+    /// A requested key was absent, with the stores that were searched.
+    MissingSecret {
+        /// The requested key.
+        name: SecretName,
+        /// Human-readable list of every store this client looked in.
+        searched: String,
+    },
     /// The requested key exists in both storage tiers and access is denied.
-    AmbiguousKey(SecretName),
+    AmbiguousKey {
+        /// The requested key.
+        name: SecretName,
+        /// The agent-tier file holding it, as `<source> (<path>)`.
+        agent: String,
+        /// The human-tier file holding it, as `<source> (<path>)`.
+        human: String,
+    },
     /// A human-tier write named a key the agent tier already holds.
     AgentKeyExists(SecretName),
     /// An agent-tier edit named a key the human tier already holds.
@@ -33,16 +45,31 @@ pub enum CliError {
     /// `sops` edited a staged copy of an agent-tier file and exited
     /// unsuccessfully; the original was not touched.
     SopsEditFailed(std::process::ExitStatus),
-    /// Starting `sops` failed.
-    SopsStart(std::io::Error),
-    /// `sops` exited unsuccessfully.
-    SopsFailed,
-    /// Decrypted dotenv bytes were malformed or unsafe.
-    InvalidDotenv,
-    /// Reading encrypted agent-tier key names failed.
-    AgentKeySet(std::io::Error),
-    /// Reading the human-tier directory failed.
-    HumanDirectory(std::io::Error),
+    /// Starting `sops` for this file failed.
+    SopsStart {
+        /// The agent-tier or edit file passed to sops.
+        path: PathBuf,
+        /// The process-spawn failure.
+        error: std::io::Error,
+    },
+    /// `sops` exited unsuccessfully, for this agent-tier file when known.
+    SopsFailed(Option<PathBuf>),
+    /// Decrypted dotenv bytes were malformed or unsafe, in this file when known.
+    InvalidDotenv(Option<PathBuf>),
+    /// Reading encrypted agent-tier key names from this file failed.
+    AgentKeySet {
+        /// The file that could not be read.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        error: std::io::Error,
+    },
+    /// Reading a human-tier directory failed.
+    HumanDirectory {
+        /// The directory that could not be listed.
+        path: PathBuf,
+        /// The underlying I/O failure.
+        error: std::io::Error,
+    },
     /// A human-tier filename was not a valid key name.
     InvalidHumanFile,
     /// A key occurs in more than one configured human-tier location.
@@ -98,26 +125,58 @@ pub enum CliError {
     /// Disabling core dumps before reading a piped secret failed.
     Hardening(crate::hardening::HardeningError),
     /// The broker rejected the request with a stable protocol error code.
-    Broker(ErrCode),
+    Broker {
+        /// The stable protocol error code.
+        code: ErrCode,
+        /// The broker socket this client asked.
+        socket: PathBuf,
+    },
     /// Broker transport or framing failed before an error code was available.
-    BrokerTransport(ClientError),
+    BrokerTransport {
+        /// The transport or framing failure.
+        error: ClientError,
+        /// The broker socket this client asked.
+        socket: PathBuf,
+    },
     /// Replacing the process for an edit or injection command failed.
     Exec(std::io::Error),
     /// Writing command output to standard output failed.
     Stdout(std::io::Error),
+    /// Writing the line that names each key's store failed.
+    ///
+    /// Fail closed: a value handed over without naming its store is the
+    /// confusion this notice exists to prevent.
+    SourceNotice(std::io::Error),
 }
 
 impl CliError {
     /// Convert a stable broker error code to retry-safe agent guidance.
-    pub const fn from_broker(code: ErrCode) -> Self {
-        Self::Broker(code)
+    ///
+    /// The socket is part of the message: a refusal must say which store
+    /// refused, since more than one secrets CLI answers the same key names.
+    pub const fn from_broker(code: ErrCode, socket: PathBuf) -> Self {
+        Self::Broker { code, socket }
     }
 
     /// Convert a broker client failure without exposing request credentials.
-    pub fn from_client(error: ClientError) -> Self {
+    pub fn from_client(error: ClientError, socket: PathBuf) -> Self {
         match error {
-            ClientError::Broker(code) => Self::from_broker(code),
-            error => Self::BrokerTransport(error),
+            ClientError::Broker(code) => Self::from_broker(code, socket),
+            error => Self::BrokerTransport { error, socket },
+        }
+    }
+
+    /// Name the file a dotenv failure came from, when the caller knows it.
+    ///
+    /// The parsers run over bytes alone, including an editor's plaintext
+    /// buffer, so they raise a fileless refusal that readers of a configured
+    /// file label here.
+    #[must_use]
+    pub fn in_file(self, path: &std::path::Path) -> Self {
+        match self {
+            Self::InvalidDotenv(None) => Self::InvalidDotenv(Some(path.to_path_buf())),
+            Self::SopsFailed(None) => Self::SopsFailed(Some(path.to_path_buf())),
+            other => other,
         }
     }
 }
@@ -125,27 +184,28 @@ impl CliError {
 impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::SopsStart(error)
-            | Self::AgentKeySet(error)
-            | Self::HumanDirectory(error)
+            Self::SopsStart { error, .. }
             | Self::Exec(error)
             | Self::Stdout(error)
+            | Self::SourceNotice(error)
             | Self::EditorStart(error)
-            | Self::PipedHumanRead(error) => Some(error),
+            | Self::PipedHumanRead(error)
+            | Self::AgentKeySet { error, .. }
+            | Self::HumanDirectory { error, .. } => Some(error),
             Self::Hardening(error) => Some(error),
             Self::Config(error) => Some(error),
-            Self::BrokerTransport(error) => Some(error),
+            Self::BrokerTransport { error, .. } => Some(error),
             Self::Usage
             | Self::InvalidSecretName
             | Self::InvalidTtl(_)
-            | Self::MissingSecret(_)
-            | Self::AmbiguousKey(_)
+            | Self::MissingSecret { .. }
+            | Self::AmbiguousKey { .. }
             | Self::AgentKeyExists(_)
             | Self::HumanKeyExists(_)
             | Self::AgentFileChangedDuringEdit
             | Self::SopsEditFailed(_)
-            | Self::SopsFailed
-            | Self::InvalidDotenv
+            | Self::SopsFailed(_)
+            | Self::InvalidDotenv(_)
             | Self::InvalidHumanFile
             | Self::DuplicateHumanKey { .. }
             | Self::EditSourceRequired(_)
@@ -160,7 +220,7 @@ impl std::error::Error for CliError {
             | Self::InstallEditedSecret
             | Self::EmptyPipedHumanSecret(_)
             | Self::InvalidPipedHumanSecret(_)
-            | Self::Broker(_) => None,
+            | Self::Broker { .. } => None,
         }
     }
 }

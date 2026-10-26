@@ -151,7 +151,7 @@ in_box -d perl -MIO::Socket::UNIX -e '
   $reply = "[no reply]\n" unless defined $reply;
   open(my $r, ">", "$out/register") or die; print $r $reply; close $r;
   exit 1 unless $reply eq "OK\n";
-  my $value = qx(secrets $key -- sh -c "printf %s \\"\\\$$key\\"" 2>&1);
+  my $value = qx(secrets $key -- sh -c "printf %s \\"\\\$$key\\"" 2>"$out/child.stderr");
   open(my $c, ">", "$out/child.tmp") or die; print $c $value; close $c;
   rename "$out/child.tmp", "$out/child";
   sleep 1 until -e "$out/release";
@@ -166,6 +166,12 @@ done
 [[ -e "$scratch/out/child" ]] || fail "client inside the container produced no output: $(journal | tail -n 5)"
 value="$(<"$scratch/out/child")"
 [[ "$value" == "$human_value" ]] || fail "client inside the container got [$value], expected [$human_value]"
+notice="$(<"$scratch/out/child.stderr")"
+[[ "$notice" == "secrets: $human_key from human tier, source e2e, granted by the secretsd daemon ($socket)" ]] ||
+  fail "client inside the container named the store incorrectly: [$notice]"
+if grep -F --quiet "$human_value" "$scratch/out/child.stderr"; then
+  fail 'the child source notice contained the secret value'
+fi
 registrant_pid="$(docker top "$container" -o pid,comm | awk '$2 == "perl" { print $1 }')"
 [[ -n "$registrant_pid" && -d "/proc/$registrant_pid" ]] || fail 'the registrant is not alive after serving its child'
 

@@ -13,7 +13,7 @@ mod human;
 mod sources;
 mod status;
 
-pub use agent::AgentStore;
+pub use agent::{AgentFile, AgentStore};
 pub use error::CliError;
 pub use human::{HumanClient, HumanLocation, HumanNames};
 pub use proto::client::{BrokerClient, SocketPath, caller_tty, read_token_file, runtime_dir};

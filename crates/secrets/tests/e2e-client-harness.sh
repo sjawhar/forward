@@ -344,10 +344,16 @@ report '7/14 stored and rotated ciphertext under the human rule; real-sops total
 # never runs sops on the client; the only real-sops call is the daemon's
 # decrypt on the first, uncached get of each key.
 report '8/14 fetching the human value through the real client'
-first_get="$(run_client get "$human_key" --value)"
+first_get="$(run_client get "$human_key" --value 2> "$scratch/first-get.stderr")"
 [[ "$first_get" == "$human_value" ]] || fail 'first get returned an unexpected value'
+first_get_notice="$(cat "$scratch/first-get.stderr")"
+[[ "$first_get_notice" == "secrets: $human_key from human tier, source dotfiles, granted by the secretsd daemon ($socket)" ]] ||
+  fail "get --value did not name its store: $first_get_notice"
+if grep -F --quiet "$human_value" "$scratch/first-get.stderr"; then
+  fail 'the source notice contained the secret value'
+fi
 assert_sops_counts 4 1 'first get'
-report '8/14 get returned the expected value [redacted]; real-sops total=4 daemon=1'
+report '8/14 get returned the expected value [redacted] and named its store; real-sops total=4 daemon=1'
 
 report '9/14 fetching the cached human value through the real client'
 second_get="$(run_client get "$human_key" --value)"
@@ -356,14 +362,23 @@ assert_sops_counts 4 1 'cached get'
 report '9/14 cached get returned the expected value [redacted]; real-sops total=4 daemon=1'
 
 report '10/14 injecting the cached value into a child environment'
-injected="$(run_client "$human_key" -- sh -c 'printf %s "$E2E_KEY"')"
+injected="$(run_client "$human_key" -- sh -c 'printf %s "$E2E_KEY"' 2> "$scratch/inject.stderr")"
 [[ "$injected" == "$human_value" ]] || fail 'injection returned an unexpected child value'
+inject_notice="$(cat "$scratch/inject.stderr")"
+[[ "$inject_notice" == "secrets: $human_key from human tier, source dotfiles, granted by the secretsd daemon ($socket)" ]] ||
+  fail "injection did not name its store: $inject_notice"
+if grep -F --quiet "$human_value" "$scratch/inject.stderr"; then
+  fail 'the injection notice contained the secret value'
+fi
 assert_sops_counts 4 1 'injection'
-report '10/14 injection returned the expected value [redacted]; real-sops total=4 daemon=1'
+report '10/14 injection returned the expected value [redacted] and named its store; real-sops total=4 daemon=1'
 
 report '11/14 fetching a root1 local human key and checking its audit source'
-local_get="$(run_client get "$local_human_key" --value)"
+local_get="$(run_client get "$local_human_key" --value 2> "$scratch/local-get.stderr")"
 [[ "$local_get" == "$local_human_value" ]] || fail 'local get returned an unexpected value'
+local_get_notice="$(cat "$scratch/local-get.stderr")"
+[[ "$local_get_notice" == "secrets: $local_human_key from human tier, source dotfiles.local, granted by the secretsd daemon ($socket)" ]] ||
+  fail "local get did not name its source: $local_get_notice"
 grep -E --quiet 'source.*dotfiles\.local' "$daemon_log" || fail 'local key audit did not record source=dotfiles.local'
 assert_sops_counts 5 2 'local human get'
 report '11/14 local human get returned the expected value [redacted]; real-sops total=5 daemon=2'
@@ -376,7 +391,7 @@ report '12/14 root2 human get returned the expected value [redacted]; real-sops 
 
 report '13/14 listing both tiers and active grants'
 listing="$(run_client list)"
-[[ "$listing" == $'AGENT_KEY\nCREATED_KEY  (human tier: dotfiles)\nE2E_KEY  (human tier: dotfiles)\nLOCAL_KEY  (human tier: dotfiles.local)\nPIPED_HUMAN_KEY  (human tier: dotfiles.local)\nROOT2_KEY  (human tier: private)' ]] || fail 'list returned unexpected tier names'
+[[ "$listing" == $'AGENT_KEY  (agent tier: dotfiles)\nCREATED_KEY  (human tier: dotfiles)\nE2E_KEY  (human tier: dotfiles)\nLOCAL_KEY  (human tier: dotfiles.local)\nPIPED_HUMAN_KEY  (human tier: dotfiles.local)\nROOT2_KEY  (human tier: private)' ]] || fail 'list returned unexpected tier names'
 assert_sops_counts 7 3 'list'
 grants="$(run_client grants)"
 [[ "$grants" =~ $grants_pattern ]] || fail 'grants did not show every session grant'

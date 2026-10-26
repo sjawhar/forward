@@ -16,6 +16,10 @@ happens once per session instead of once every few minutes.
 - **Unattended secrets stay unattended.** Keys that agents legitimately need
   overnight never touch this daemon; they keep decrypting with a disk-resident
   key, exactly as before.
+- **Every answer names its store.** A status object, an injection and every
+  refusal say which tier, which source root and which file or socket answered,
+  so a machine running more than one `secrets`-style CLI can never be read as
+  one store when another replied.
 
 See [`docs/design.md`](docs/design.md) for the current architecture.
 
