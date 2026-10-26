@@ -177,7 +177,10 @@ fn new_human_path(
 ) -> Result<PathBuf, CliError> {
     let root = select_root(sources, flags.source)?;
     let directory = root.human_dir();
-    std::fs::create_dir_all(&directory).map_err(CliError::HumanDirectory)?;
+    std::fs::create_dir_all(&directory).map_err(|error| CliError::HumanDirectory {
+        path: directory.clone(),
+        error,
+    })?;
     let file_name = if flags.local {
         name.local_file_name()
     } else {

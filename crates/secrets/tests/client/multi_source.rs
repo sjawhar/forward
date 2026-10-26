@@ -3,7 +3,7 @@ use secrets::proto::PROTOCOL_VERSION;
 use super::{FakeBroker, Fixture, Reply};
 
 #[test]
-fn list_shows_human_source_labels_without_decrypting_human_files() {
+fn list_names_each_keys_source_without_decrypting_human_files() {
     let fixture = Fixture::agent("AGENT_ONLY=agent-value\n");
     fixture.write_human_name("HUMAN");
     fixture.write_human_name_in("dotfiles", "LOCAL_HUMAN.local.env");
@@ -13,11 +13,22 @@ fn list_shows_human_source_labels_without_decrypting_human_files() {
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
         output.stdout,
-        b"AGENT_ONLY\nHUMAN  (human tier: dotfiles)\nLOCAL_HUMAN  (human tier: dotfiles.local)\n"
+        b"AGENT_ONLY  (agent tier: dotfiles)\nHUMAN  (human tier: dotfiles)\nLOCAL_HUMAN  (human tier: dotfiles.local)\n"
     );
     assert_eq!(fixture.sops_calls(), 1);
     assert!(fixture.sops_log().contains("secrets.env"));
     assert!(!fixture.sops_log().contains("HUMAN.env"));
+}
+
+#[test]
+fn list_names_the_file_that_wins_for_an_overridden_key() {
+    let fixture = Fixture::agent("KEY=shared-value\n");
+    fixture.write_local("KEY=local-value\n");
+
+    let output = fixture.run_minimal(["list"]);
+
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(output.stdout, b"KEY  (agent tier: dotfiles.local)\n");
 }
 
 #[test]
@@ -64,6 +75,14 @@ fn human_key_in_the_second_root_flows_through_the_broker() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"human-value\n");
+    // The notice names the root this key's file lives in, not the first root.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "secrets: HUMAN from human tier, source private, granted by the secretsd daemon ({})\n",
+            broker.socket().display()
+        )
+    );
     assert_eq!(fixture.sops_calls(), 0);
     assert_eq!(
         broker.frames(),

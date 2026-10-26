@@ -92,7 +92,7 @@ fn human_get_reads_the_token_from_its_file_not_the_environment() {
 }
 
 #[test]
-fn human_get_routes_to_the_broker_when_the_agent_tier_is_absent() {
+fn human_get_names_the_daemon_and_the_file_this_client_resolves() {
     let broker = FakeBroker::script([Reply::Hello, Reply::Bytes(b"human-value".to_vec())]);
     let fixture = Fixture::human("HUMAN");
     std::fs::remove_file(fixture.dotfiles_dir().join("secrets.env")).unwrap();
@@ -101,6 +101,16 @@ fn human_get_routes_to_the_broker_when_the_agent_tier_is_absent() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(output.stdout, b"human-value\n");
+    // The store is the daemon, named with the socket this client asked and the
+    // human-tier root its own configuration resolves the key to.
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "secrets: HUMAN from human tier, source dotfiles, granted by the secretsd daemon ({})\n",
+            broker.socket().display()
+        )
+    );
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("human-value"));
     assert_eq!(fixture.sops_calls(), 0);
     assert_eq!(broker.frames(), [hello(), "GET\tkey=HUMAN".to_owned()]);
 }
@@ -119,8 +129,12 @@ fn get_with_no_request_lists_grants_without_sending_get() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
-        output.stdout,
-        b"{\"key\":\"HUMAN\",\"tier\":\"human\",\"grant\":false,\"ttl\":null}\n"
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            r#"{{"key":"HUMAN","tier":"human","store":"secretsd daemon","source":"dotfiles","socket":"{}","grant":false,"ttl":null}}{}"#,
+            broker.socket().display(),
+            "\n"
+        )
     );
     assert_eq!(fixture.sops_calls(), 0);
     assert_eq!(broker.frames(), [hello(), "GRANTS".to_owned()]);

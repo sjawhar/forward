@@ -41,7 +41,7 @@ pre-authorizes the key for this session:
 
 ```console
 $ secrets get OPENAI_API_KEY
-{"key":"OPENAI_API_KEY","tier":"agent"}
+{"key":"OPENAI_API_KEY","tier":"agent","store":"sops file","source":"dotfiles","path":"/home/you/.dotfiles/secrets.env"}
 ```
 
 That JSON **is not the value**. It is not a placeholder, it is not a truncated key, and its
@@ -153,14 +153,29 @@ paste its output into a message. A value in a transcript means a rotation.
 
 | Command | Does |
 |---|---|
-| `secrets get KEY` | JSON status; pre-authorizes (prompts for a touch if the key needs one) |
+| `secrets get KEY` | JSON status naming the store that answers; pre-authorizes (prompts for a touch if the key needs one) |
 | `secrets get KEY --ttl 8h` | same, but the freshly created grant lives up to 8h instead of the 12h default (operator use; capped server-side, ignored on a live grant) |
-| `secrets get KEY --value` | prints the secret |
+| `secrets get KEY --value` | prints the secret on stdout, and its store on stderr |
 | `secrets get KEY --no-request` | status only; never prompts |
-| `secrets KEY [KEY2 ...] -- cmd` | runs `cmd` with the keys in its environment |
-| `secrets list` | every key name and its tier; decrypts agent-tier files locally, never contacts the daemon or prompts; a key in both tiers is marked `ALSO agent tier` |
+| `secrets KEY [KEY2 ...] -- cmd` | runs `cmd` with the keys in its environment, after one stderr line naming each key's store |
+| `secrets list` | every key name with its tier and source; decrypts agent-tier files locally, never contacts the daemon or prompts; a key in both tiers is marked `ALSO agent tier` |
 | `secrets grants` | which human-tier keys are currently unlocked |
 | `secrets_request(KEY)` tool call | requests approval only; never returns the value |
+
+## Which store answered
+
+This machine may run more than one `secrets`-style CLI, each with its own store, and both
+answer the same key names. Every answer from this one says so, and the store is part of what
+you report:
+
+- status prints `"store":"sops file"` with the file, or `"store":"secretsd daemon"` with the
+  source root and the socket;
+- a value or an injection writes one line to stderr first, such as
+  `secrets: OPENAI_API_KEY from agent tier, source dotfiles (/home/you/.dotfiles/secrets.env)`;
+- a refusal names every place this CLI looked.
+
+Never tell the human a key is wrong, missing or stale without naming the store you read, and
+never say a key came from a store this output did not name.
 
 ## Storing a secret
 

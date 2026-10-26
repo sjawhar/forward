@@ -23,8 +23,12 @@ fn get_with_no_request_reports_an_active_session_grant() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
-        output.stdout,
-        b"{\"key\":\"HUMAN\",\"tier\":\"human\",\"grant\":true,\"ttl\":null}\n"
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            r#"{{"key":"HUMAN","tier":"human","store":"secretsd daemon","source":"dotfiles","socket":"{}","grant":true,"ttl":null}}{}"#,
+            broker.socket().display(),
+            "\n"
+        )
     );
     assert_eq!(broker.frames(), [hello(), "GRANTS".to_owned()]);
 }
@@ -63,6 +67,15 @@ fn unknown_token_does_not_render_token_file_contents() {
 
     assert_ne!(output.status.code(), Some(0));
     assert!(stderr.contains("broker restarted"));
+    // The refusal names the store that refused, so it is never read as the
+    // other secrets CLI's broker having refused.
+    assert!(
+        stderr.contains(&format!(
+            "(asked the secretsd daemon on {})",
+            broker.socket().display()
+        )),
+        "{stderr}"
+    );
     assert!(!stderr.contains(token));
 }
 
@@ -83,9 +96,15 @@ fn every_daemon_error_has_distinct_retry_safe_guidance() {
         (ErrCode::TooManyPending, "too many pending"),
         (ErrCode::Internal, "journalctl --user -u secretsd"),
     ] {
-        let text = CliError::from_broker(code).to_string();
+        let text =
+            CliError::from_broker(code, std::path::PathBuf::from("/run/user/0/secretsd.sock"))
+                .to_string();
         assert!(text.starts_with("AGENT NOTICE: ask the human; do not retry-loop."));
         assert!(text.contains(guidance), "{code:?}: {text}");
+        assert!(
+            text.contains("asked the secretsd daemon on /run/user/0/secretsd.sock"),
+            "{code:?}: {text}"
+        );
     }
 }
 
@@ -137,8 +156,12 @@ fn bare_human_get_requests_a_grant_without_receiving_the_value() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
-        output.stdout,
-        b"{\"key\":\"HUMAN\",\"tier\":\"human\",\"grant\":true,\"ttl\":null}\n"
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            r#"{{"key":"HUMAN","tier":"human","store":"secretsd daemon","source":"dotfiles","socket":"{}","grant":true,"ttl":null}}{}"#,
+            broker.socket().display(),
+            "\n"
+        )
     );
     assert_eq!(
         broker.frames(),
@@ -171,8 +194,12 @@ fn a_ttl_flag_is_sent_on_the_wire_and_the_effective_value_is_reported_back() {
 
     assert_eq!(output.status.code(), Some(0));
     assert_eq!(
-        output.stdout,
-        b"{\"key\":\"HUMAN\",\"tier\":\"human\",\"grant\":true,\"ttl\":28800}\n"
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            r#"{{"key":"HUMAN","tier":"human","store":"secretsd daemon","source":"dotfiles","socket":"{}","grant":true,"ttl":28800}}{}"#,
+            broker.socket().display(),
+            "\n"
+        )
     );
     assert_eq!(
         broker.frames(),

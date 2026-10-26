@@ -406,10 +406,12 @@ secrets get KEY [--ttl DURATION]        pre-authorizes: asks the broker for a gr
                                        only a freshly created grant (45s/30m/2h/8h,
                                        capped server-side); omitted keeps the
                                        default 12h backstop
-secrets get KEY --value                prints the secret; the only form that does
+secrets get KEY --value                prints the secret; the only form that does,
+                                       with its store named on stderr
 secrets get KEY --no-request           status without asking, so it never triggers a touch
-secrets KEY -- cmd                     injects into a child environment, never prints
-secrets list                            names only; never decrypts
+secrets KEY -- cmd                     injects into a child environment, never prints;
+                                       names each key's store on stderr first
+secrets list                            names only, each with its source; never decrypts
 secrets sources                         lists configured source roots
 secrets edit [--source NAME]            edits an agent-tier source file
 secrets edit-local [--source NAME]      edits an agent-tier local source file
@@ -425,6 +427,42 @@ MCP: secrets_request(key)               grant flow trigger; no values returned
 
 Capabilities have no `secrets` subcommand; consumers such as `forward` speak
 `AUTHORIZE` and `REDEEM` directly to the broker.
+
+### Every answer names its store
+
+A machine can run more than one secrets CLI — this one, and whatever
+broker-backed CLI a deployment also installs — and both answer the same key
+names. On 2026-10-26 that cost real work: one key name held a different GitHub
+App key in a local sops file and in a cloud-backed broker, agents read this CLI
+believing they had read the other, and reported the wrong key. So no surface
+leaves its store to the reader's assumption:
+
+- **Status** (`secrets get KEY`, `secrets get KEY --no-request`) prints the
+  tier, the store and the file or socket that answers:
+  `{"key":"K","tier":"agent","store":"sops file","source":"dotfiles","path":"/home/u/.dotfiles/secrets.env"}`,
+  or
+  `{"key":"K","tier":"human","store":"secretsd daemon","source":"dotfiles","socket":"/run/user/1000/secretsd.sock","grant":true,"ttl":null}`.
+- **Values** (`secrets get KEY --value`, `secrets KEY… -- cmd`) write one line
+  to stderr before the value reaches stdout or the child's environment:
+  `secrets: K from agent tier, source dotfiles (/home/u/.dotfiles/secrets.env)`,
+  or `secrets: K from human tier, source dotfiles, granted by the secretsd
+  daemon (/run/user/1000/secretsd.sock)`. Values go to stdout and the child
+  environment only; the notice never holds one. Consumers read stdout (an
+  `apiKeyHelper`, an MCP server's stdio protocol, a credential helper), so the
+  notice costs them nothing and puts the store in their logs.
+- **Refusals** name where the client looked: a missing key lists every
+  agent-tier file and human-tier directory it searched, an ambiguous key names
+  both files, a daemon refusal names the socket it asked, and a decrypt or
+  listing failure names its file or directory.
+- `secrets list` labels each key with its source.
+
+A human-tier source is the root this client's own configuration resolves the
+key to — the same resolution that decides the key is human-tier at all, and
+the file the daemon then decrypts under the shared `config.toml`. The wire
+carries no source field, so a client upgrade needs no daemon restart and costs
+no live grant; a daemon reading a different configuration than its client is
+out of scope here, and the daemon's own `source=` audit line is the record
+that settles it.
 
 
 ## Migration status
@@ -446,6 +484,9 @@ resolved by precedence.
 - Revocation: end the session → `secrets grants` empty → next request
   requires touch again. `secrets lock` same.
 - `secrets list` produces zero YubiKey interaction (strace-verifiable).
+- Store naming: `secrets get KEY` prints the file or socket that answers,
+  `secrets KEY -- cmd` writes one stderr line naming each key's store and no
+  value, and a refused key names every place the client looked.
 - Recipient check: agent age key fails to decrypt every
   `secrets.human.d/*.env`.
 - Duplicate-key bypass: a human key planted in `secrets.env` → shim fails

@@ -66,6 +66,11 @@ impl HumanClient {
         ))
     }
 
+    /// Borrow the broker socket this client contacts, for naming the store.
+    pub fn socket_path(&self) -> &std::path::Path {
+        self.broker.socket_path()
+    }
+
     /// Ask the broker to grant this key without receiving its value.
     ///
     /// This is the same operation the `OpenCode` plugin sends: it blocks for the
@@ -146,10 +151,14 @@ impl HumanNames {
             if !directory.is_dir() {
                 continue;
             }
-            let mut entries = std::fs::read_dir(directory)
-                .map_err(CliError::HumanDirectory)?
+            let listed = |error| CliError::HumanDirectory {
+                path: directory.clone(),
+                error,
+            };
+            let mut entries = std::fs::read_dir(&directory)
+                .map_err(listed)?
                 .collect::<Result<Vec<_>, _>>()
-                .map_err(CliError::HumanDirectory)?;
+                .map_err(listed)?;
             entries.sort_by_key(std::fs::DirEntry::file_name);
             for entry in entries {
                 let path = entry.path();

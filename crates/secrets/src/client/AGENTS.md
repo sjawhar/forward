@@ -48,8 +48,12 @@ the original untouched (`SopsEditFailed`).
 | File | Owns |
 |---|---|
 | `cli.rs` | argv dispatch, the `get`/`list`/`edit`/inject surface |
+| `cli/context.rs` | per-invocation state and the subcommand bodies |
+| `cli/control.rs` | the broker control commands (`grants`, `deny`, `lock`) |
+| `cli/naming.rs` | the store behind an answer, and the stores behind a refusal |
 | `../config.rs` | source-root loading and agent-file precedence shared with the daemon |
 | `agent.rs` | local sops decryption of `secrets.env`; dotenv name/assignment parsing |
+| `agent/file.rs` | one configured agent file with the source label output names it by |
 | `human.rs` | broker transport; builds the scoped frame for `GET`/`REQUEST` |
 | `edit.rs` | write-door dispatch, the write lock, the publish-time human-tier re-check |
 | `edit/new.rs` | creates new edited agent or human files; validates human assignments; `write_piped_human` reads a one-line value from stdin with core dumps disabled and encrypts it directly to the target without a plaintext temp file |
@@ -57,7 +61,23 @@ the original untouched (`SopsEditFailed`).
 | `edit/plaintext.rs` | the editor's scratch file (`PlaintextTemp`): private, runtime-scoped, scrubbed on drop |
 | `response.rs` | parsing broker replies, including exact-length payloads |
 | `error.rs` | `CliError` and the agent-facing guidance strings |
-| `status.rs` | `get` flag parsing and the JSON status line |
+| `status.rs` | `get` flag parsing, the JSON status line, the injection notice |
+| `status/provenance.rs` | `Provenance`: the one place a store is rendered |
+
+## Naming the store
+
+Another secrets CLI on the same machine answers the same key names from
+another store, so every surface says which one answered: the status object
+carries `store`, `source` and the file or socket; `--value` and the inject form
+write one stderr line (`secrets: KEY from …`) before the value moves, never the
+value itself; and every refusal names where this client looked. `docs/design.md`,
+"Every answer names its store", is the contract.
+
+A human-tier source is the root this client's configuration resolves the key
+to — the same lookup that routes it to the daemon at all. The wire carries no
+source field, so a client upgrade needs no daemon restart and costs no live
+grant; adding one would be a `PROTOCOL_VERSION` bump and a restart that drops
+every grant on the machine.
 
 ## The `get` contract
 
@@ -66,7 +86,7 @@ Three different operations behind one subcommand — do not collapse them:
 | Form | Sends | Prints |
 |---|---|---|
 | `get KEY` | `REQUEST` | JSON status; pre-authorizes, so it may prompt for a touch |
-| `get KEY --value` | `GET` | the secret bytes plus one newline |
+| `get KEY --value` | `GET` | the secret bytes plus one newline on stdout, its store on stderr |
 | `get KEY --no-request` | `GRANTS` | JSON status only; never prompts |
 
 Bare `get` deliberately does **not** print the value: an agent that runs it and

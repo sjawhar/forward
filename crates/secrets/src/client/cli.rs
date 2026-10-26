@@ -1,6 +1,8 @@
 //! Command-line dispatch for the `secrets` executable.
 
 mod context;
+mod control;
+mod naming;
 mod parser;
 
 use std::ffi::OsString;
@@ -58,9 +60,9 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<(), CliError
                 local,
             )
         }
-        Some(CliCommand::Grants) => Context::grants(),
-        Some(CliCommand::Deny { id }) => Context::deny(&id),
-        Some(CliCommand::Lock) => Context::lock(),
+        Some(CliCommand::Grants) => control::grants(),
+        Some(CliCommand::Deny { id }) => control::deny(&id),
+        Some(CliCommand::Lock) => control::lock(),
     }
 }
 

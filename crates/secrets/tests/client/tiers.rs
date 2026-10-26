@@ -27,9 +27,25 @@ fn duplicate_agent_and_human_name_refuses_that_key_only() {
         let output = fixture.run_minimal(arguments);
 
         assert_ne!(output.status.code(), Some(0));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("exists in both the agent tier"), "{stderr}");
+        // Both files are named, so the human knows which one to remove.
         assert!(
-            String::from_utf8_lossy(&output.stderr)
-                .contains("exists in both agent and human tiers")
+            stderr.contains(&format!(
+                "source dotfiles ({})",
+                fixture.dotfiles_dir().join("secrets.env").display()
+            )),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(&format!(
+                "source dotfiles ({})",
+                fixture
+                    .dotfiles_dir()
+                    .join("secrets.human.d/DUP.env")
+                    .display()
+            )),
+            "{stderr}"
         );
     }
 
@@ -59,7 +75,7 @@ fn duplicate_agent_and_human_name_refuses_that_key_only() {
     let output = fixture.run_minimal(["list"]);
     assert_eq!(output.status.code(), Some(0));
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("AGENT_ONLY\n"));
+    assert!(stdout.contains("AGENT_ONLY  (agent tier: dotfiles)\n"));
     assert!(
         stdout.contains("DUP  (human tier: dotfiles; ALSO agent tier -- ambiguous, reads refuse)")
     );

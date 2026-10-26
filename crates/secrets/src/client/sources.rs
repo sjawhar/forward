@@ -90,10 +90,14 @@ struct HumanCounts {
 }
 
 fn human_counts(path: &Path) -> Result<HumanCounts, CliError> {
+    let listed = |error| CliError::HumanDirectory {
+        path: path.to_path_buf(),
+        error,
+    };
     let mut entries = fs::read_dir(path)
-        .map_err(CliError::HumanDirectory)?
+        .map_err(listed)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(CliError::HumanDirectory)?;
+        .map_err(listed)?;
     entries.sort_by_key(fs::DirEntry::file_name);
     let mut counts = HumanCounts {
         keys: std::collections::BTreeMap::new(),
