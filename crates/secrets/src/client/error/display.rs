@@ -6,6 +6,10 @@ use crate::proto::ErrCode;
 const AGENT_NOTICE: &str = "AGENT NOTICE: ask the human; do not retry-loop.";
 
 impl fmt::Display for CliError {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one exhaustive arm per variant keeps every message in one readable place"
+    )]
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Usage => formatter.write_str(

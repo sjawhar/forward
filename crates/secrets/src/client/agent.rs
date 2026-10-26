@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 use zeroize::Zeroize;
@@ -159,13 +159,11 @@ fn parse_assignment_line(line: &[u8]) -> Result<(SecretName, &[u8]), CliError> {
     let separator = line
         .iter()
         .position(|byte| *byte == b'=')
-        .ok_or_else(|| CliError::InvalidDotenv(None))?;
+        .ok_or(CliError::InvalidDotenv(None))?;
     let (raw_name, raw_value) = line.split_at(separator);
     let name = std::str::from_utf8(raw_name).map_err(|_| CliError::InvalidDotenv(None))?;
     let name = SecretName::parse(name).map_err(|_| CliError::InvalidSecretName)?;
-    let value = raw_value
-        .get(1..)
-        .ok_or_else(|| CliError::InvalidDotenv(None))?;
+    let value = raw_value.get(1..).ok_or(CliError::InvalidDotenv(None))?;
     Ok((name, value))
 }
 

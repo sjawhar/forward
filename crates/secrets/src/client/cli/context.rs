@@ -8,9 +8,7 @@ use std::process::Command;
 
 use super::super::error::CliError;
 use super::super::status::{GetOutput, Provenance, active_grant, announce, write_status};
-use super::super::{
-    AgentFile, AgentStore, BrokerResponse, ClientError, HumanClient, HumanNames,
-};
+use super::super::{AgentFile, AgentStore, BrokerResponse, ClientError, HumanClient, HumanNames};
 use super::{control, naming, parse_name};
 use crate::config::Sources;
 use crate::secret::{SecretBytes, SecretName};

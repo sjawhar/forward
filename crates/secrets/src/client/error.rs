@@ -166,6 +166,7 @@ impl CliError {
     /// The parsers run over bytes alone, including an editor's plaintext
     /// buffer, so they raise a fileless refusal that readers of a configured
     /// file label here.
+    #[must_use]
     pub fn in_file(self, path: &std::path::Path) -> Self {
         match self {
             Self::InvalidDotenv(None) => Self::InvalidDotenv(Some(path.to_path_buf())),
