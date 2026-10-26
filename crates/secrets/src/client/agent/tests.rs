@@ -115,10 +115,7 @@ fn a_sops_spawn_failure_names_the_file_that_was_being_read() {
     let file = directory.path().join("secrets.env");
     fs::write(&file, b"KEY=value\n").unwrap();
     let missing_sops = directory.path().join("no-sops-here");
-    let store = AgentStore::new(
-        vec![AgentFile::new("dotfiles", file.clone())],
-        missing_sops,
-    );
+    let store = AgentStore::new(vec![AgentFile::new("dotfiles", file.clone())], missing_sops);
 
     let error = store.resolve(&name("KEY")).unwrap_err();
 

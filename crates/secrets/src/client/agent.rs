@@ -35,7 +35,6 @@ pub struct ResolvedAgent<'a> {
     pub file: &'a AgentFile,
 }
 
-
 impl AgentStore {
     /// Decrypts an ordered list of sops dotenv files; earlier files win on duplicate names.
     pub fn new(files: Vec<AgentFile>, sops_bin: impl Into<OsString>) -> Self {
