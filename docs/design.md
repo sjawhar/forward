@@ -411,7 +411,7 @@ secrets get KEY --value                prints the secret; the only form that doe
 secrets get KEY --no-request           status without asking, so it never triggers a touch
 secrets KEY -- cmd                     injects into a child environment, never prints;
                                        names each key's store on stderr first
-secrets list                            names only, each with its source; never decrypts
+secrets list                            names each key and its source; decrypts agent tier locally
 secrets sources                         lists configured source roots
 secrets edit [--source NAME]            edits an agent-tier source file
 secrets edit-local [--source NAME]      edits an agent-tier local source file
