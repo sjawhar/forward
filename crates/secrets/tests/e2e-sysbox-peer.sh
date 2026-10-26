@@ -167,7 +167,7 @@ done
 value="$(<"$scratch/out/child")"
 [[ "$value" == "$human_value" ]] || fail "client inside the container got [$value], expected [$human_value]"
 notice="$(<"$scratch/out/child.stderr")"
-[[ "$notice" == "secrets: $human_key from human tier, source dotfiles, granted by the secretsd daemon ($socket)" ]] ||
+[[ "$notice" == "secrets: $human_key from human tier, source e2e, granted by the secretsd daemon ($socket)" ]] ||
   fail "client inside the container named the store incorrectly: [$notice]"
 if grep -F --quiet "$human_value" "$scratch/out/child.stderr"; then
   fail 'the child source notice contained the secret value'
