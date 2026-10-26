@@ -45,8 +45,13 @@ pub enum CliError {
     /// `sops` edited a staged copy of an agent-tier file and exited
     /// unsuccessfully; the original was not touched.
     SopsEditFailed(std::process::ExitStatus),
-    /// Starting `sops` failed.
-    SopsStart(std::io::Error),
+    /// Starting `sops` for this file failed.
+    SopsStart {
+        /// The agent-tier or edit file passed to sops.
+        path: PathBuf,
+        /// The process-spawn failure.
+        error: std::io::Error,
+    },
     /// `sops` exited unsuccessfully, for this agent-tier file when known.
     SopsFailed(Option<PathBuf>),
     /// Decrypted dotenv bytes were malformed or unsafe, in this file when known.
@@ -179,7 +184,7 @@ impl CliError {
 impl std::error::Error for CliError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::SopsStart(error)
+            Self::SopsStart { error, .. }
             | Self::Exec(error)
             | Self::Stdout(error)
             | Self::SourceNotice(error)

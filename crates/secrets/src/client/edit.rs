@@ -233,7 +233,10 @@ fn edit(path: &PathBuf) -> Result<(), CliError> {
     let status = Command::new("sops")
         .arg(path)
         .status()
-        .map_err(CliError::SopsStart)?;
+        .map_err(|error| CliError::SopsStart {
+            path: path.clone(),
+            error,
+        })?;
     if status.success() {
         Ok(())
     } else {

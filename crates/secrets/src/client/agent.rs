@@ -24,6 +24,18 @@ pub struct AgentStore {
     sops_bin: OsString,
 }
 
+/// One decrypted agent-tier value and the configured file that supplied it.
+///
+/// The borrow preserves the association without cloning a path or plaintext.
+#[derive(Debug)]
+pub struct ResolvedAgent<'a> {
+    /// Decrypted secret bytes, zeroized when dropped.
+    pub value: SecretBytes,
+    /// The winning configured file for `value`.
+    pub file: &'a AgentFile,
+}
+
+
 impl AgentStore {
     /// Decrypts an ordered list of sops dotenv files; earlier files win on duplicate names.
     pub fn new(files: Vec<AgentFile>, sops_bin: impl Into<OsString>) -> Self {
@@ -33,9 +45,12 @@ impl AgentStore {
         }
     }
 
-    /// Return a named agent-tier value, with earlier files taking precedence.
-    pub fn value(&self, name: &SecretName) -> Result<SecretBytes, CliError> {
-        self.all()?
+    /// Return a named agent-tier value and the file that supplied it.
+    ///
+    /// Value and provenance resolve in one decryption pass: a concurrent edit
+    /// cannot make output name one file while a later pass reads another.
+    pub fn resolve(&self, name: &SecretName) -> Result<ResolvedAgent<'_>, CliError> {
+        self.resolve_all()?
             .remove(name)
             .ok_or_else(|| CliError::MissingSecret {
                 name: name.clone(),
@@ -43,10 +58,15 @@ impl AgentStore {
             })
     }
 
+    /// Return a named agent-tier value, with earlier files taking precedence.
+    pub fn value(&self, name: &SecretName) -> Result<SecretBytes, CliError> {
+        self.resolve(name).map(|resolved| resolved.value)
+    }
+
     /// Return the file a key resolves to, without decrypting any value.
     ///
-    /// Precedence matches `all`: the first configured file holding the name
-    /// wins, so this is the file whose plaintext a caller receives.
+    /// This cheap filename lookup is for cross-tier ambiguity checks; callers
+    /// that hand a value over use [`AgentStore::resolve`] instead.
     pub fn locate(&self, name: &SecretName) -> Result<Option<&AgentFile>, CliError> {
         for file in &self.files {
             if file.path.is_file() && Self::names_in(&file.path)?.contains(name) {
@@ -56,18 +76,27 @@ impl AgentStore {
         Ok(None)
     }
 
-    /// Map every agent-tier key to the file that wins for it, in one pass.
-    pub fn locations(&self) -> Result<BTreeMap<SecretName, &AgentFile>, CliError> {
-        let mut located = BTreeMap::new();
+    /// Check encrypted dotenv key names without decrypting their values.
+    pub fn contains(&self, name: &SecretName) -> Result<bool, CliError> {
+        self.locate(name).map(|file| file.is_some())
+    }
+
+    /// Resolve every agent-tier value with the file that supplied it.
+    ///
+    /// Earlier configured files win. The returned references keep each value
+    /// bound to that same winning file without copying either provenance or
+    /// plaintext.
+    pub fn resolve_all(&self) -> Result<BTreeMap<SecretName, ResolvedAgent<'_>>, CliError> {
+        let mut values = BTreeMap::new();
         for file in &self.files {
             if !file.path.is_file() {
                 continue;
             }
-            for name in Self::names_in(&file.path)? {
-                located.entry(name).or_insert(file);
+            for (name, value) in self.decrypt_all(&file.path)? {
+                values.entry(name).or_insert(ResolvedAgent { value, file });
             }
         }
-        Ok(located)
+        Ok(values)
     }
 
     /// Describe every file this store reads, for a not-found message.
@@ -79,31 +108,6 @@ impl AgentStore {
         format!("agent-tier files {}", files.join(", "))
     }
 
-    /// Check encrypted dotenv key names without decrypting their values.
-    pub fn contains(&self, name: &SecretName) -> Result<bool, CliError> {
-        self.locate(name).map(|file| file.is_some())
-    }
-
-    /// Decrypt every agent-tier assignment with earlier files winning on conflicts.
-    pub fn all(&self) -> Result<BTreeMap<SecretName, SecretBytes>, CliError> {
-        let mut values = BTreeMap::new();
-        for file in &self.files {
-            if file.path.is_file() {
-                Self::merge_first_values(&mut values, self.decrypt_all(&file.path)?);
-            }
-        }
-        Ok(values)
-    }
-
-    fn merge_first_values(
-        destination: &mut BTreeMap<SecretName, SecretBytes>,
-        source: BTreeMap<SecretName, SecretBytes>,
-    ) {
-        for (name, value) in source {
-            destination.entry(name).or_insert(value);
-        }
-    }
-
     fn decrypt_all(&self, path: &Path) -> Result<BTreeMap<SecretName, SecretBytes>, CliError> {
         let mut output = Command::new(&self.sops_bin)
             .args(["-d", "--input-type", "dotenv", "--output-type", "dotenv"])
@@ -112,7 +116,10 @@ impl AgentStore {
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output()
-            .map_err(CliError::SopsStart)?;
+            .map_err(|error| CliError::SopsStart {
+                path: path.to_path_buf(),
+                error,
+            })?;
         if !output.status.success() {
             output.stdout.zeroize();
             return Err(CliError::SopsFailed(Some(path.to_path_buf())));

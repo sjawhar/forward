@@ -104,15 +104,16 @@ impl Context {
     /// refused on read; the listing itself never fails on one, because this is
     /// the command the refusal tells the human to run.
     pub(super) fn list(&self) -> Result<(), CliError> {
-        let agent = self.agent.all()?;
-        let locations = self.agent.locations()?;
+        let agent = self.agent.resolve_all()?;
         let mut stdout = std::io::stdout().lock();
-        for name in agent.keys() {
-            let source = locations
-                .get(name)
-                .map_or("unknown", |file| file.label.as_str());
-            writeln!(stdout, "{}  (agent tier: {source})", name.as_str())
-                .map_err(CliError::Stdout)?;
+        for (name, resolved) in &agent {
+            writeln!(
+                stdout,
+                "{}  (agent tier: {})",
+                name.as_str(),
+                resolved.file.label
+            )
+            .map_err(CliError::Stdout)?;
         }
         for (name, location) in self.human.iter() {
             let clash = if agent.contains_key(name) {
@@ -177,12 +178,9 @@ impl Context {
             let provenance = naming::human_provenance(&self.human, name, socket, true, None);
             return Ok((value, provenance));
         }
-        let provenance = self
-            .agent
-            .locate(name)?
-            .map(naming::agent_provenance)
-            .ok_or_else(|| self.missing(name))?;
-        Ok((self.agent.value(name)?, provenance))
+        let resolved = self.agent.resolve(name)?;
+        let provenance = naming::agent_provenance(resolved.file);
+        Ok((resolved.value, provenance))
     }
 
     fn missing(&self, name: &SecretName) -> CliError {

@@ -38,12 +38,13 @@ fn earlier_file_wins_when_a_key_reappears_in_a_later_file() {
         fake_sops(&directory),
     );
 
-    let value = store.value(&name("KEY")).unwrap();
+    let resolved = store.resolve(&name("KEY")).unwrap();
 
-    assert_eq!(value.as_slice(), b"first");
-    // The located file is the one whose plaintext the caller received, so a
-    // report of the source cannot name a later file holding the same name.
-    assert_eq!(store.locate(&name("KEY")).unwrap().unwrap().path, first);
+    // The one resolution returns the plaintext and its winning file together.
+    // A future split `locate` then `value` implementation would not establish
+    // this pairing when the file changes between its two passes.
+    assert_eq!(resolved.value.as_slice(), b"first");
+    assert_eq!(resolved.file.path, first);
 }
 
 #[test]
@@ -104,5 +105,27 @@ fn a_missing_key_names_every_file_the_store_read() {
     assert_eq!(
         searched,
         format!("agent-tier files dotfiles ({})", shared.display())
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn a_sops_spawn_failure_names_the_file_that_was_being_read() {
+    let directory = tempfile::tempdir().unwrap();
+    let file = directory.path().join("secrets.env");
+    fs::write(&file, b"KEY=value\n").unwrap();
+    let missing_sops = directory.path().join("no-sops-here");
+    let store = AgentStore::new(
+        vec![AgentFile::new("dotfiles", file.clone())],
+        missing_sops,
+    );
+
+    let error = store.resolve(&name("KEY")).unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains(&format!("could not start sops for {}", file.display())),
+        "{error}"
     );
 }

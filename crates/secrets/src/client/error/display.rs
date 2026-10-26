@@ -47,7 +47,9 @@ impl fmt::Display for CliError {
                 formatter,
                 "sops edit exited unsuccessfully ({status}); the agent-tier file is unchanged"
             ),
-            Self::SopsStart(error) => write!(formatter, "could not start sops: {error}"),
+            Self::SopsStart { path, error } => {
+                write!(formatter, "could not start sops for {}: {error}", path.display())
+            }
             Self::SopsFailed(Some(path)) => write!(
                 formatter,
                 "sops could not decrypt the agent-tier file {}",
