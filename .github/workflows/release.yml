@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Release this bump from the current main, when the commit rule missed one.
+        type: choice
+        default: patch
+        options: [patch, minor, major]
 
 permissions:
   contents: read
@@ -26,6 +33,8 @@ jobs:
       - name: Compute version
         id: version
         shell: bash
+        env:
+          FORCE_BUMP: ${{ github.event_name == 'workflow_dispatch' && inputs.bump || '' }}
         run: |
           set -euo pipefail
 
@@ -34,30 +43,60 @@ jobs:
           if [[ -n "$latest_tag" ]]; then
             current="${latest_tag#v}"
             commit_range="${latest_tag}..HEAD"
+            diff_base="$latest_tag"
           else
             current="$(grep -m 1 '^version = "' Cargo.toml | cut -d '"' -f 2)"
             commit_range="HEAD"
+            diff_base="$(git hash-object -t tree /dev/null)"
           fi
 
-          commits="$(git log "$commit_range" --format='%B')"
-          if [[ -z "$commits" ]]; then
-            echo "No commits to release"
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          subjects="$(git log "$commit_range" --format='%s')"
-          bump=""
-          if grep -Eq '^[a-z]+(\(.+\))?!:' <<< "$subjects" || grep -Fq 'BREAKING CHANGE' <<< "$commits"; then
-            bump="major"
-          elif grep -Eq '^feat(\(.+\))?:' <<< "$subjects"; then
-            bump="minor"
-          elif grep -Eq '^(fix|refactor|perf)(\(.+\))?:' <<< "$subjects"; then
-            bump="patch"
+          if [[ -n "$FORCE_BUMP" ]]; then
+            # The escape hatch for whatever the rule below still misses: a
+            # human ran this workflow by hand and named the bump.
+            bump="$FORCE_BUMP"
+            printf 'Forced %s release requested by hand\n' "$bump"
           else
-            echo "No conventional commits require a release"
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            commits="$(git log "$commit_range" --format='%B')"
+            if [[ -z "$commits" ]]; then
+              echo "No commits to release"
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            subjects="$(git log "$commit_range" --format='%s')"
+            # The same subjects without the merge commits, which describe an
+            # integration rather than work of their own.
+            authored="$(git log "$commit_range" --no-merges --format='%s')"
+            # Subjects that declare work which does not ship on its own. The
+            # "chore: release vX" commit this workflow pushes is one of them.
+            no_release='^(build|chore|ci|style|test)(\(.+\))?:'
+            # Prose this repository ships or documents itself by. A consumer
+            # pins a tag, so an edit here reaches no one until a tag carries it.
+            shipped_prose=(skills docs ':(glob)**/*.md')
+
+            if grep -Eq '^[a-z]+(\(.+\))?!:' <<< "$subjects" || grep -Fq 'BREAKING CHANGE' <<< "$commits"; then
+              bump="major"
+            elif grep -Eq '^feat(\(.+\))?:' <<< "$subjects"; then
+              bump="minor"
+            elif grep -Eq '^(fix|refactor|perf)(\(.+\))?:' <<< "$subjects"; then
+              bump="patch"
+            elif grep -Evq "$no_release" <<< "$authored" \
+              && [[ -n "$(git diff --name-only "$diff_base" HEAD -- "${shipped_prose[@]}")" ]]; then
+              # A skill or documentation change earns a patch even when no
+              # subject claimed one: #68 merged as "using-secrets: a diagnostic
+              # that crashes is the leak", this workflow went green, released
+              # nothing, and every session kept reading the superseded skill.
+              # Both halves keep that narrow. The range must touch shipped
+              # prose, so a chore over Cargo.lock still releases nothing; and
+              # some commit in it must not be declared no-release work, so a
+              # range of only chores, only release commits, or only merges of
+              # them releases nothing either.
+              bump="patch"
+            else
+              echo "No commits require a release"
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
 
           IFS='.' read -r major minor patch <<< "$current"
