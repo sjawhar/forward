@@ -154,10 +154,18 @@ requires a real socket. Guard it through review, the `LISTEN_PID`/`LISTEN_FDS`
 validation, and the integration tests in `tests/broker.rs`.
 
 Releases are automatic: every push to `main` derives the next semver from the
-conventional-commit subjects since the last tag, then tags, builds, attests, and
-publishes. `feat:` bumps the minor, `fix:` the patch, `feat!:`/`BREAKING CHANGE`
-the major, anything else does not release. Never tag by hand. The version lands
-in `Cargo.toml` and `package.json` in the same commit so plugin and daemon match.
+commits since the last tag, then tags, builds, attests, and publishes. Any
+`type!:` subject, or `BREAKING CHANGE` anywhere in a body, gives the major and
+overrides everything else; `feat:` the minor; `fix:`/`refactor:`/`perf:` the
+patch. Anything else takes a patch too, because a consumer reaches this
+repository only through a tag, so work no subject claimed still has to ship.
+A range releases nothing only when it is empty, when it holds no commit that
+is not a merge, when its net diff is empty, or when every one of its non-merge
+subjects is `build`, `chore`, `ci`, `style` or `test` and none is marked
+breaking. For whatever the rule still gets wrong,
+run the Release workflow by hand from `main` and name the bump. Never tag by
+hand. The version lands in `Cargo.toml` and `package.json` in the same commit
+so plugin and daemon match.
 
 Tests must not require a real YubiKey. Inject a fake decryptor with
 `SECRETSD_SOPS_BIN`, set `SECRETSD_CONFIG` to a scratch source-root

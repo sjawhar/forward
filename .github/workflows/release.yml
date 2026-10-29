@@ -3,6 +3,13 @@ name: Release
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Release this bump from the current main, when the commit rule missed one.
+        type: choice
+        default: patch
+        options: [patch, minor, major]
 
 permissions:
   contents: read
@@ -26,6 +33,8 @@ jobs:
       - name: Compute version
         id: version
         shell: bash
+        env:
+          FORCE_BUMP: ${{ github.event_name == 'workflow_dispatch' && inputs.bump || '' }}
         run: |
           set -euo pipefail
 
@@ -34,30 +43,67 @@ jobs:
           if [[ -n "$latest_tag" ]]; then
             current="${latest_tag#v}"
             commit_range="${latest_tag}..HEAD"
+            diff_base="$latest_tag"
           else
             current="$(grep -m 1 '^version = "' Cargo.toml | cut -d '"' -f 2)"
             commit_range="HEAD"
+            diff_base="$(git hash-object -t tree /dev/null)"
           fi
 
-          commits="$(git log "$commit_range" --format='%B')"
-          if [[ -z "$commits" ]]; then
-            echo "No commits to release"
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          subjects="$(git log "$commit_range" --format='%s')"
-          bump=""
-          if grep -Eq '^[a-z]+(\(.+\))?!:' <<< "$subjects" || grep -Fq 'BREAKING CHANGE' <<< "$commits"; then
-            bump="major"
-          elif grep -Eq '^feat(\(.+\))?:' <<< "$subjects"; then
-            bump="minor"
-          elif grep -Eq '^(fix|refactor|perf)(\(.+\))?:' <<< "$subjects"; then
-            bump="patch"
+          if [[ -n "$FORCE_BUMP" ]]; then
+            # The escape hatch for whatever the rule below still gets wrong: a
+            # human ran this workflow by hand and named the bump. It must come
+            # from main, because the release job tags main while the build job
+            # archives and attests the dispatched ref -- from any other branch
+            # the published tag and the attested binaries disagree.
+            if [[ "${GITHUB_REF:-}" != "refs/heads/main" ]]; then
+              printf 'A forced release must be dispatched from main, not %s\n' "${GITHUB_REF:-an unknown ref}" >&2
+              exit 1
+            fi
+            bump="$FORCE_BUMP"
+            printf 'Forced %s release requested by hand\n' "$bump"
           else
-            echo "No conventional commits require a release"
-            echo "should_release=false" >> "$GITHUB_OUTPUT"
-            exit 0
+            commits="$(git log "$commit_range" --format='%B')"
+            if [[ -z "$commits" ]]; then
+              echo "No commits to release"
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            subjects="$(git log "$commit_range" --format='%s')"
+            # The same subjects without the merge commits, which describe an
+            # integration rather than work of their own.
+            authored="$(git log "$commit_range" --no-merges --format='%s')"
+            # Subjects that declare work which does not ship on its own. The
+            # "chore: release vX" commit this workflow pushes is one of them.
+            no_release='^(build|chore|ci|style|test)(\(.+\))?:'
+            # An unreadable base aborts the step here rather than reading as
+            # "nothing changed": releasing nothing is never the quiet answer.
+            changed="$(git diff --name-only "$diff_base" HEAD)"
+
+            if grep -Eq '^[a-z]+(\(.+\))?!:' <<< "$subjects" || grep -Fq 'BREAKING CHANGE' <<< "$commits"; then
+              bump="major"
+            elif grep -Eq '^feat(\(.+\))?:' <<< "$subjects"; then
+              bump="minor"
+            elif grep -Eq '^(fix|refactor|perf)(\(.+\))?:' <<< "$subjects"; then
+              bump="patch"
+            elif [[ -n "$authored" && -n "$changed" ]] && grep -Evq "$no_release" <<< "$authored"; then
+              # Work whose subject claimed no bump still ships. #68 merged as
+              # "using-secrets: a diagnostic that crashes is the leak", this
+              # workflow went green, released nothing, and every session kept
+              # reading the superseded skill: a consumer reaches the binaries,
+              # the plugin, the units and the skills only through a tag, so a
+              # subject deciding on its own is what failed. Opting out stays
+              # explicit, and these three ranges still release nothing: every
+              # non-merge subject declared no-release work, no non-merge
+              # commit at all, or a net diff of nothing (an edit and its
+              # revert).
+              bump="patch"
+            else
+              echo "No commits require a release"
+              echo "should_release=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
           fi
 
           IFS='.' read -r major minor patch <<< "$current"
