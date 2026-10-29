@@ -5,6 +5,8 @@ description: "Use BEFORE running any command that needs an API key, token, passw
 
 # Using `secrets` and the `secrets_request` tool
 
+If this skill disagrees with the code, a command's output or its `--help`, follow those and say which line of this skill is wrong.
+
 A credential a service or app uses is a resource declared in infrastructure code, minted from a seed credential a person created. Never mint a downstream credential by hand — not by curling a provider API with an admin token, and not by requesting a one-off broker secret to do it. Revert any credential minted out of band.
 
 ## In an agent session the Legion credential broker serves
@@ -129,14 +131,11 @@ registration) is the same form with a command that reveals only the length:
 secrets GH_PUBLIC_REPO_PAT -- sh -c 'echo len=${#GH_PUBLIC_REPO_PAT}'
 ```
 
-A read that works prints `len=N`. A failure that involved the broker at all carries
-`AGENT NOTICE: ask the human; do not retry-loop.` and the table below names the causes;
-any other error is the client's own and prints plainly — the key is in no source root,
-sops cannot decrypt a source, a dotenv file is malformed, the command would not run. The
-notice is the signal to act on, not the tier: an agent-tier key never reaches the broker,
-and a human-tier read can still fail plainly, because the client decrypts every agent-tier
-source before it looks the key up and the value can arrive but the command still fail to
-exec. This is the only acceptable probe.
+A read that works prints `len=N`; read any other output as "When it refuses" below says.
+The `AGENT NOTICE` is the signal to act on, not the tier: an agent-tier key never reaches the
+broker, and a human-tier read can still fail without it, because the client decrypts every
+agent-tier source before it looks the key up and the value can arrive but the command still
+fail to exec. This is the only acceptable probe.
 
 **A diagnostic that crashes is the leak.** An HTTP library can quote a rejected header value in
 the error it raises. In a script that uses a key: strip the value at read, catch around the call,
@@ -270,6 +269,5 @@ codes cover more than one fault.
 - Never let a diagnostic print a key — see "A diagnostic that crashes is the leak" above.
 - Never conclude a key is wrong from `secrets get` output — that output is status, not the key.
 - Never retry after an `AGENT NOTICE`, with two exceptions: `the broker restarted` clears itself once the plugin re-registers, so run that command **once** more; and the daemon's `TIMEOUT` — not the client's `timed out waiting for approval` — may be requested once more *after* telling the human. Never loop.
-- Never conclude "grants expire quickly" from a failure — it is one of the causes in Grant lifetime above, or an unrelated bug, never the grant itself.
 - Never request keys mid-flight into unattended work, and never fire `secrets_request` calls in parallel — see the two sections above.
 - Never have a subagent request a human-tier key; request it in the parent before dispatching.
