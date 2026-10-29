@@ -51,8 +51,15 @@ jobs:
           fi
 
           if [[ -n "$FORCE_BUMP" ]]; then
-            # The escape hatch for whatever the rule below still misses: a
-            # human ran this workflow by hand and named the bump.
+            # The escape hatch for whatever the rule below still gets wrong: a
+            # human ran this workflow by hand and named the bump. It must come
+            # from main, because the release job tags main while the build job
+            # archives and attests the dispatched ref -- from any other branch
+            # the published tag and the attested binaries disagree.
+            if [[ "${GITHUB_REF:-}" != "refs/heads/main" ]]; then
+              printf 'A forced release must be dispatched from main, not %s\n' "${GITHUB_REF:-an unknown ref}" >&2
+              exit 1
+            fi
             bump="$FORCE_BUMP"
             printf 'Forced %s release requested by hand\n' "$bump"
           else
@@ -70,9 +77,9 @@ jobs:
             # Subjects that declare work which does not ship on its own. The
             # "chore: release vX" commit this workflow pushes is one of them.
             no_release='^(build|chore|ci|style|test)(\(.+\))?:'
-            # Prose this repository ships or documents itself by. A consumer
-            # pins a tag, so an edit here reaches no one until a tag carries it.
-            shipped_prose=(skills docs ':(glob)**/*.md')
+            # An unreadable base aborts the step here rather than reading as
+            # "nothing changed": releasing nothing is never the quiet answer.
+            changed="$(git diff --name-only "$diff_base" HEAD)"
 
             if grep -Eq '^[a-z]+(\(.+\))?!:' <<< "$subjects" || grep -Fq 'BREAKING CHANGE' <<< "$commits"; then
               bump="major"
@@ -80,17 +87,17 @@ jobs:
               bump="minor"
             elif grep -Eq '^(fix|refactor|perf)(\(.+\))?:' <<< "$subjects"; then
               bump="patch"
-            elif grep -Evq "$no_release" <<< "$authored" \
-              && [[ -n "$(git diff --name-only "$diff_base" HEAD -- "${shipped_prose[@]}")" ]]; then
-              # A skill or documentation change earns a patch even when no
-              # subject claimed one: #68 merged as "using-secrets: a diagnostic
-              # that crashes is the leak", this workflow went green, released
-              # nothing, and every session kept reading the superseded skill.
-              # Both halves keep that narrow. The range must touch shipped
-              # prose, so a chore over Cargo.lock still releases nothing; and
-              # some commit in it must not be declared no-release work, so a
-              # range of only chores, only release commits, or only merges of
-              # them releases nothing either.
+            elif [[ -n "$authored" && -n "$changed" ]] && grep -Evq "$no_release" <<< "$authored"; then
+              # Work whose subject claimed no bump still ships. #68 merged as
+              # "using-secrets: a diagnostic that crashes is the leak", this
+              # workflow went green, released nothing, and every session kept
+              # reading the superseded skill: a consumer reaches the binaries,
+              # the plugin, the units and the skills only through a tag, so a
+              # subject deciding on its own is what failed. Opting out stays
+              # explicit, and these three ranges still release nothing: every
+              # non-merge subject declared no-release work, no non-merge
+              # commit at all, or a net diff of nothing (an edit and its
+              # revert).
               bump="patch"
             else
               echo "No commits require a release"

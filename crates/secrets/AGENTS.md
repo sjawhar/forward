@@ -154,13 +154,15 @@ requires a real socket. Guard it through review, the `LISTEN_PID`/`LISTEN_FDS`
 validation, and the integration tests in `tests/broker.rs`.
 
 Releases are automatic: every push to `main` derives the next semver from the
-commits since the last tag, then tags, builds, attests, and publishes. `feat:`
-bumps the minor, `fix:`/`refactor:`/`perf:` the patch, `feat!:`/`BREAKING
-CHANGE` the major. A range that touches `skills/`, `docs/` or any markdown
-takes a patch even when no subject asks for one, because a consumer reaches
-that prose only through a tag; a range whose subjects are all
-`build`/`chore`/`ci`/`style`/`test` releases nothing. For whatever the rule
-still misses, run the Release workflow by hand and name the bump. Never tag by
+commits since the last tag, then tags, builds, attests, and publishes. Any
+`type!:` subject, or `BREAKING CHANGE` anywhere in a body, gives the major and
+overrides everything else; `feat:` the minor; `fix:`/`refactor:`/`perf:` the
+patch. Anything else takes a patch too, because a consumer reaches this
+repository only through a tag, so work no subject claimed still has to ship.
+A range releases nothing only when it is empty, when its net diff is empty, or
+when every one of its non-merge subjects is `build`, `chore`, `ci`, `style` or
+`test` and none is marked breaking. For whatever the rule still gets wrong,
+run the Release workflow by hand from `main` and name the bump. Never tag by
 hand. The version lands in `Cargo.toml` and `package.json` in the same commit
 so plugin and daemon match.
 
