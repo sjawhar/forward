@@ -119,8 +119,8 @@ secrets SLACK_MCP_XOXP_TOKEN -- slack-mcp-server
 secrets AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY -- terraform apply
 ```
 
-The value is placed in the child process's environment and never printed, so it cannot
-land in the transcript. Prefer this over every other form.
+The value is placed in the child process's environment, so it stays out of the transcript as
+long as the command itself does not print it. Prefer this over every other form.
 
 **Checking that a read works** (diagnosing a broken shim, a fallback path, a
 registration) is the same form with a command that reveals only the length:
@@ -136,26 +136,12 @@ sops cannot decrypt a source, a dotenv file is malformed, the command would not 
 notice is the signal to act on, not the tier: an agent-tier key never reaches the broker,
 and a human-tier read can still fail plainly, because the client decrypts every agent-tier
 source before it looks the key up and the value can arrive but the command still fail to
-exec. This is the only acceptable probe — `--value` as a "does it work" check put a live
-token in a transcript on 2026-09-17.
+exec. This is the only acceptable probe.
 
-**A diagnostic that crashes is the leak.** Injecting the key keeps it out of the transcript only
-while nothing prints it, and an exception prints whatever it was carrying. On 2026-10-27 a probe
-of an HTTP API crashed on the broker value's trailing newline, and the library's own `ValueError`
-put the whole key in the transcript, which `tq` then indexed. So, in any script or probe that
-touches a key:
-
-- **Strip it at read** (`.strip()`): a broker value carries a trailing newline, and that newline
-  is what raised the exception above.
-- **Catch around the call that uses it**, and report only the status code and the response body.
-  Never let request headers, a stack frame holding them, or the exception's own text reach
-  stdout.
-- **Probe presence by length**, with the `len=N` form above. Never `--value`, and never print the
-  value to see whether it arrived.
-
-A key that reaches a file or a transcript this way is burned whatever you do next: a scrub
-rewrites the bytes, but the exposure already happened, so tell the key's owner rather than
-deciding for yourself that nobody read it.
+**A diagnostic that crashes is the leak.** An HTTP library can quote a rejected header value in
+the error it raises. In a script that uses a key: strip the value at read, catch around the call,
+and print only the status code, an error response's body, or the exception's class — never a
+request header, a traceback or the exception's text, on stdout or stderr.
 
 **Only when you genuinely need the bytes** (piping into a file, building a header):
 
@@ -163,9 +149,9 @@ deciding for yourself that nobody read it.
 secrets get OPENAI_API_KEY --value
 ```
 
-This prints the secret, so it will appear in the transcript. Never run it to look at a
-key, never run it to test whether the read works (use the length form above), and never
-paste its output into a message. A value in a transcript means a rotation.
+This prints the secret, so it will appear in the transcript. Never run it to look at a key,
+and never paste its output into a message. A value in a transcript means a rotation, even
+after a scrub: tell the key's owner.
 
 **Other forms:**
 
@@ -281,7 +267,7 @@ codes cover more than one fault.
 
 - Never paste a secret's value into a message, a commit, a log, or a file.
 - Never write a secret into a script, a `.env`, or a shell history line.
-- Never let a diagnostic print a key by accident: strip the value at read, catch around the call that uses it, and report only status codes and bodies, never request headers or an exception's own text — see "A diagnostic that crashes is the leak" above.
+- Never let a diagnostic print a key — see "A diagnostic that crashes is the leak" above.
 - Never conclude a key is wrong from `secrets get` output — that output is status, not the key.
 - Never retry after an `AGENT NOTICE`, with two exceptions: `the broker restarted` clears itself once the plugin re-registers, so run that command **once** more; and the daemon's `TIMEOUT` — not the client's `timed out waiting for approval` — may be requested once more *after* telling the human. Never loop.
 - Never conclude "grants expire quickly" from a failure — it is one of the causes in Grant lifetime above, or an unrelated bug, never the grant itself.
