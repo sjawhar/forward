@@ -159,9 +159,10 @@ commits since the last tag, then tags, builds, attests, and publishes. Any
 overrides everything else; `feat:` the minor; `fix:`/`refactor:`/`perf:` the
 patch. Anything else takes a patch too, because a consumer reaches this
 repository only through a tag, so work no subject claimed still has to ship.
-A range releases nothing only when it is empty, when its net diff is empty, or
-when every one of its non-merge subjects is `build`, `chore`, `ci`, `style` or
-`test` and none is marked breaking. For whatever the rule still gets wrong,
+A range releases nothing only when it is empty, when it holds no commit that
+is not a merge, when its net diff is empty, or when every one of its non-merge
+subjects is `build`, `chore`, `ci`, `style` or `test` and none is marked
+breaking. For whatever the rule still gets wrong,
 run the Release workflow by hand from `main` and name the bump. Never tag by
 hand. The version lands in `Cargo.toml` and `package.json` in the same commit
 so plugin and daemon match.
