@@ -14,7 +14,9 @@
  * - keeps that identity usable through a side-effect-only `tool_call` /
  *   `user_bash` hook, which re-materializes a deleted token file and recovers
  *   from a daemon restart without replacing the bash tool or touching commands
- * - registers the secrets_request tool for YubiKey-gated approval requests
+ * - registers the secrets_request tool, which never sends a human-tier key to
+ *   secretsd: it refuses with the Legion credential broker command instead
+ *   (see `HumanTierGate`)
  * - exposes the bundled using-secrets skill
  * - unregisters and removes the token file on shutdown
  *
@@ -240,6 +242,105 @@ export function refreshBrokerIdentity(): void {
 	}
 }
 
+/// What `secrets get --no-request KEY` says about a key's tier. It never asks
+/// for a grant, so it never costs a touch. Its `grant` field is not read: the
+/// CLI fills it from the daemon's whole grant table (GRANTS carries no token),
+/// so it is true when ANY session holds the key.
+export type KeyStatus = { tier: string } | { error: string };
+
+/// The two facts `secrets_request` needs before it may ask secretsd for a key.
+///
+/// An agent's request for a human-tier key is refused here and never reaches
+/// the daemon. The daemon's only prompt for such a key is a YubiKey blink, and
+/// the key's firmware gives a touch about 15 seconds, so the request times out
+/// unless the human is at the key. On 2026-10-25 Sami told agents to stop using
+/// the YubiKey instead of the credential broker
+/// (dispatch://INFRA-223/ask/d2bfc2df-9399-42a9-90b8-35b9f5a46d66), and on
+/// 2026-11-01 he said again to get the admin token from the broker
+/// (dispatch://INFRA-26/ask/1dc621e8-1e52-4b4c-ae1a-ac296d7f81f7); that day 13
+/// human-tier requests still went to secretsd, and each one timed out
+/// (`sops_failure="yubikey-stanza-undecryptable"`, then `decision="TIMEOUT"`).
+/// The Legion credential broker sends an approval card to the human's Dispatch
+/// inbox and grants for the session, so the refusal names its `secret-run`
+/// command, or, for a session the broker does not serve, how to relaunch it.
+/// Tests replace both members.
+export type HumanTierGate = {
+	status(key: string): Promise<KeyStatus>;
+	brokerIdentity(): Promise<boolean>;
+};
+
+async function run(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+	const child = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", env: process.env });
+	const [stdout, stderr, code] = await Promise.all([
+		new Response(child.stdout).text(),
+		new Response(child.stderr).text(),
+		child.exited,
+	]);
+	return { code, stdout, stderr };
+}
+
+export const defaultHumanTierGate: HumanTierGate = {
+	async status(key) {
+		try {
+			const { code, stdout, stderr } = await run(["secrets", "get", "--no-request", key]);
+			const reason = stderr.trim().split("\n")[0];
+			if (code !== 0) return { error: reason || `secrets get --no-request exited ${code}` };
+			const parsed: unknown = JSON.parse(stdout);
+			if (typeof parsed !== "object" || parsed === null || !("tier" in parsed) || typeof parsed.tier !== "string") {
+				return { error: "secrets get --no-request printed no tier" };
+			}
+			return { tier: parsed.tier };
+		} catch (error) {
+			return { error: String(error) };
+		}
+	},
+	async brokerIdentity() {
+		try {
+			return (await run(["agent-secrets", "identity"])).code === 0;
+		} catch {
+			return false;
+		}
+	},
+};
+
+export const humanTierGate: HumanTierGate = { ...defaultHumanTierGate };
+
+/// secretsd names the credential broker holds under another name: the same
+/// token (Sami, in chat to the chief of staff, 2026-11-02).
+const BROKER_NAMES: Readonly<Record<string, string>> = {
+	GITHUB_ADMIN_PAT_THEOREM: "GITHUB_ADMIN_PAT",
+};
+
+/// Where an agent gets a human-tier key instead: the broker command, or, for a
+/// session the broker does not serve, the relaunch line that makes it one.
+export function brokerRoute(key: string, sessionID: string, registered: boolean): string {
+	const brokerName = BROKER_NAMES[key];
+	const name = brokerName ?? key;
+	const lines: string[] = [];
+	if (brokerName) {
+		lines.push(
+			`The broker holds this same token under the name ${brokerName}; ${key} is secretsd's name for it (Sami, in chat to the chief of staff, 2026-11-02).`,
+		);
+	}
+	if (registered) {
+		lines.push(
+			`Ask the broker; an approval card reaches Sami in Dispatch and the grant lasts the session:\n    secret-run --reason "<what for>" ${name} -- <command>`,
+		);
+	} else {
+		lines.push(
+			`This session has no broker identity: it was not launched through ~/.dotfiles/shims/omp. Relaunch it from a shell whose PATH starts with ~/.dotfiles/shims:\n    omp --resume ${sessionID}\nthen ask the broker:\n    secret-run --reason "<what for>" ${name} -- <command>`,
+		);
+	}
+	return lines.join("\n");
+}
+
+export function brokerOnlyGuidance(key: string, sessionID: string, registered: boolean): string {
+	return [
+		`refused: ${key} is human tier. secretsd's only prompt for it is a YubiKey blink that times out in about 15 seconds unless Sami is at the key, so nothing was requested. Agents get human-tier credentials from the Legion credential broker: Sami said so on 2026-10-25 (dispatch://INFRA-223/ask/d2bfc2df-9399-42a9-90b8-35b9f5a46d66) and again on 2026-11-01 (dispatch://INFRA-26/ask/1dc621e8-1e52-4b4c-ae1a-ac296d7f81f7), and 13 secretsd requests timed out on 2026-11-01.`,
+		brokerRoute(key, sessionID, registered),
+	].join("\n");
+}
+
 export default function secretsdOmpExtension(pi: ExtensionAPI) {
 	const z = pi.zod;
 	let isOwner = false;
@@ -402,7 +503,7 @@ export default function secretsdOmpExtension(pi: ExtensionAPI) {
 		name: "secrets_request",
 		label: "Secrets Request",
 		description:
-			"Request human approval for a secretsd human-tier key; never returns secret values. After a grant, run commands with `secrets <KEY> -- <command>`.",
+			"Ask secretsd about a key; never returns secret values. A human-tier key is refused without blinking the YubiKey, and the answer names the Legion credential broker command (`secret-run`) to use instead. An agent-tier key needs no approval: run commands with `secrets <KEY> -- <command>`.",
 		parameters: z.object({
 			key: z
 				.string()
@@ -429,6 +530,33 @@ export default function secretsdOmpExtension(pi: ExtensionAPI) {
 					isOwner = claim.owner;
 				}
 				await ensureRegistered(anchor);
+				const status = await humanTierGate.status(params.key);
+				if ("error" in status) {
+					const registered = await humanTierGate.brokerIdentity();
+					return {
+						content: [
+							{
+								type: "text",
+								text: `${params.key}: error: could not read this key's tier without asking for a touch (secrets get --no-request: ${status.error}), so nothing was requested. If it is human tier, an agent gets it from the Legion credential broker, not secretsd.\n${brokerRoute(params.key, anchor.ownerSessionId, registered)}`,
+							},
+						],
+						isError: true,
+						details: { key: params.key, outcome: "status-unavailable" },
+					};
+				}
+				if (status.tier === "human") {
+					const registered = await humanTierGate.brokerIdentity();
+					return {
+						content: [
+							{
+								type: "text",
+								text: `${params.key}: ${brokerOnlyGuidance(params.key, anchor.ownerSessionId, registered)}`,
+							},
+						],
+						isError: true,
+						details: { key: params.key, outcome: "broker-only" },
+					};
+				}
 				const outcome = await requestSecret(anchor.broker, {
 					state: anchor.state,
 					sessionID: anchor.ownerSessionId,

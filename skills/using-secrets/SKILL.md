@@ -26,9 +26,14 @@ duration, such as `30s` or `5m`. In such a session `secret-run` never falls back
 In any other session or shell, it runs `secrets KEY... -- cmd` and drops `--reason`, `--wait`
 and `--ttl`.
 
-The credential broker's key names can differ from secretsd's: its `GITHUB_ADMIN_PAT` is
-secretsd's `GITHUB_ADMIN_PAT_THEOREM`. `agent-secrets secret list` shows the keys the
-credential broker holds.
+The credential broker's key names can differ from secretsd's: its `GITHUB_ADMIN_PAT` is the same
+token as secretsd's `GITHUB_ADMIN_PAT_THEOREM` (Sami, in chat to the chief of staff, 2026-11-02:
+"Yes, they're the same. Stop using the yubikey."), so an agent asks the broker for
+`GITHUB_ADMIN_PAT`. `agent-secrets secret list` shows the keys the credential broker holds.
+
+In an omp agent session, `secrets_request` refuses every human-tier key without blinking the
+YubiKey, and its answer names the `secret-run` command to use instead, or, in a session the
+broker does not serve, the `omp --resume` line that relaunches it as one.
 
 The rest of this skill describes secretsd, and there "the broker" and "the daemon" mean
 secretsd. secretsd is for the human's own shells and for sessions the Legion credential broker
@@ -76,8 +81,10 @@ the problem — read the error table below.
 
 ## Request before unattended work
 
-Do this **at the start of a task**, while the human is at the keyboard — never mid-flight
-into long unattended work:
+An omp agent session never takes this path: its `secrets_request` refuses a human-tier key and
+names the broker command (above). This section is for the human's own
+shell, and for a harness whose tool still reaches secretsd. Do this **at the start of a task**,
+while the human is at the keyboard — never mid-flight into long unattended work:
 
 1. Run `secrets list` and work out every human-tier key the task will need.
 2. For each one, **announce it in chat before requesting it**: "Requesting `DEEL_API_KEY` —
@@ -85,18 +92,19 @@ into long unattended work:
 3. Call `secrets_request(KEY)` (or run `secrets get KEY`, which triggers the same approval
    flow) and wait for the grant before moving to the next key.
 
-A request that nobody is watching **times out after 90 seconds** and the daemon reports
-`TIMEOUT` — that is not a broker error, it is an unwatched request expiring. Starting a long
-unattended run and only then discovering a key needs a touch means the run dies waiting on a
-human who was never told to look. Front-load every request while attention is on you.
+The YubiKey gives a touch about 15 seconds once it starts blinking; a request nobody touches in
+that window ends as `TIMEOUT` (the daemon logs `yubikey-stanza-undecryptable` just before) — that
+is not a broker error, it is an unwatched request expiring. Starting a long unattended run and
+only then discovering a key needs a touch means the run dies waiting on a human who was never
+told to look. Front-load every request while attention is on you.
 
 ## One at a time
 
 Never fire multiple `secrets_request` (or `secrets get KEY`) calls in parallel. The daemon
 services one YubiKey decrypt at a time, and each key needs its own physical touch a human
 can attribute to a specific request. Parallel requests just stack blinks nobody can tell
-apart: they queue one at a time, any the human does not touch dies as `TIMEOUT` after 90
-seconds, and stacking more than three pending requests fails immediately with
+apart: they queue one at a time, any the human does not touch dies as `TIMEOUT` about 15
+seconds after its blink starts, and stacking more than three pending requests fails immediately with
 `TOO_MANY_PENDING`. Request, wait for the grant (or denial), then request the next.
 
 ## Subagents inherit the parent's grants — don't re-request

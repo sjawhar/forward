@@ -1,10 +1,16 @@
-import { afterEach, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { afterEach, beforeEach, expect, test } from "bun:test";
+import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { z } from "zod";
 import { PROTOCOL_VERSION } from "../../opencode/plugins/secretsd.ts";
-import secretsdOmpExtension, { getAnchor, setAnchor } from "./secretsd.ts";
+import secretsdOmpExtension, {
+	brokerOnlyGuidance,
+	defaultHumanTierGate,
+	getAnchor,
+	humanTierGate,
+	setAnchor,
+} from "./secretsd.ts";
 
 // allow: SIZE_OK -- every process-shared-anchor scenario belongs in one file,
 // mirroring opencode/plugins/secretsd.test.ts.
@@ -40,6 +46,14 @@ function setup(): { runtimeDir: string; socketPath: string } {
 	process.env.SECRETSD_SOCK = socketPath;
 	return { runtimeDir, socketPath };
 }
+
+/// Every test starts with the gate answering "agent tier": the tool then sends
+/// REQUEST exactly as before the gate existed, which is what the tests below
+/// that predate it assert. Tests of the gate itself replace it.
+beforeEach(() => {
+	humanTierGate.status = async () => ({ tier: "agent" });
+	humanTierGate.brokerIdentity = async () => true;
+});
 
 afterEach(() => {
 	for (const broker of brokers.splice(0)) {
@@ -570,4 +584,149 @@ test("the process environment mirrors the anchor's token file across claim, re-k
 	// in the environment would leak into children spawned after shutdown.
 	await owner.handlers.session_shutdown(undefined, {});
 	expect(process.env.SECRETSD_SESSION_TOKEN_FILE).toBeUndefined();
+});
+
+async function requestThroughGate(key: string): Promise<{ result: FakeToolResult; requests: string[] }> {
+	setup();
+	const broker = fakeBroker(process.env.SECRETSD_SOCK as string);
+	const session = await mountSession("root-session");
+	const result = await session.tools.secrets_request.execute("tool-call-1", { key }, new AbortController().signal);
+	return { result, requests: broker.received.filter((line) => line.startsWith("REQUEST\t")) };
+}
+
+function text(result: FakeToolResult): string {
+	const content = result.content;
+	if (!Array.isArray(content) || content.length !== 1) throw new Error("expected one content block");
+	const block: unknown = content[0];
+	if (typeof block !== "object" || block === null || !("text" in block) || typeof block.text !== "string") {
+		throw new Error("expected a text block");
+	}
+	return block.text;
+}
+
+test("a human-tier key is refused with the broker command and never reaches the daemon", async () => {
+	humanTierGate.status = async () => ({ tier: "human" });
+	const { result, requests } = await requestThroughGate("DEEL_API_KEY");
+
+	expect(requests).toEqual([]);
+	expect(result.isError).toBe(true);
+	expect(result.details).toEqual({ key: "DEEL_API_KEY", outcome: "broker-only" });
+	expect(text(result)).toContain('secret-run --reason "<what for>" DEEL_API_KEY -- <command>');
+	expect(text(result)).toContain("dispatch://INFRA-223/ask/d2bfc2df-9399-42a9-90b8-35b9f5a46d66");
+	expect(text(result)).not.toContain("omp --resume");
+});
+
+test("a session the broker does not serve is told the exact relaunch line", async () => {
+	humanTierGate.status = async () => ({ tier: "human" });
+	humanTierGate.brokerIdentity = async () => false;
+	const { result, requests } = await requestThroughGate("DEEL_API_KEY");
+
+	expect(requests).toEqual([]);
+	expect(text(result)).toContain("omp --resume root-session\n");
+	expect(text(result)).toContain('secret-run --reason "<what for>" DEEL_API_KEY -- <command>');
+});
+
+test("a secretsd name the broker holds under another name is sent to the broker's name", () => {
+	const guidance = brokerOnlyGuidance("GITHUB_ADMIN_PAT_THEOREM", "root-session", true);
+
+	expect(guidance).toContain('secret-run --reason "<what for>" GITHUB_ADMIN_PAT -- <command>');
+	expect(guidance).toContain("The broker holds this same token under the name GITHUB_ADMIN_PAT");
+	expect(guidance).not.toContain("not confirmed");
+});
+
+test("a human-tier key is refused even when some session holds a grant for it", async () => {
+	// `secrets get --no-request` reports "grant":true when ANY session holds the
+	// key; trusting it would send this session's REQUEST to the YubiKey.
+	const bin = root();
+	writeFileSync(
+		join(bin, "secrets"),
+		"#!/bin/sh\necho '{\"key\":\"DEEL_API_KEY\",\"tier\":\"human\",\"grant\":true,\"ttl\":3600}'\n",
+	);
+	chmodSync(join(bin, "secrets"), 0o755);
+	humanTierGate.status = defaultHumanTierGate.status;
+	const originalPath = process.env.PATH;
+	process.env.PATH = `${bin}:${originalPath}`;
+	try {
+		const { result, requests } = await requestThroughGate("DEEL_API_KEY");
+
+		expect(requests).toEqual([]);
+		expect(result.details).toEqual({ key: "DEEL_API_KEY", outcome: "broker-only" });
+	} finally {
+		process.env.PATH = originalPath;
+	}
+});
+
+test("a subagent's refusal names the root session, the one whose relaunch restores the identity", async () => {
+	setup();
+	const broker = fakeBroker(process.env.SECRETSD_SOCK as string);
+	humanTierGate.status = async () => ({ tier: "human" });
+	humanTierGate.brokerIdentity = async () => false;
+	await mountSession("root-session");
+	const subagent = await mountSession("subagent-session");
+
+	const result = await subagent.tools.secrets_request.execute(
+		"tool-call-1",
+		{ key: "DEEL_API_KEY" },
+		new AbortController().signal,
+	);
+
+	expect(broker.received.filter((line) => line.startsWith("REQUEST\t"))).toEqual([]);
+	expect(text(result)).toContain("omp --resume root-session\n");
+	expect(text(result)).not.toContain("subagent-session");
+});
+
+test("an agent-tier key is requested as before, and the daemon answers it", async () => {
+	humanTierGate.status = async () => ({ tier: "agent" });
+	const { requests } = await requestThroughGate("OPENAI_API_KEY");
+
+	expect(redactFrames(requests)).toEqual(["REQUEST\tkey=OPENAI_API_KEY\ttoken=<TOKEN>"]);
+});
+
+test("a key whose tier cannot be read is not requested, and the answer still names the broker route", async () => {
+	humanTierGate.status = async () => ({ error: "secret 'NOPE' not found" });
+	const { result, requests } = await requestThroughGate("NOPE");
+
+	expect(requests).toEqual([]);
+	expect(result.isError).toBe(true);
+	expect(text(result)).toContain("secret 'NOPE' not found");
+	expect(text(result)).toContain('secret-run --reason "<what for>" NOPE -- <command>');
+});
+
+test("the default gate reads `secrets get --no-request` and `agent-secrets identity` from PATH", async () => {
+	const bin = root();
+	const write = (name: string, body: string) => {
+		const path = join(bin, name);
+		writeFileSync(path, `#!/bin/sh\n${body}\n`);
+		chmodSync(path, 0o755);
+	};
+	write(
+		"secrets",
+		[
+			'[ "$1 $2" = "get --no-request" ] || exit 9',
+			'case "$3" in',
+			'  HUMAN_KEY) echo \'{"key":"HUMAN_KEY","tier":"human","grant":false,"ttl":null}\' ;;',
+			'  GRANTED_KEY) echo \'{"key":"GRANTED_KEY","tier":"human","grant":true,"ttl":3600}\' ;;',
+			'  AGENT_KEY) echo \'{"key":"AGENT_KEY","tier":"agent","path":"/x"}\' ;;',
+			"  *) echo \"secrets: secret '$3' not found\" >&2; exit 1 ;;",
+			"esac",
+		].join("\n"),
+	);
+	write("agent-secrets", '[ "$1" = identity ] && exit "${IDENTITY_EXIT:-0}"; exit 2');
+	const originalPath = process.env.PATH;
+	process.env.PATH = `${bin}:/usr/bin:/bin`;
+	try {
+		expect(await defaultHumanTierGate.status("HUMAN_KEY")).toEqual({ tier: "human" });
+		expect(await defaultHumanTierGate.status("GRANTED_KEY")).toEqual({ tier: "human" });
+		expect(await defaultHumanTierGate.status("AGENT_KEY")).toEqual({ tier: "agent" });
+		expect(await defaultHumanTierGate.status("MISSING")).toEqual({ error: "secrets: secret 'MISSING' not found" });
+		expect(await defaultHumanTierGate.brokerIdentity()).toBe(true);
+		process.env.IDENTITY_EXIT = "1";
+		expect(await defaultHumanTierGate.brokerIdentity()).toBe(false);
+		process.env.PATH = "/nonexistent";
+		expect(await defaultHumanTierGate.brokerIdentity()).toBe(false);
+		expect("error" in (await defaultHumanTierGate.status("HUMAN_KEY"))).toBe(true);
+	} finally {
+		process.env.PATH = originalPath;
+		delete process.env.IDENTITY_EXIT;
+	}
 });
