@@ -26,10 +26,8 @@ duration, such as `30s` or `5m`. In such a session `secret-run` never falls back
 In any other session or shell, it runs `secrets KEY... -- cmd` and drops `--reason`, `--wait`
 and `--ttl`.
 
-The credential broker's key names can differ from secretsd's: its `GITHUB_ADMIN_PAT` is the same
-token as secretsd's `GITHUB_ADMIN_PAT_THEOREM` (Sami, in chat to the chief of staff, 2026-11-02:
-"Yes, they're the same. Stop using the yubikey."), so an agent asks the broker for
-`GITHUB_ADMIN_PAT`. `agent-secrets secret list` shows the keys the credential broker holds.
+The credential broker's key names can differ from secretsd's for the same token, so ask the
+broker for its own name: `agent-secrets secret list` shows the keys it holds.
 
 In an omp agent session, `secrets_request` refuses every human-tier key without blinking the
 YubiKey, and its answer names the `secret-run` command to use instead, or, in a session the
@@ -249,7 +247,7 @@ Any failure that involved the broker starts with `AGENT NOTICE: ask the human; d
 retry-loop.` Take it literally: except where two rows below say otherwise, a retry does not
 help, and one that reaches the approval queue blinks the key again. Output without
 that notice is the client's own error (a missing key, a source sops cannot decrypt, a
-malformed dotenv, a command that would not run); a retry changes nothing there either.
+malformed dotenv, a command that would not run); a retry changes nothing there until the cause is fixed.
 
 **The message says what happened.** The daemon's guidance string for each error code is what
 to believe about the cause; this table says only what to *do*. Do not infer a cause it did
@@ -261,9 +259,9 @@ not state: several codes cover more than one fault.
 | `neither a terminal tty nor a session token` | ask the human to run it, or run inside the agent session |
 | `outside that session's process tree` | run the request from this session. If it *is* this session, its registration is stale: restart the session, do not retry |
 | `secretsd failed while decrypting` | read `journalctl --user -u secretsd` for the daemon's *classification* (`sops_failure=…`). sops' own output is never logged, since it can quote what it decrypted |
-| `secret 'X' not found` | the key may live in the Legion credential broker alone, which a process outside the omp session's tree (a detached tmux, a systemd unit) cannot reach; `secret-run` there says `no secrets-broker identity`. Rerun from the session's own shell first. Still not found: ask the human to add it; never invent a value |
+| `secret 'X' not found` | the key may live in the Legion credential broker alone, which a process outside the omp session's tree (a detached tmux, a systemd unit) cannot reach; `secret-run` there says `no secrets-broker identity`. Rerun it from the session's own shell; if `agent-secrets identity` there does not exit 0, the session is not registered: restart it. Still not found: ask the human to add it; never invent a value |
 | `the broker restarted` | run the command **once** more; the plugin re-registers between commands, so expect a touch. Twice: tell the human |
-| `TIMEOUT` | tell the human *before* requesting again; do not retry blind. If they say they touched it, read the journal before another request |
+| `TIMEOUT` | tell the human, then request **once** more at most. If they say they touched it, read the journal before that request |
 | `timed out waiting for approval` | the *client* gave up; the daemon may still be working. Tell the human and read the journal before another request |
 | `TOO_MANY_PENDING` | stop; let the pending request resolve before requesting again |
 
@@ -273,6 +271,6 @@ not state: several codes cover more than one fault.
 - Never write a secret into a script, a `.env`, or a shell history line.
 - Never let a diagnostic print a key (see "A diagnostic that crashes is the leak").
 - Never conclude a key is wrong from `secrets get` output — that output is status, not the key.
-- Never retry after an `AGENT NOTICE`, except as the `the broker restarted` and `TIMEOUT` rows above allow. Never loop.
-- Never request keys mid-flight into unattended work, or in parallel (sections above).
+- Never retry after an `AGENT NOTICE`, except **once** as the `the broker restarted` and daemon `TIMEOUT` rows allow. Never loop.
+- Never request keys mid-flight into unattended work, or fire `secrets_request` or `secrets get KEY` in parallel (sections above).
 - Never have a subagent request a human-tier key; request it in the parent before dispatching.
