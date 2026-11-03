@@ -179,7 +179,7 @@ tested in this repository, and both ship in the release archive. Consumers load
 the plugin from a tag matching the installed binary:
 
 ```
-secretsd@git+https://github.com/sjawhar/secretsd.git#v<VERSION>
+secretsd@git+https://github.com/sjawhar/forward.git#v<VERSION>
 ```
 
 The tag must match the installed daemon, because the wire protocol is versioned

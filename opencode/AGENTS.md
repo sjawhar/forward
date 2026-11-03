@@ -88,7 +88,7 @@ the `file://.../.local/share/secretsd/opencode/plugins/secretsd.ts` entry in
 `docs/design.md` -- loses a sibling module entirely.
 
 A tag-pinned install is what makes this easy to get wrong. `bun add
-secretsd@git+https://github.com/sjawhar/secretsd.git#vX.Y.Z` clones the whole
+secretsd@git+https://github.com/sjawhar/forward.git#vX.Y.Z` clones the whole
 tree rather than honouring `files`, so a split-out module resolves there, in this
 checkout, and under `bun test`, and looks correct everywhere you would think to
 look. The archive verification only asserts `secretsd.ts` exists, so it does not
