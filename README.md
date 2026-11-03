@@ -34,7 +34,11 @@ The same release ships the `secrets` broker; its guide is
   and aarch64, statically linked).
 - ssh access from the laptop to the devbox.
 - A systemd user session on both machines.
-- For the YubiKey channel: `pcscd` running on the laptop (`sudo apt install pcscd`).
+- `curl` (`sudo apt-get install -y ca-certificates curl`).
+- For the YubiKey channel: `pcscd` running on the laptop (`sudo apt-get install -y pcscd`).
+- For browser grants (`forward browser grant`): the omp browser relay running on the
+  laptop. Without it, `forward doctor` reports the browser relay rows as failing;
+  every other channel works.
 
 ## Install the binary (both machines)
 
@@ -48,18 +52,36 @@ base="https://github.com/sjawhar/forward/releases/latest/download"
 tmp="$(mktemp -d)" && cd "$tmp"
 curl -fsSLO "$base/$asset"
 curl -fsSLO "$base/SHA256SUMS"
-sha256sum -c --ignore-missing SHA256SUMS
-tar xzf "$asset"
-install -Dm755 forward "$HOME/.local/bin/forward"
+sha256sum -c --ignore-missing SHA256SUMS &&
+  tar xzf "$asset" &&
+  install -Dm755 forward "$HOME/.local/bin/forward"
 cd - >/dev/null && rm -rf "$tmp"
+export PATH="$HOME/.local/bin:$PATH"   # add this line to ~/.bashrc too
 forward --version
 ```
 
-If `forward` is not found, add `~/.local/bin` to your `PATH`.
+The archive is extracted only when its checksum matches.
 
-## Connect the two machines over ssh
+## Connect the two machines
 
-The simplest pairing carries every channel over one ssh connection, with both
+`forward` trusts exactly one peer address per daemon and accepts only literal IP
+addresses. Pick one of two transports.
+
+**Tailnet (recommended).** When both machines are on one Tailscale tailnet, each
+daemon listens on its own tailnet IP and accepts only the other's. No tunnel is
+needed. Use the two configs under [Configure](#configure) with
+`listen` = this machine's tailnet IP (`tailscale ip -4`) and `peer` = the other
+machine's.
+
+**ssh tunnel (single-user devbox only).** Through a tunnel, sshd makes each far-end
+connection from `127.0.0.1`, so `peer` is `127.0.0.1` and every local process on
+either machine looks like the peer. On a devbox other people log in to, they could
+read your files through the preview and take over your browser grants. Use the tunnel
+only on a devbox where you are the only user.
+
+### ssh tunnel
+
+The tunnel carries every channel over one ssh connection, with both
 daemons on loopback. Each port is forwarded to the same port on the other side:
 
 | Port | Listens on | Channel |
@@ -97,15 +119,15 @@ Host devbox-tunnel
 Use a key without a passphrase prompt for this host (`IdentityFile`), so the
 tunnel can reconnect unattended.
 
-`forward` trusts exactly one peer address per daemon and accepts only literal IP
-addresses. Through the tunnel, sshd makes each far-end connection from
-`127.0.0.1`, so on both machines `listen` and `peer` are `127.0.0.1`.
-
 ## Configure
 
 Both daemons read `~/.config/forward/config.toml` (or `--config <path>`). A missing
 file means the defaults: `listen = "127.0.0.1"`, no peer, the ports above,
 `mode = "allowlist"`, `opener = ["xdg-open"]`.
+
+The examples use the ssh tunnel's loopback addresses. For the tailnet, put the
+tailnet IPs in `listen` and `peer` and add the devbox's tailnet IP and port
+(`"100.x.y.z:12802"`) to the laptop's `allow` list in place of `127.0.0.1:12802`.
 
 Devbox, `~/.config/forward/config.toml`:
 
@@ -134,9 +156,7 @@ allow = [
 ]
 ```
 
-To use the tailnet instead of ssh, set `listen` to each machine's own tailnet IP
-and `peer` to the other machine's tailnet IP, and skip the tunnel. A non-loopback
-`listen` without a `peer` is refused.
+A non-loopback `listen` without a `peer` is refused.
 
 ## Run under systemd
 
@@ -161,7 +181,7 @@ systemctl --user enable --now forward-serve.service
 loginctl enable-linger "$USER"   # keep it running after you log out
 ```
 
-Laptop, `~/.config/systemd/user/forward-daemon.service` and
+Laptop, `~/.config/systemd/user/forward-daemon.service` and, for the ssh tunnel only,
 `~/.config/systemd/user/forward-tunnel.service`:
 
 ```ini
@@ -197,7 +217,8 @@ WantedBy=graphical-session.target
 
 ```bash
 systemctl --user daemon-reload
-systemctl --user enable --now forward-daemon.service forward-tunnel.service
+systemctl --user enable --now forward-daemon.service
+systemctl --user enable --now forward-tunnel.service   # ssh tunnel only
 ```
 
 Run `forward daemon` as this user unit, not from an ssh shell: Ubuntu's polkit
@@ -211,7 +232,7 @@ On the devbox:
 ```bash
 forward doctor
 forward open https://github.com
-forward url README.md
+forward url /etc/hostname
 ```
 
 `forward doctor` prints one line per channel (URL channel, file preview, callback
