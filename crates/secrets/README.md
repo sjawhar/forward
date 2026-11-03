@@ -33,7 +33,16 @@ client (every other command).
 
 - Linux x86_64 with a systemd user session (`systemctl --user` works).
 - A YubiKey holding the age identity your human-tier files are encrypted to, and
-  your age key at `~/.config/sops/age/keys.txt` for the agent-tier files.
+  `~/.config/sops/age/keys.txt` holding your disk age key (agent tier) and the
+  YubiKey's `AGE-PLUGIN-YUBIKEY-...` identity line (human tier): the daemon gives
+  sops only that file. After the tools below are installed and the YubiKey is
+  reachable, append the identity:
+
+  ```bash
+  PCSCLITE_CSOCK_NAME="$HOME/.pcscd/pcscd.comm" age-plugin-yubikey --identity >> "$HOME/.config/sops/age/keys.txt"
+  ```
+
+  Omit `PCSCLITE_CSOCK_NAME=...` when the YubiKey is plugged into this machine.
 - `pcscd`: local, or the laptop's reached through [`forward`](../../README.md)'s
   PC/SC channel at `~/.pcscd/pcscd.comm`.
 
@@ -164,8 +173,11 @@ Enable the **socket**, not the service. The first client connection to
 ```bash
 systemctl --user daemon-reload
 systemctl --user enable --now secretsd.socket
-secrets list
+secrets grants                              # first broker request: starts the daemon
+systemctl --user is-active secretsd.service
 ```
+
+If either fails, read `journalctl --user -u secretsd.service -n 50`.
 
 On a machine you drive over ssh, enable lingering as well:
 
