@@ -5,6 +5,8 @@
 mod client;
 mod reaper;
 
+use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -41,12 +43,19 @@ struct Inner {
     connected: bool,
 }
 
+#[derive(Clone, Default)]
+struct PeerState {
+    inner: Arc<Mutex<Inner>>,
+    reaper: Arc<reaper::Reaper>,
+}
+
 /// Live relay tokens shared by the feed client and relay connection handlers.
 #[derive(Clone)]
 pub struct RelayTokens {
     inner: Arc<Mutex<Inner>>,
     reaper: Arc<reaper::Reaper>,
     clock: Arc<dyn Clock>,
+    peers: Arc<Mutex<HashMap<IpAddr, PeerState>>>,
 }
 
 impl Default for RelayTokens {
@@ -65,6 +74,24 @@ impl RelayTokens {
             inner: Arc::default(),
             reaper: Arc::default(),
             clock,
+            peers: Arc::default(),
+        }
+    }
+
+    /// A feed's cache, liveness and expiry worker belong to its authenticated
+    /// VM address. No token or connection flag is shared with another VM.
+    pub fn for_peer(&self, peer: IpAddr) -> Self {
+        let state = self
+            .peers
+            .lock()
+            .entry(peer.to_canonical())
+            .or_default()
+            .clone();
+        Self {
+            inner: state.inner,
+            reaper: state.reaper,
+            clock: Arc::clone(&self.clock),
+            peers: Arc::clone(&self.peers),
         }
     }
 

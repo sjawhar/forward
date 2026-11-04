@@ -23,7 +23,7 @@ allow = ["localhost", "example.com"]
 
     // Then: the journal includes the effective config summary.
     daemon.wait_for_log(&format!(
-        "daemon config={} listen=127.0.0.1:{port} peer=\"\" mode=Auto opener=[\"{opener}\"] allow_entries=2",
+        "daemon config={} listen=127.0.0.1:{port} peer=\"\" peers=None mode=Auto opener=[\"{opener}\"] allow_entries=2",
         config_path.display()
     ));
 }

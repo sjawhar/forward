@@ -25,7 +25,7 @@ fn evaluate(cfg: &Config, socket: Option<std::path::PathBuf>) -> (bool, String) 
             "pulse socket: not served on this machine (no $XDG_RUNTIME_DIR/forward)".to_owned(),
         );
     };
-    if cfg.peer.is_empty() {
+    if !cfg.has_peers() {
         return (
             true,
             "pulse socket: not served (no peer configured)".to_owned(),

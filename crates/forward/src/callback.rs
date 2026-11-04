@@ -68,6 +68,15 @@ pub fn request_on(cfg: &Config, leases: &Leases, port: u16) -> Option<u16> {
 pub enum ServeError {
     #[error("no literal peer address; not serving callback port {port}")]
     NoPeer { port: u16 },
+    #[error("callback port {port} is already owned by peer bridge {owner}")]
+    Owned { port: u16, owner: SocketAddr },
+    #[error(
+        "callback URL requires more than {} forwarded ports",
+        MAX_DYNAMIC_FORWARDS
+    )]
+    TooMany,
+    #[error("callback port {port} is reserved by forward")]
+    Reserved { port: u16 },
     #[error("cannot serve callback port {port}: {source}")]
     Bind {
         port: u16,
@@ -91,22 +100,23 @@ pub fn serve_on(
     port: u16,
     ttl: Duration,
 ) -> Result<u16, ServeError> {
-    if port != 0 {
-        match leases.refresh(port, ttl) {
-            Refresh::Live => {
-                eprintln!("forward: refreshed callback lease for port {port}");
-                return Ok(port);
-            }
-            Refresh::Releasing => leases.wait_until_released(port),
-            Refresh::Absent => {}
-        }
-    }
-    // Fail closed before binding: a port we cannot relay is a port squatted on
-    // some other tool for a whole TTL.
+    // Resolve ownership before refreshing: a different VM may neither renew
+    // nor replace a live port, even when it asks for the same port number.
     let Ok(Some(peer)) = cfg.peer_ip() else {
         return Err(ServeError::NoPeer { port });
     };
     let bridge = SocketAddr::new(peer, cfg.bridge_port);
+    if port != 0 {
+        match leases.refresh(port, bridge, ttl) {
+            Refresh::Live => {
+                eprintln!("forward: refreshed callback lease for port {port}");
+                return Ok(port);
+            }
+            Refresh::Owned(owner) => return Err(ServeError::Owned { port, owner }),
+            Refresh::Releasing => leases.wait_until_released(port),
+            Refresh::Absent => {}
+        }
+    }
     let listener = bind_polling(Ipv4Addr::LOCALHOST.into(), port)
         .map_err(|source| ServeError::Bind { port, source })?;
     let bound = listener
@@ -133,6 +143,7 @@ pub fn serve_on(
     };
     leases.insert(
         bound,
+        bridge,
         ttl,
         Arc::clone(&stop),
         1 + usize::from(ipv6_listener.is_some()),

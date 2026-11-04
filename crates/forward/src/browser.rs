@@ -5,19 +5,20 @@ pub mod push;
 pub mod relay;
 pub mod request;
 pub mod subscription;
-use std::io::{self, BufRead, BufReader, Read, Write};
+mod token;
+use std::io::{self, BufRead, BufReader, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, TcpStream};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use zeroize::Zeroizing;
+use token::read_relay_token;
 
 use crate::bridge::limit::ConnectionLimit;
 use crate::callback::RELAY_TARGET_PORT;
 use crate::config::Config;
 use crate::peer::authorized_sensitive;
 use crate::pipe::bidirectional;
-use crate::refusal::refuse;
+use crate::refusal::{refuse, refuse_peer};
 /// The devbox's maximum requested grant lifetime, enforced on both peers.
 pub(crate) const LONGEST_TTL: Duration = Duration::from_secs(12 * 60 * 60);
 
@@ -106,6 +107,13 @@ fn accept_loop(
     for connection in listener.incoming() {
         match connection {
             Ok(mut stream) => {
+                if !matches!(
+                    (stream.peer_addr(), stream.local_addr()),
+                    (Ok(remote), Ok(local)) if authorized_sensitive(&cfg, remote.ip(), local.ip())
+                ) {
+                    refuse_peer(&mut stream, PEER_REFUSAL);
+                    continue;
+                }
                 let Some(permit) = limit.acquire() else {
                     eprintln!(
                         "forward: browser relay refused connection: concurrency limit reached"
@@ -131,7 +139,7 @@ fn handle(cfg: &Config, tokens: &feed::RelayTokens, upstream: SocketAddr, mut st
     let (remote, local) = match (stream.peer_addr(), stream.local_addr()) {
         (Ok(remote), Ok(local)) => (remote, local),
         _ => {
-            refuse(&mut stream, GENERIC_REFUSAL);
+            refuse_peer(&mut stream, GENERIC_REFUSAL);
             return;
         }
     };
@@ -150,9 +158,16 @@ pub fn handle_from(
 ) {
     if !authorized_sensitive(cfg, remote, local) {
         eprintln!("forward: browser relay refused peer {remote}");
-        refuse(&mut stream, PEER_REFUSAL);
+        refuse_peer(&mut stream, PEER_REFUSAL);
         return;
     }
+    let scoped;
+    let tokens = if cfg.is_multi_peer() {
+        scoped = tokens.for_peer(remote);
+        &scoped
+    } else {
+        tokens
+    };
     let presented = read_relay_token(&mut stream, REQUEST_LINE_READ_TIMEOUT);
     let accepted = presented
         .as_deref()
@@ -206,35 +221,6 @@ fn token_refusal(upstream: SocketAddr) -> &'static [u8] {
     } else {
         TOKEN_UPSTREAM_DOWN_REFUSAL
     }
-}
-/// Read `RELAY <token>\n` one byte at a time without creating an unzeroized
-/// copy of the bearer token.
-fn read_relay_token(stream: &mut TcpStream, timeout: Duration) -> Option<Zeroizing<Vec<u8>>> {
-    const PREFIX: &[u8] = b"RELAY ";
-    let deadline = Instant::now().checked_add(timeout)?;
-    let mut token = Zeroizing::new(Vec::with_capacity(MAX_REQUEST_LINE - PREFIX.len()));
-    let mut byte = Zeroizing::new([0_u8; 1]);
-    for position in 0..MAX_REQUEST_LINE {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() || stream.set_read_timeout(Some(remaining)).is_err() {
-            return None;
-        }
-        match stream.read(&mut *byte) {
-            Ok(1) => {}
-            Ok(_) => return None,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => return None,
-        }
-        let received = *byte.first()?;
-        if let Some(expected) = PREFIX.get(position) {
-            (received == *expected).then_some(())?;
-        } else if received == b'\n' {
-            return Some(token);
-        } else {
-            token.push(received);
-        }
-    }
-    None
 }
 fn configure_pipe_timeouts(
     left: &TcpStream,

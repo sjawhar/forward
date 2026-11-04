@@ -27,11 +27,13 @@ fn assert_refused(client: &mut TcpStream, expected: &str) {
     client
         .set_read_timeout(Some(Duration::from_secs(5)))
         .unwrap();
-    let mut reply = String::new();
+    // Identity refusal deliberately leaves pending payload unread. A later RST
+    // must not erase the refusal frame the client already received.
+    let mut reply = vec![0; expected.len()];
     client
-        .read_to_string(&mut reply)
-        .expect("the relay must write its refusal before closing");
-    assert_eq!(reply, expected);
+        .read_exact(&mut reply)
+        .expect("the relay must write its refusal");
+    assert_eq!(reply, expected.as_bytes());
 }
 
 fn spawn_pong(listener: TcpListener) -> SocketAddr {

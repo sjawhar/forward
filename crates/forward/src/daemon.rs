@@ -1,8 +1,5 @@
-use forward::callback::{
-    Leases, MAX_DYNAMIC_FORWARDS, is_dynamic_port, request, serve_on, spawn_reaper,
-};
+use forward::callback::{Leases, is_dynamic_port, serve_on, spawn_reaper};
 use forward::config::Config;
-use forward::localhost::forward_ports;
 use forward::peer::authorized;
 use forward::policy::{Decision, decide};
 use forward::send::Outcome;
@@ -10,6 +7,7 @@ use forward::send::Outcome;
 use crate::ratelimit::{OpenDecision, RecentOpens};
 use crate::request::{Request, read_request};
 mod notification;
+mod origin;
 use std::io::Write as _;
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::Path;
@@ -57,9 +55,10 @@ pub fn run(cfg: Config, config_path: &Path, port: u16) -> Result<(), DaemonError
     let listener =
         TcpListener::bind(address).map_err(|source| DaemonError::Bind { port, source })?;
     eprintln!(
-        "forward: daemon config={} listen={address} peer={:?} mode={:?} opener={:?} allow_entries={}",
+        "forward: daemon config={} listen={address} peer={:?} peers={:?} mode={:?} opener={:?} allow_entries={}",
         config_path.display(),
         cfg.peer,
+        cfg.peers,
         cfg.mode,
         cfg.opener,
         cfg.allow.len()
@@ -84,7 +83,9 @@ pub fn run(cfg: Config, config_path: &Path, port: u16) -> Result<(), DaemonError
                     continue;
                 }
                 let peer_port = remote.port();
+                let strict_callbacks = cfg.is_multi_peer();
                 let connection_config = cfg.clone();
+                let connection_config = origin::config(connection_config, remote.ip());
                 let connection_opens = Arc::clone(&recent_opens);
                 let connection_leases = leases.clone();
                 if let Err(error) = thread::Builder::new()
@@ -95,6 +96,7 @@ pub fn run(cfg: Config, config_path: &Path, port: u16) -> Result<(), DaemonError
                             connection_config,
                             connection_opens,
                             connection_leases,
+                            strict_callbacks,
                         )
                     })
                 {
@@ -106,11 +108,13 @@ pub fn run(cfg: Config, config_path: &Path, port: u16) -> Result<(), DaemonError
     }
     Ok(())
 }
+
 fn handle_connection(
     mut stream: TcpStream,
     cfg: Config,
     recent_opens: Arc<Mutex<RecentOpens>>,
     leases: Leases,
+    strict_callbacks: bool,
 ) {
     let url = match read_request(&stream) {
         None => return,
@@ -130,7 +134,13 @@ fn handle_connection(
     // dies on a refused connection. Leasing on notify grants nothing new:
     // this machine is the bridge's authorized peer, so any local process
     // could already ask the bridge directly for anything the lease relays.
-    forward_url(&cfg, &url, &leases);
+    if let Err(error) = origin::forward_url(&cfg, &url, &leases, strict_callbacks) {
+        eprintln!("forward: refused URL {url}: {error}");
+        if let Err(error) = writeln!(stream, "refused {error}") {
+            eprintln!("forward: failed to report URL refusal: {error}");
+        }
+        return;
+    }
     let outcome = match decide(&cfg, &url) {
         Decision::Open => {
             eprintln!("forward: URL {url} decision=open");
@@ -176,34 +186,16 @@ fn hold(cfg: &Config, leases: &Leases, port: u16, secs: u64) -> String {
 }
 
 fn open_permitted_url(cfg: &Config, url: &Url, recent_opens: &Mutex<RecentOpens>) {
+    let origin = cfg.peer_ip().ok().flatten();
     let decision = match recent_opens.lock() {
-        Ok(mut opens) => opens.record(url, Instant::now()),
-        Err(poisoned) => poisoned.into_inner().record(url, Instant::now()),
+        Ok(mut opens) => opens.record(url, Instant::now(), origin),
+        Err(poisoned) => poisoned.into_inner().record(url, Instant::now(), origin),
     };
     match decision {
         OpenDecision::Permit => open_url(cfg, url),
         OpenDecision::Drop { count } => {
             eprintln!("forward: dropping {url}: opened {count} times in 2s, refusing to loop")
         }
-    }
-}
-
-fn forward_url(cfg: &Config, url: &Url, leases: &Leases) {
-    let mut forwarded = 0;
-    let mut dropped = 0;
-    for port in forward_ports(url) {
-        if !is_dynamic_port(cfg, port) {
-            continue;
-        }
-        if forwarded == MAX_DYNAMIC_FORWARDS {
-            dropped += 1;
-            continue;
-        }
-        request(cfg, leases, port);
-        forwarded += 1;
-    }
-    if dropped > 0 {
-        eprintln!("forward: dynamic forward limit reached; dropped {dropped} port(s)");
     }
 }
 

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -7,6 +8,7 @@ use std::time::{Duration, Instant};
 use parking_lot::{Condvar, Mutex};
 
 struct Lease {
+    owner: SocketAddr,
     deadline: Instant,
     listeners: usize,
     stop: Arc<AtomicBool>,
@@ -23,6 +25,7 @@ pub(super) enum Refresh {
     Live,
     Releasing,
     Absent,
+    Owned(SocketAddr),
 }
 
 impl Default for Leases {
@@ -39,9 +42,12 @@ impl Leases {
         Self::default()
     }
 
-    pub(super) fn refresh(&self, port: u16, ttl: Duration) -> Refresh {
+    pub(super) fn refresh(&self, port: u16, owner: SocketAddr, ttl: Duration) -> Refresh {
         let mut leases = self.inner.lock();
         match leases.get_mut(&port) {
+            Some(lease) if !lease.stop.load(Ordering::Relaxed) && lease.owner != owner => {
+                Refresh::Owned(lease.owner)
+            }
             Some(lease) if !lease.stop.load(Ordering::Relaxed) => {
                 let deadline = Instant::now() + ttl;
                 if lease.deadline < deadline {
@@ -54,7 +60,14 @@ impl Leases {
         }
     }
 
-    pub(super) fn insert(&self, port: u16, ttl: Duration, stop: Arc<AtomicBool>, listeners: usize) {
+    pub(super) fn insert(
+        &self,
+        port: u16,
+        owner: SocketAddr,
+        ttl: Duration,
+        stop: Arc<AtomicBool>,
+        listeners: usize,
+    ) {
         let mut leases = self.inner.lock();
         if let Some(replaced) = leases.get(&port) {
             replaced.stop.store(true, Ordering::Relaxed);
@@ -62,6 +75,7 @@ impl Leases {
         leases.insert(
             port,
             Lease {
+                owner,
                 deadline: Instant::now() + ttl,
                 listeners,
                 stop,
@@ -112,6 +126,9 @@ mod tests {
 
     use super::*;
 
+    const OWNER: SocketAddr =
+        SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12801);
+
     #[test]
     fn a_removed_lease_is_immediately_rebindable() {
         // Given: a listener whose lease has expired but has not dropped yet.
@@ -119,7 +136,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let leases = Leases::new();
         let stop = Arc::new(AtomicBool::new(false));
-        leases.insert(port, Duration::ZERO, Arc::clone(&stop), 1);
+        leases.insert(port, OWNER, Duration::ZERO, Arc::clone(&stop), 1);
 
         // When: the reaper expires the lease.
         leases.expire();
@@ -127,7 +144,7 @@ mod tests {
         // Then: the map must retain it until the listener is actually gone.
         assert!(leases.inner.lock().contains_key(&port));
         assert!(matches!(
-            leases.refresh(port, Duration::from_secs(30)),
+            leases.refresh(port, OWNER, Duration::from_secs(30)),
             Refresh::Releasing
         ));
         let waiting_leases = leases.clone();
@@ -146,11 +163,11 @@ mod tests {
         // Given: a live lease with a long deadline.
         let leases = Leases::new();
         let stop = Arc::new(AtomicBool::new(false));
-        leases.insert(8400, Duration::from_secs(30), Arc::clone(&stop), 1);
+        leases.insert(8400, OWNER, Duration::from_secs(30), Arc::clone(&stop), 1);
 
         // When: a shorter refresh arrives and the shorter window passes.
         assert!(matches!(
-            leases.refresh(8400, Duration::from_millis(1)),
+            leases.refresh(8400, OWNER, Duration::from_millis(1)),
             Refresh::Live
         ));
         thread::sleep(Duration::from_millis(20));
@@ -158,7 +175,7 @@ mod tests {
 
         // Then: the lease is still live and can be refreshed again.
         assert!(matches!(
-            leases.refresh(8400, Duration::from_secs(30)),
+            leases.refresh(8400, OWNER, Duration::from_secs(30)),
             Refresh::Live
         ));
     }

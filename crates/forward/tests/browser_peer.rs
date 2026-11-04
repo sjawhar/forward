@@ -1,5 +1,5 @@
-use std::io::{Read as _, Write as _};
-use std::net::{TcpListener, TcpStream};
+use std::io::Write as _;
+use std::net::{Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -29,14 +29,13 @@ fn wait_for_exit(handle: &thread::JoinHandle<()>) -> bool {
 }
 
 #[test]
-fn a_flooding_unauthorized_peer_still_gets_the_refusal_and_frees_its_slot() {
+fn a_flooding_unauthorized_peer_cannot_pin_its_handler() {
     // Given: a foreign peer that never stops flooding its socket.
     let (client, server) = socket_pair();
-    let mut reader = client.try_clone().unwrap();
-    reader
-        .set_read_timeout(Some(Duration::from_secs(1)))
-        .unwrap();
+    let reader = client.try_clone().unwrap();
     let upstream = TcpListener::bind("127.0.0.1:0").unwrap();
+    upstream.set_nonblocking(true).unwrap();
+    let address = upstream.local_addr().unwrap();
     let stop = Arc::new(AtomicBool::new(false));
     let writer_stop = Arc::clone(&stop);
     let writer = thread::spawn(move || {
@@ -50,26 +49,21 @@ fn a_flooding_unauthorized_peer_still_gets_the_refusal_and_frees_its_slot() {
         forward::browser::handle_from(
             &cfg,
             &tokens,
-            upstream.local_addr().unwrap(),
+            address,
             "100.64.0.7".parse().unwrap(),
             "127.0.0.1".parse().unwrap(),
             server,
         );
     });
 
-    // When: the bounded drain refuses the connection despite the continuous writes.
-    let mut reply = Vec::new();
-    while !reply.ends_with(b"REFUSED PEER\n") {
-        let mut chunk = [0_u8; 32];
-        let count = reader.read(&mut chunk).unwrap();
-        assert_ne!(count, 0, "relay closed before sending its refusal");
-        reply.extend_from_slice(&chunk[..count]);
-    }
-
-    // Then: the refusal survived and the handler returned without waiting for the peer.
-    assert_eq!(reply, b"REFUSED PEER\n");
-    assert!(wait_for_exit(&handler), "flooding peer pinned the handler");
+    // An identity failure must not drain the flood to preserve its refusal.
+    // A peer writing after FIN may see RST; handler liveness is unconditional.
+    let finished = wait_for_exit(&handler);
     stop.store(true, Ordering::Relaxed);
+    let _ = reader.shutdown(Shutdown::Both);
     writer.join().unwrap();
+    assert!(finished, "flooding peer pinned the handler");
     handler.join().unwrap();
+    assert!(matches!(upstream.accept(), Err(error)
+        if error.kind() == std::io::ErrorKind::WouldBlock));
 }

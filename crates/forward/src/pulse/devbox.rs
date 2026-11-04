@@ -22,7 +22,10 @@ pub fn socket_path() -> Option<PathBuf> {
 
 /// Serve the pulse socket when this machine has a peer to relay to.
 pub fn spawn(cfg: &Config) -> Result<(), PulseError> {
-    let Ok(Some(peer)) = cfg.peer_ip() else {
+    let Some(peer) = cfg.peer_ip().map_err(|source| PulseError::Spawn {
+        source: io::Error::other(source),
+    })?
+    else {
         eprintln!("forward: pulse socket not served: no peer configured");
         return Ok(());
     };

@@ -23,7 +23,10 @@ pub fn socket_path() -> Option<PathBuf> {
 
 /// Serve the pcsc socket when this machine has a peer to relay to.
 pub fn spawn(cfg: &Config) -> Result<(), PcscError> {
-    let Ok(Some(peer)) = cfg.peer_ip() else {
+    let Some(peer) = cfg.peer_ip().map_err(|source| PcscError::Spawn {
+        source: io::Error::other(source),
+    })?
+    else {
         eprintln!("forward: pcsc socket not served: no peer configured");
         return Ok(());
     };

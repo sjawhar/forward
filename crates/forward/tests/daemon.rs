@@ -14,6 +14,8 @@ mod forward_lifecycle;
 mod forwarding;
 #[path = "daemon/holding.rs"]
 mod holding;
+#[path = "daemon/multi_peer.rs"]
+mod multi_peer;
 #[path = "daemon/open_command.rs"]
 mod open_command;
 #[path = "daemon/opening.rs"]

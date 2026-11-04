@@ -1,13 +1,12 @@
 # forward
 
-`forward` connects a laptop to a remote Linux devbox you work on over ssh. It runs as
-two daemons:
+`forward` connects a laptop to remote Linux devboxes. It runs as two daemons:
 
 - **`forward daemon`** on the laptop: opens URLs the devbox sends in the laptop
   browser, fronts the browser relay so devbox agents can drive the laptop's Chrome
   (after a YubiKey-approved grant), and relays the laptop's `pcscd` (YubiKey) and
   PulseAudio to the devbox.
-- **`forward serve`** on the devbox: serves devbox files read-only on loopback for
+- **`forward serve`** on each devbox: serves devbox files read-only for
   preview (markdown is rendered), runs the OAuth callback bridge, and serves the
   YubiKey socket `~/.pcscd/pcscd.comm` for local PC/SC clients such as
   [`secrets`](crates/secrets/README.md) and `age-plugin-yubikey`.
@@ -32,7 +31,8 @@ The same release ships the `secrets` broker; its guide is
 
 - A Linux devbox and a Linux laptop (releases ship Linux binaries only: x86_64
   and aarch64, statically linked).
-- ssh access from the laptop to the devbox.
+- Tailscale connectivity between the laptop and devboxes, or ssh access for a
+  single-peer tunnel.
 - A systemd user session on both machines.
 - `curl` (`sudo apt-get install -y ca-certificates curl`).
 - For the YubiKey channel: `pcscd` running on the laptop (`sudo apt-get install -y pcscd`).
@@ -64,14 +64,15 @@ The archive is extracted only when its checksum matches.
 
 ## Connect the two machines
 
-`forward` trusts exactly one peer address per daemon and accepts only literal IP
-addresses. Pick one of two transports.
+`forward` accepts only literal peer IP addresses. The laptop daemon can trust a
+list of devboxes; each devbox trusts the laptop. Sources outside that list are
+refused before the daemon reads a request.
 
-**Tailnet (recommended).** When both machines are on one Tailscale tailnet, each
-daemon listens on its own tailnet IP and accepts only the other's. No tunnel is
-needed. Use the two configs under [Configure](#configure) with
-`listen` = this machine's tailnet IP (`tailscale ip -4`) and `peer` = the other
-machine's.
+**Tailnet (recommended).** Each daemon listens on its own Tailscale IP. Configure
+the laptop with `peers = ["100.x.y.z", "100.a.b.c"]`, and each devbox with
+`peer = "<laptop-ip>"`. All devboxes use the default ports. Callbacks return to
+the devbox that sent the request, and each peer's preview is allowed automatically.
+No tunnel is needed. Resolve names when writing the config, not at runtime.
 
 **ssh tunnel (single-user devbox only).** Through a tunnel, sshd makes each far-end
 connection from `127.0.0.1`, so `peer` is `127.0.0.1` and every local process on
@@ -125,9 +126,19 @@ Both daemons read `~/.config/forward/config.toml` (or `--config <path>`). A miss
 file means the defaults: `listen = "127.0.0.1"`, no peer, the ports above,
 `mode = "allowlist"`, `opener = ["xdg-open"]`.
 
-The examples use the ssh tunnel's loopback addresses. For the tailnet, put the
-tailnet IPs in `listen` and `peer` and add the devbox's tailnet IP and port
-(`"100.x.y.z:12802"`) to the laptop's `allow` list in place of `127.0.0.1:12802`.
+The examples below show the single-peer ssh tunnel. For a single-peer tailnet
+pair, replace `listen` with this machine's tailnet IP, `peer` with the other
+machine's IP, and the laptop's `127.0.0.1:12802` allow entry with
+`<devbox-tailnet-ip>:12802`.
+On a laptop serving several devboxes, replace `peer` with `peers`:
+
+```toml
+listen = "100.64.0.1"   # laptop's own address
+peers = ["100.64.0.2", "100.64.0.3"]
+```
+
+Keep the URL policy settings below. In `peers` mode only, preview permission is
+derived from each request's source, so no per-devbox preview entries are needed.
 
 Devbox, `~/.config/forward/config.toml`:
 
@@ -156,7 +167,51 @@ allow = [
 ]
 ```
 
-A non-loopback `listen` without a `peer` is refused.
+A non-loopback `listen` without `peer` or a nonempty `peers` list is refused.
+The existing single `peer` setting remains valid, including custom ports used by
+ssh pairs. `forward doctor` reports each peer separately for a multi-peer config.
+
+Use either `peer` or `peers`, not both; an empty `peers` list is refused. In list
+mode even loopback sources must be listed. Duplicate IPs share one grant-feed
+client. Each browser grant belongs to its source peer, and a peer's preview is
+automatically allowed only for requests from that same peer.
+
+`peers` is a laptop-daemon setting. `forward serve` rejects it before starting
+any VM service; each VM uses a single `peer` naming the laptop. The list-mode
+pre-read admission rule applies to the laptop's URL, browser, PC/SC and audio
+listeners. The legacy single-peer VM preview and its doctor probe are unchanged.
+
+A laptop localhost port can serve only one VM at a time. Another VM's hold or
+OAuth callback request for that live port is refused rather than rerouted.
+Multi-peer OAuth requests are also refused if a callback port cannot be served.
+
+## Migrate existing dotfiles pairs
+
+This procedure uses the generated configs and units in Sami's dotfiles. Do not
+start it until the multi-peer release is available through the pinned installer
+and the reviewed dotfiles change has been published. Keep existing pair files
+and units until step 4.
+
+1. Release `forward` with `peers` support and update the installed version on
+   both sides. Single-`peer` configs keep working during the rollout.
+2. On the laptop, update the published dotfiles, then run this one command:
+
+   ```bash
+   bash ~/.dotfiles/installers/forward.sh daemon
+   ```
+
+   The installer resolves the committed VM-name list with `tailscale ip -4`,
+   writes literal peer IPs and enables one `forward-daemon.service`. It disables
+   the old per-pair daemon and tunnel instances, but retains their files.
+3. On each listed VM, run `bash ~/.dotfiles/installers/forward.sh serve`, then
+   `forward doctor`. The generated config listens on that VM's tailnet IP and
+   trusts the laptop. Check both peers together before removing the old path.
+4. Remove the per-pair TOMLs, `forward-tunnel@.service`, installer tunnel branch,
+   ssh tunnel host blocks, sshd's port-443 drop-in and the dedicated tunnel key's
+   `authorized_keys` entry. Remove the old per-pair daemon units and drop-ins too.
+   This cleanup is a separate migration step, not part of generating the config.
+5. Optionally restrict tailnet TCP ports 12800–12806 to the laptop and these VMs
+   with a Tailscale ACL. Source-IP authorization is still enforced by `forward`.
 
 ## Run under systemd
 

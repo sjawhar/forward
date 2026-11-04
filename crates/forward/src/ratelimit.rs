@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use url::Url;
@@ -16,6 +17,7 @@ pub enum OpenDecision {
 struct OpenedUrl {
     url: String,
     opened_at: Instant,
+    origin: Option<IpAddr>,
 }
 
 pub struct RecentOpens {
@@ -29,13 +31,13 @@ impl RecentOpens {
         }
     }
 
-    pub fn record(&mut self, url: &Url, now: Instant) -> OpenDecision {
+    pub fn record(&mut self, url: &Url, now: Instant, origin: Option<IpAddr>) -> OpenDecision {
         self.entries
             .retain(|entry| now.duration_since(entry.opened_at) < OPEN_WINDOW);
         let count = self
             .entries
             .iter()
-            .filter(|entry| entry.url == url.as_str())
+            .filter(|entry| entry.origin == origin && entry.url == url.as_str())
             .count()
             + 1;
         if count > MAX_OPENS_PER_WINDOW {
@@ -47,6 +49,7 @@ impl RecentOpens {
         self.entries.push_back(OpenedUrl {
             url: url.as_str().to_owned(),
             opened_at: now,
+            origin,
         });
         OpenDecision::Permit
     }
@@ -69,11 +72,14 @@ mod tests {
 
         // When: the URL is opened a fourth time inside two seconds.
         for _ in 0..3 {
-            assert_eq!(guard.record(&url, now), OpenDecision::Permit);
+            assert_eq!(guard.record(&url, now, None), OpenDecision::Permit);
         }
 
         // Then: the fourth open is rejected with its occurrence count.
-        assert_eq!(guard.record(&url, now), OpenDecision::Drop { count: 4 });
+        assert_eq!(
+            guard.record(&url, now, None),
+            OpenDecision::Drop { count: 4 }
+        );
     }
 
     #[test]
@@ -85,7 +91,7 @@ mod tests {
         // When: more URLs arrive than the guard can retain.
         for index in 0..65 {
             let url = Url::parse(&format!("https://{index}.example.com/")).unwrap();
-            assert_eq!(guard.record(&url, now), OpenDecision::Permit);
+            assert_eq!(guard.record(&url, now, None), OpenDecision::Permit);
         }
 
         // Then: only the fixed recent-open capacity remains in memory.
@@ -94,8 +100,23 @@ mod tests {
             guard.record(
                 &Url::parse("https://example.com/redirect").unwrap(),
                 now + Duration::from_secs(2),
+                None,
             ),
             OpenDecision::Permit
         );
+    }
+
+    #[test]
+    fn one_peer_cannot_suppress_another_peers_open_of_the_same_url() {
+        let mut guard = RecentOpens::new();
+        let url = Url::parse("https://auth.example/login").unwrap();
+        let now = Instant::now();
+        let a = Some("100.64.0.2".parse().unwrap());
+        let b = Some("100.64.0.3".parse().unwrap());
+        for _ in 0..3 {
+            assert_eq!(guard.record(&url, now, a), OpenDecision::Permit);
+        }
+        assert_eq!(guard.record(&url, now, a), OpenDecision::Drop { count: 4 });
+        assert_eq!(guard.record(&url, now, b), OpenDecision::Permit);
     }
 }

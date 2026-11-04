@@ -4,25 +4,17 @@ use crate::config::Config;
 
 /// Whether a non-sensitive listener may serve an inbound connection.
 ///
-/// Loopback is allowed only for listeners whose response contains no sensitive
-/// material. It keeps `forward doctor`, local tooling, and the bridge's final
-/// hop to a loopback callback listener working. Token-bearing and file-serving
-/// listeners must instead use `authorized_sensitive` or `authorized_remote`:
-/// a local process can originate a connection from loopback to a tailnet-bound
-/// socket, so loopback does not prove that WireGuard authenticated the peer.
-///
-/// A configured remote is accepted only when its source address equals the
-/// configured counterpart. `Config::validate` requires a specific listener
-/// address, so WireGuard authenticates the peer address on inbound tailnet
-/// packets. A missing or malformed `peer` denies every remote address.
+/// Legacy non-sensitive channels retain their loopback exemption for SSH
+/// tunnels and local tools. With `peers`, every source must be explicitly
+/// listed, including loopback. Sensitive channels always require the configured
+/// local address as well: loopback cannot impersonate a WireGuard peer.
 pub fn authorized(cfg: &Config, remote: IpAddr) -> bool {
-    remote.to_canonical().is_loopback() || authorized_remote(cfg, remote)
+    (!cfg.is_multi_peer() && remote.to_canonical().is_loopback()) || authorized_remote(cfg, remote)
 }
 
 /// Whether the configured remote peer originated a connection.
 pub(crate) fn authorized_remote(cfg: &Config, remote: IpAddr) -> bool {
-    let remote = remote.to_canonical();
-    matches!(cfg.peer_ip(), Ok(Some(peer)) if peer.to_canonical() == remote)
+    cfg.admits_peer(remote)
 }
 
 /// Whether a sensitive listener received a connection on its configured

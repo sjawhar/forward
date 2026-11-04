@@ -9,7 +9,7 @@ use super::port_policy::denied_port;
 use crate::config::Config;
 use crate::peer::authorized;
 use crate::pipe::bidirectional;
-use crate::refusal::refuse;
+use crate::refusal::{refuse, refuse_peer};
 
 /// How long a connection may take to send its request line.
 const REQUEST_LINE_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -70,6 +70,13 @@ fn accept_loop(cfg: Config, armed: Armed, listener: TcpListener) {
     for connection in listener.incoming() {
         match connection {
             Ok(mut stream) => {
+                if !stream
+                    .peer_addr()
+                    .is_ok_and(|remote| authorized(&cfg, remote.ip()))
+                {
+                    refuse_peer(&mut stream, PEER_REFUSAL);
+                    continue;
+                }
                 let Some(permit) = limit.acquire() else {
                     eprintln!("forward: bridge refused connection: concurrency limit reached");
                     refuse(&mut stream, BUSY_REFUSAL);
@@ -94,13 +101,13 @@ fn handle(cfg: &Config, armed: &Armed, listener_port: u16, mut stream: TcpStream
     let remote = match stream.peer_addr() {
         Ok(remote) => remote,
         Err(_) => {
-            refuse(&mut stream, GENERIC_REFUSAL);
+            refuse_peer(&mut stream, GENERIC_REFUSAL);
             return;
         }
     };
     if !authorized(cfg, remote.ip()) {
         eprintln!("forward: bridge refused peer {}", remote.ip());
-        refuse(&mut stream, PEER_REFUSAL);
+        refuse_peer(&mut stream, PEER_REFUSAL);
         return;
     }
     let Some(port) = read_port(&mut stream) else {

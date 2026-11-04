@@ -20,10 +20,10 @@ pub fn upstream_path() -> Option<PathBuf> {
 
 /// Start the laptop pulse listener on the configured address.
 pub fn spawn(cfg: &Config) -> Result<(), PulseError> {
-    let Ok(Some(_)) = cfg.peer_ip() else {
+    if !cfg.has_peers() {
         eprintln!("forward: pulse channel not served: no peer configured");
         return Ok(());
-    };
+    }
 
     if cfg.pulse_port == 0 {
         eprintln!("forward: pulse channel disabled (pulse_port = 0)");
