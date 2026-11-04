@@ -41,22 +41,29 @@ impl ReconnectBudget {
     }
 }
 
-/// Dial the devbox feed listener for the life of the process.
+/// Dial every configured devbox feed for the life of the laptop daemon.
 pub fn spawn_client(cfg: &Config, tokens: RelayTokens) -> Result<(), BrowserError> {
-    let Ok(Some(peer)) = cfg.peer_ip() else {
-        eprintln!("forward: grant feed disabled: no peer configured");
-        return Ok(());
-    };
     if cfg.grant_port == 0 {
         eprintln!("forward: grant feed disabled (grant_port = 0)");
         return Ok(());
     }
-    let address = SocketAddr::new(peer, cfg.grant_port);
-    client_spawn_result(
-        thread::Builder::new()
-            .name("grant-feed".to_owned())
-            .spawn(move || worker(address, tokens)),
-    )
+    let peers = cfg.peer_ips().map_err(|error| BrowserError::Spawn {
+        source: std::io::Error::other(error),
+    })?;
+    for peer in peers {
+        let address = SocketAddr::new(peer, cfg.grant_port);
+        let tokens = if cfg.is_multi_peer() {
+            tokens.for_peer(peer)
+        } else {
+            tokens.clone()
+        };
+        client_spawn_result(
+            thread::Builder::new()
+                .name(format!("grant-feed-{peer}"))
+                .spawn(move || worker(address, tokens)),
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn client_spawn_result(

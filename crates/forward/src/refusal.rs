@@ -13,6 +13,14 @@ const REFUSAL_DRAIN_READS: usize = 32;
 /// forever waiting for the send buffer to become writable.
 const REFUSAL_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
+/// Identity failure must not consume even queued bytes from an unlisted source.
+/// Unlike protocol refusals, this deliberately does not drain before close.
+pub(crate) fn refuse_peer(stream: &mut TcpStream, response: &[u8]) {
+    let _ = stream.set_write_timeout(Some(REFUSAL_WRITE_TIMEOUT));
+    let _ = stream.write_all(response);
+    let _ = stream.shutdown(Shutdown::Write);
+}
+
 /// Send a refusal and FIN, then drain at most one legitimate request burst.
 pub(crate) fn refuse(stream: &mut TcpStream, response: &[u8]) {
     if stream.set_nonblocking(false).is_ok()

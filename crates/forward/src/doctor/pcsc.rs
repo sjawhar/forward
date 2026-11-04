@@ -22,7 +22,7 @@ fn evaluate(cfg: &Config, socket: Option<std::path::PathBuf>) -> (bool, String) 
             "pcsc socket: not served on this machine (no ~/.pcscd)".to_owned(),
         );
     };
-    if cfg.peer.is_empty() {
+    if !cfg.has_peers() {
         return (
             true,
             "pcsc socket: not served (no peer configured)".to_owned(),

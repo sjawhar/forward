@@ -97,6 +97,7 @@ mod tests {
     use crate::config::Config;
 
     const TEST_TIMEOUT: Duration = Duration::from_secs(1);
+    const OWNER: SocketAddr = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 12801);
 
     fn cfg(bridge: SocketAddr) -> Config {
         let mut cfg = Config::default_values_for_test();
@@ -150,7 +151,7 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let leases = Leases::new();
         let stop = Arc::new(AtomicBool::new(false));
-        leases.insert(port, Duration::from_secs(30), Arc::clone(&stop), 1);
+        leases.insert(port, OWNER, Duration::from_secs(30), Arc::clone(&stop), 1);
         let bridge = spawn_echo_bridge();
         let loop_ = AcceptLoop {
             bridge,
@@ -180,7 +181,13 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let leases = Leases::new();
         let old_stop = Arc::new(AtomicBool::new(false));
-        leases.insert(port, Duration::from_secs(30), Arc::clone(&old_stop), 1);
+        leases.insert(
+            port,
+            OWNER,
+            Duration::from_secs(30),
+            Arc::clone(&old_stop),
+            1,
+        );
         assert!(spawn_accept_loop(
             listener,
             SocketAddr::from(([127, 0, 0, 1], 0)),
@@ -192,6 +199,7 @@ mod tests {
         // When: another listener replaces the port's logical lease.
         leases.insert(
             port,
+            OWNER,
             Duration::from_secs(30),
             Arc::new(AtomicBool::new(false)),
             1,

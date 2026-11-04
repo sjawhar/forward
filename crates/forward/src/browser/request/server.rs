@@ -96,6 +96,13 @@ pub fn serve(grants: Grants, cfg: Config, path: PathBuf, slot: crate::browser::p
 
 #[doc(hidden)]
 pub fn serve_with_deps(deps: Deps, cfg: Config, path: PathBuf) {
+    let upstream = match cfg.peer_ip() {
+        Ok(peer) => peer.map(|ip| SocketAddr::new(ip, cfg.relay_port)),
+        Err(error) => {
+            eprintln!("forward: cannot serve browser grants: {error}");
+            return;
+        }
+    };
     if let Err(error) = crate::socket::prepare_private_parent(&path) {
         eprintln!(
             "forward: could not prepare the directory of grant socket {}: {error}",
@@ -116,11 +123,6 @@ pub fn serve_with_deps(deps: Deps, cfg: Config, path: PathBuf) {
         let _ = std::fs::remove_file(&path);
         return;
     }
-    let upstream = cfg
-        .peer_ip()
-        .ok()
-        .flatten()
-        .map(|ip| SocketAddr::new(ip, cfg.relay_port));
     for stream in listener.incoming() {
         match stream {
             Ok(stream) => handle(&deps, upstream, stream),

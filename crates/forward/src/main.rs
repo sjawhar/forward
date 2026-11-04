@@ -127,6 +127,8 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Serve { port, config } => {
             let (cfg, _) = load_config(config)?;
+            // A laptop allowlist must not start VM listeners or publish grants.
+            cfg.validate_devbox()?;
             // PC/SC and pulse bind under a temporary process-wide umask, so start
             // both before any service thread can create a file.
             forward::pcsc::devbox::spawn(&cfg).unwrap_or_else(|error| exit_with_error(error));

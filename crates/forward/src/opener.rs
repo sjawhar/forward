@@ -37,7 +37,7 @@ pub(crate) fn open_target(
                 "forward: {} is not allowlisted, so it was sent as a notification and copied to the \
                  {} clipboard instead of opened; open the URL above to continue",
                 url.host_str().unwrap_or("the target"),
-                if cfg.peer.is_empty() {
+                if !cfg.has_peers() {
                     "counterpart"
                 } else {
                     "laptop"

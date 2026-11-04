@@ -64,6 +64,8 @@ pub enum SendError {
     },
     #[error("forward: send failed: {0}")]
     Io(#[from] std::io::Error),
+    #[error("forward: the laptop daemon at {target} refused the URL: {reason}")]
+    Refused { target: String, reason: String },
     #[error(
         "forward: the counterpart at {target} accepted {url} but never reported what it did with it; \
          upgrade the daemon so opens can be told apart from handovers"
@@ -98,6 +100,12 @@ pub fn send_url(cfg: &Config, url: &url::Url, channel_port: u16) -> Result<Outco
     // not invent: guessing "opened" is exactly the silent success that leaves a
     // caller waiting on a browser that was never launched.
     let (target, line) = request(cfg, url.as_str(), channel_port)?;
+    if let Some(reason) = line.trim().strip_prefix("refused ") {
+        return Err(SendError::Refused {
+            target: target.to_string(),
+            reason: reason.to_owned(),
+        });
+    }
     Outcome::from_wire(&line).ok_or_else(|| SendError::Unreported {
         target: target.to_string(),
         url: url.to_string(),

@@ -5,6 +5,8 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::target::url_host;
+mod multi_peer;
+mod response;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 const PREVIEW_PROBE_PATH: &str = "/etc/hostname";
@@ -60,6 +62,9 @@ fn probe_hosts(cfg: &Config) -> Vec<String> {
 
 /// Report evidence for each channel and return whether none contradicts its protocol.
 pub fn run(cfg: &Config, channel_port: u16, files_port: u16) -> bool {
+    if cfg.is_multi_peer() {
+        return multi_peer::report(cfg, channel_port, files_port);
+    }
     let hosts = probe_hosts(cfg);
     let url = channel(cfg, &hosts, "url channel", channel_port, probe_url_channel);
     let preview = channel(cfg, &hosts, "file preview", files_port, probe_file_preview);
@@ -89,7 +94,7 @@ pub fn run(cfg: &Config, channel_port: u16, files_port: u16) -> bool {
 }
 
 /// Report one TCP channel across the probe hosts.
-fn channel(cfg: &Config, hosts: &[String], name: &'static str, port: u16, probe: Probe) -> bool {
+fn channel(cfg: &Config, hosts: &[String], name: &str, port: u16, probe: Probe) -> bool {
     let mut failures = Vec::new();
     for host in hosts {
         match probe(host, port) {
@@ -106,13 +111,7 @@ fn channel(cfg: &Config, hosts: &[String], name: &'static str, port: u16, probe:
 }
 
 /// Report a plain TCP channel that a zero port deliberately disables.
-fn optional_channel(
-    cfg: &Config,
-    hosts: &[String],
-    name: &'static str,
-    field: &'static str,
-    port: u16,
-) -> bool {
+fn optional_channel(cfg: &Config, hosts: &[String], name: &str, field: &str, port: u16) -> bool {
     if port == 0 {
         print_line(format_args!("{name}: disabled ({field} = 0)"));
         return true;
@@ -178,13 +177,11 @@ fn probe_bridge(host: &str, port: u16) -> Result<ProbeEvidence, String> {
     stream
         .write_all(b"CONNECT 0\n")
         .map_err(|error| error.to_string())?;
-    let mut body = Vec::new();
-    match stream.read_to_end(&mut body) {
-        Ok(_) if body == b"REFUSED DENIED\n" => Ok(ProbeEvidence::BridgeDenied),
-        Ok(_) if body == b"REFUSED PEER\n" => Ok(ProbeEvidence::BridgePeerRefused),
-        Ok(0) => Err("closed without a protocol refusal".to_owned()),
-        Ok(count) => Err(format!("unexpected {count}-byte response {body:?}")),
-        Err(error) => Err(error.to_string()),
+    let body = response::read_response(&mut stream).map_err(|error| error.to_string())?;
+    match body.as_slice() {
+        b"REFUSED DENIED\n" => Ok(ProbeEvidence::BridgeDenied),
+        b"REFUSED PEER\n" => Ok(ProbeEvidence::BridgePeerRefused),
+        _ => Err(format!("unexpected {}-byte response {body:?}", body.len())),
     }
 }
 
@@ -210,3 +207,6 @@ mod browser_peer_tests;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod response_tests;

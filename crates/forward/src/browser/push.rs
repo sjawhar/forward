@@ -107,6 +107,9 @@ pub fn spawn_listener(cfg: &Config, slot: FeedSlot, grants: Grants) -> Result<()
         eprintln!("forward: grant feed listener disabled (grant_port = 0)");
         return Ok(());
     }
+    let _ = cfg.peer_ip().map_err(|source| BrowserError::Spawn {
+        source: std::io::Error::other(source),
+    })?;
     let ip = cfg.listen_ip().map_err(|source| BrowserError::Bind {
         address: cfg.listen.clone(),
         source: std::io::Error::other(source),

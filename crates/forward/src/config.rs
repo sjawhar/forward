@@ -1,5 +1,7 @@
 use std::path::{Path, PathBuf};
 
+mod peers;
+
 #[derive(serde::Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
@@ -17,6 +19,9 @@ pub struct Config {
     pub listen: String,
     #[serde(default)]
     pub peer: String,
+    /// Laptop allowlist. Mutually exclusive with legacy `peer`; never resolves DNS.
+    #[serde(default)]
+    pub peers: Option<Vec<String>>,
     #[serde(default = "default_bridge_port")]
     pub bridge_port: u16,
     /// Port for the browser relay channel on the laptop's tailnet address.
@@ -62,8 +67,16 @@ pub enum ConfigError {
     },
     #[error("forward: {field} must be a literal IP address, got {value:?}")]
     Address { field: &'static str, value: String },
-    #[error("forward: a non-loopback listen address requires an explicit peer")]
+    #[error("forward: a non-loopback listen address requires an explicit peer or peers")]
     PeerRequired,
+    #[error("forward: peer and peers are mutually exclusive")]
+    PeerConflict,
+    #[error("forward: peers must contain at least one literal IP address")]
+    EmptyPeers,
+    #[error("forward: this outbound operation requires exactly one peer")]
+    MultiplePeers,
+    #[error("forward: peers is a laptop daemon setting; a devbox must use single peer")]
+    DaemonOnlyPeers,
 }
 
 pub fn load(path: &Path) -> Result<Config, ConfigError> {
@@ -84,20 +97,13 @@ pub fn load(path: &Path) -> Result<Config, ConfigError> {
 
 impl Config {
     pub fn listen_ip(&self) -> Result<std::net::IpAddr, ConfigError> {
-        parse_ip("listen", &self.listen)
+        parse_ip("listen", &self.listen).map(|ip| ip.to_canonical())
     }
 
-    /// The counterpart's address, or `None` when none is configured.
-    ///
-    /// Always a literal address. There is no hostname counterpart to this
-    /// field: every outbound connection dials this literal value, so no name
-    /// is ever resolved and no DNS or admin-console state can move the
-    /// identity the inbound check in `peer::authorized` compares against.
+    /// The counterpart for a single-destination operation. A multi-peer laptop
+    /// must select its request's authenticated origin instead of guessing.
     pub fn peer_ip(&self) -> Result<Option<std::net::IpAddr>, ConfigError> {
-        if self.peer.is_empty() {
-            return Ok(None);
-        }
-        parse_ip("peer", &self.peer).map(Some)
+        self.single_peer_ip()
     }
 
     /// Fail closed: a routable listen address without a named counterpart
@@ -112,21 +118,18 @@ impl Config {
                 value: self.listen.clone(),
             });
         }
-        let peer = self.peer_ip()?;
-        if let Some(peer) = peer
-            && (peer.is_unspecified()
-                || peer.is_multicast()
-                || peer == std::net::IpAddr::V4(std::net::Ipv4Addr::BROADCAST))
-        {
-            // These values do not name an individual counterpart, so they must
-            // not satisfy the peer requirement for a routable listener.
-            return Err(ConfigError::Address {
-                field: "peer",
-                value: self.peer.clone(),
-            });
-        }
-        if !listen.is_loopback() && peer.is_none() {
+        let peers = self.peer_ips()?;
+        if !listen.is_loopback() && peers.is_empty() {
             return Err(ConfigError::PeerRequired);
+        }
+        Ok(())
+    }
+
+    /// VM services trust one laptop. A daemon allowlist is not a serve config.
+    pub fn validate_devbox(&self) -> Result<(), ConfigError> {
+        self.validate()?;
+        if self.is_multi_peer() {
+            return Err(ConfigError::DaemonOnlyPeers);
         }
         Ok(())
     }
@@ -151,6 +154,7 @@ impl Config {
             forward_ttl_secs: default_forward_ttl_secs(),
             listen: default_listen(),
             peer: String::new(),
+            peers: None,
             bridge_port: default_bridge_port(),
             relay_port: default_relay_port(),
             pcsc_port: default_pcsc_port(),

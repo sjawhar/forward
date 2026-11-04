@@ -1,6 +1,6 @@
 mod evidence;
 
-use std::io::{Read, Write};
+use std::io::Write;
 
 pub(super) use evidence::{RelayEvidence, classify};
 
@@ -28,7 +28,7 @@ pub(super) fn evaluate_with(
     relay_target_port: u16,
     request: &mut Request,
 ) -> (bool, String) {
-    if cfg.relay_port == 0 && cfg.peer.is_empty() {
+    if cfg.relay_port == 0 && (cfg.is_multi_peer() || !cfg.has_peers()) {
         return (true, "browser relay: disabled (relay_port = 0)".to_owned());
     }
 
@@ -79,7 +79,7 @@ fn has_routable_listen(cfg: &Config) -> bool {
 fn relay_dialed_at_peer(cfg: &Config) -> bool {
     matches!(
         (cfg.listen_ip(), cfg.peer_ip()),
-        (Ok(listen), Ok(Some(peer))) if listen.to_canonical() != peer.to_canonical()
+        (Ok(listen), Ok(Some(peer))) if !cfg.is_multi_peer() && listen.to_canonical() != peer.to_canonical()
     )
 }
 
@@ -202,11 +202,7 @@ fn request(host: &str, port: u16, path: &str) -> Result<Vec<u8>, String> {
     stream
         .write_all(request.as_bytes())
         .map_err(|error| error.to_string())?;
-    let mut body = Vec::new();
-    stream
-        .read_to_end(&mut body)
-        .map_err(|error| error.to_string())?;
-    Ok(body)
+    super::response::read_response(&mut stream).map_err(|error| error.to_string())
 }
 
 fn count_targets(body: &[u8]) -> usize {

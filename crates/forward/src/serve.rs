@@ -101,7 +101,7 @@ impl Reply {
 }
 
 pub fn run(cfg: &Config, port: u16) -> Result<(), ServeError> {
-    cfg.validate()?;
+    cfg.validate_devbox()?;
     let ip = cfg.listen_ip().map_err(|source| ServeError::Bind {
         address: cfg.listen.clone(),
         source: Box::new(source),
