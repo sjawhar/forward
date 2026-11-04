@@ -30,7 +30,7 @@ pub(super) fn report(cfg: &Config, channel_port: u16, files_port: u16) -> bool {
             &host,
             &format!("peer {peer} file preview"),
             files_port,
-            super::probe_file_preview,
+            super::preview::probe,
         );
         let bridge = super::channel(
             cfg,

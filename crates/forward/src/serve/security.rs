@@ -6,8 +6,6 @@ use tiny_http::Request;
 use crate::config::Config;
 use crate::peer::authorized_remote;
 
-const LOOPBACK_HEALTH_PATH: &str = "/etc/hostname";
-
 /// Whether an inbound connection's source address may read a preview.
 ///
 /// `tiny_http` parses the request before `respond` can run this check, so a
@@ -19,8 +17,9 @@ const LOOPBACK_HEALTH_PATH: &str = "/etc/hostname";
 /// `forward url` deliberately supports arbitrary paths and the laptop already
 /// has SSH access to the same account. Loopback is not equivalent to the
 /// configured peer on a tailnet-bound listener — any local uid can originate a
-/// loopback connection to it — so loopback is refused for all previews except
-/// the fixed, world-readable doctor probe at `/etc/hostname`.
+/// loopback connection to it — so loopback is refused for all filesystem paths.
+/// Any loopback client may read the fixed health body, regardless of Host; it
+/// reads no file or secret and does not open a URL.
 pub(super) fn peer_allowed(cfg: &Config, request: &Request) -> bool {
     loopback_health_probe(request)
         || request
@@ -32,8 +31,8 @@ pub(super) fn peer_allowed(cfg: &Config, request: &Request) -> bool {
 /// listen on.
 ///
 /// The check stops DNS rebinding. The one exception is the loopback doctor
-/// probe, which `peer_allowed` has already constrained to the fixed,
-/// world-readable health path; its loopback `Host` value is not the configured
+/// probe, which `peer_allowed` has already constrained to the synthetic health
+/// response; its loopback `Host` value is not the configured
 /// tailnet address.
 pub(super) fn host_allowed(cfg: &Config, request: &Request) -> bool {
     if loopback_health_probe(request) {
@@ -47,7 +46,7 @@ pub(super) fn host_allowed(cfg: &Config, request: &Request) -> bool {
 }
 
 fn loopback_health_probe(request: &Request) -> bool {
-    request.url() == LOOPBACK_HEALTH_PATH
+    request.url() == super::HEALTH_PATH
         && request
             .remote_addr()
             .is_some_and(|remote| remote.ip().to_canonical().is_loopback())

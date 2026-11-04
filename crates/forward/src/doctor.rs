@@ -1,22 +1,21 @@
 use std::fmt::Display;
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{TcpStream, ToSocketAddrs};
 use std::time::Duration;
 
 use crate::config::Config;
-use crate::target::url_host;
 mod multi_peer;
+mod preview;
 mod response;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
-const PREVIEW_PROBE_PATH: &str = "/etc/hostname";
 
 type Probe = fn(&str, u16) -> Result<ProbeEvidence, String>;
 
 #[derive(Clone, Copy)]
 enum ProbeEvidence {
     TcpAccepted,
-    FileServed,
+    PreviewHealthy,
     FileAccessRefused,
     BridgeDenied,
     BridgePeerRefused,
@@ -26,7 +25,7 @@ impl ProbeEvidence {
     fn observation(self, host: &str, port: u16) -> String {
         match self {
             Self::TcpAccepted => format!("accepted TCP at {host}:{port}; delivery unverified"),
-            Self::FileServed => format!("served probe file at {host}:{port}"),
+            Self::PreviewHealthy => format!("answered preview health probe at {host}:{port}"),
             Self::FileAccessRefused => {
                 format!("reachable and correctly refused self-probe at {host}:{port} (HTTP 403)")
             }
@@ -41,7 +40,7 @@ impl ProbeEvidence {
 
     const fn failure_reason(self) -> &'static str {
         match self {
-            Self::TcpAccepted | Self::FileServed | Self::BridgeDenied => {
+            Self::TcpAccepted | Self::PreviewHealthy | Self::BridgeDenied => {
                 "internal doctor evidence classification error"
             }
             Self::FileAccessRefused => "HTTP 403 from a vantage that should be served",
@@ -67,7 +66,7 @@ pub fn run(cfg: &Config, channel_port: u16, files_port: u16) -> bool {
     }
     let hosts = probe_hosts(cfg);
     let url = channel(cfg, &hosts, "url channel", channel_port, probe_url_channel);
-    let preview = channel(cfg, &hosts, "file preview", files_port, probe_file_preview);
+    let preview = channel(cfg, &hosts, "file preview", files_port, preview::probe);
     let bridge = channel(
         cfg,
         &hosts,
@@ -124,9 +123,9 @@ fn evidence_is_healthy(cfg: &Config, host: &str, evidence: ProbeEvidence) -> boo
         ProbeEvidence::FileAccessRefused | ProbeEvidence::BridgePeerRefused => {
             host == cfg.listen && matches!(cfg.listen_ip(), Ok(address) if !address.is_loopback())
         }
-        ProbeEvidence::TcpAccepted | ProbeEvidence::FileServed | ProbeEvidence::BridgeDenied => {
-            true
-        }
+        ProbeEvidence::TcpAccepted
+        | ProbeEvidence::PreviewHealthy
+        | ProbeEvidence::BridgeDenied => true,
     }
 }
 
@@ -147,29 +146,6 @@ fn connect(host: &str, port: u16) -> Result<TcpStream, String> {
 /// Connect and close without sending a URL, which the daemon discards as empty input.
 fn probe_url_channel(host: &str, port: u16) -> Result<ProbeEvidence, String> {
     connect(host, port).map(|_| ProbeEvidence::TcpAccepted)
-}
-
-fn probe_file_preview(host: &str, port: u16) -> Result<ProbeEvidence, String> {
-    let mut stream = connect(host, port)?;
-    let request = format!(
-        "GET {PREVIEW_PROBE_PATH} HTTP/1.0\r\nHost: {}\r\nConnection: close\r\n\r\n",
-        url_host(host)
-    );
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|error| error.to_string())?;
-    let mut status = [0_u8; 12];
-    stream
-        .read_exact(&mut status)
-        .map_err(|error| error.to_string())?;
-    let line = String::from_utf8_lossy(&status).into_owned();
-    if line.ends_with(" 200") {
-        Ok(ProbeEvidence::FileServed)
-    } else if line.ends_with(" 403") {
-        Ok(ProbeEvidence::FileAccessRefused)
-    } else {
-        Err(format!("{PREVIEW_PROBE_PATH} answered {line:?}"))
-    }
 }
 
 fn probe_bridge(host: &str, port: u16) -> Result<ProbeEvidence, String> {
@@ -210,3 +186,6 @@ mod tests;
 
 #[cfg(test)]
 mod response_tests;
+
+#[cfg(test)]
+mod preview_tests;
