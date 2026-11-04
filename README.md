@@ -179,7 +179,7 @@ automatically allowed only for requests from that same peer.
 `peers` is a laptop-daemon setting. `forward serve` rejects it before starting
 any VM service; each VM uses a single `peer` naming the laptop. The list-mode
 pre-read admission rule applies to the laptop's URL, browser, PC/SC and audio
-listeners. The legacy single-peer VM preview and its doctor probe are unchanged.
+listeners. VM filesystem previews still use the single-peer admission rule.
 
 A laptop localhost port can serve only one VM at a time. Another VM's hold or
 OAuth callback request for that live port is refused rather than rerouted.
@@ -287,16 +287,20 @@ On the devbox:
 ```bash
 forward doctor
 forward open https://github.com
-forward url /etc/hostname
+forward url ./README.md
 ```
 
 `forward doctor` prints one line per channel (URL channel, file preview, callback
 bridge, browser relay, grant and feed, pcsc channel and socket, pulse channel and
-socket). Each line that is not healthy
-names what is wrong.
+socket). Each unhealthy line says what is wrong. The preview probe requests
+`/.well-known/forward/health` and checks the exact fixed body from `forward serve`;
+no host file is needed. Any loopback client can read this constant body regardless
+of Host. It reads no file or secret and does not open a URL. Ordinary previews on
+a tailnet listener still require the configured laptop peer and correct Host.
 
 ## Upgrade
 
-Run the install step again on both machines, then restart the units
-(`systemctl --user restart forward-serve` on the devbox,
-`systemctl --user restart forward-daemon` on the laptop).
+Upgrade the VMs before or together with the laptop: a new doctor expects the
+synthetic health response, which older serve versions do not provide. Run the
+install step again on each machine, then restart `forward-serve` on each VM and
+`forward-daemon` on the laptop.

@@ -37,7 +37,8 @@ fn spawn_file_preview(status: u16) -> u16 {
             let mut request = [0_u8; 512];
             let _ = stream.read(&mut request);
             let response = match status {
-                200 => b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n".as_slice(),
+                200 => b"HTTP/1.0 200 OK\r\nContent-Length: 24\r\n\r\nforward preview healthy\n"
+                    .as_slice(),
                 403 => b"HTTP/1.0 403 Forbidden\r\nContent-Length: 0\r\n\r\n".as_slice(),
                 _ => unreachable!("test helper only serves doctor probe statuses"),
             };

@@ -18,6 +18,8 @@ use crate::render::{MARKDOWN_HEAD, MARKDOWN_STYLE, MARKDOWN_TAIL, encode_path, e
 
 const HTML_CONTENT_TYPE: &str = "text/html; charset=utf-8";
 const TEXT_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
+pub(crate) const HEALTH_PATH: &str = "/.well-known/forward/health";
+pub(crate) const HEALTH_BODY: &str = "forward preview healthy\n";
 const RESPONSE_SECURITY_HEADERS: [(&[u8], &[u8]); 4] = [
     (
         b"Content-Security-Policy",
@@ -139,6 +141,10 @@ fn respond(cfg: &Config, request: &Request) -> Reply {
 
     if !host_allowed(cfg, request) {
         return Reply::new(403, TEXT_CONTENT_TYPE, "Forbidden\n");
+    }
+
+    if request.url() == HEALTH_PATH {
+        return Reply::new(200, TEXT_CONTENT_TYPE, HEALTH_BODY);
     }
 
     let (path, raw) = match request_path(request) {
