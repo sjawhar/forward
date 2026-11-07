@@ -152,7 +152,7 @@ fn refuses_a_token_already_bound_to_another_session() {
         root: crate::peer::current_for_test(),
     });
 
-    assert_eq!(refused.err(), Some(ErrCode::BadRequest));
+    assert_eq!(refused.err(), Some(Refusal::TokenBoundElsewhere));
     assert_eq!(registry.sessions.len(), 1);
     assert_eq!(
         registry

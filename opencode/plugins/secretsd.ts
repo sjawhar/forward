@@ -62,7 +62,7 @@ const DAEMON_ERROR_GUIDANCE = {
   UNKNOWN_TOKEN: "error: secretsd still does not know this session, even after an automatic re-registration; ask the human to check `systemctl --user status secretsd`, because a daemon that keeps restarting cannot hold a grant.",
   NO_SCOPE: "error: secretsd cannot attribute this request to a session because no session token or tty was provided; start it from a registered OpenCode session.",
   AGENT_TTY: "error: secretsd rejected a tokenless request from a tty already assigned to an agent session; use the registered session token.",
-  FOREIGN_CALLER: "error: secretsd refused this request because the session token was presented from outside that session's process tree; run the request from the session that owns the token.",
+  FOREIGN_CALLER: "error: secretsd refused this because the caller is outside the process tree of the session it named; run the request from the session that owns the token. On a REGISTER or UNREGISTER it means another live process already holds that session id, so claiming it would take its credentials away: use a session id of your own.",
   NOT_HUMAN_KEY: "not human-tier: no approval is needed for this key. Run the command that needs it with `secrets <KEY> -- <command>`, or read the bytes with `secrets get <KEY> --value`; plain `secrets get <KEY>` prints status, not the value. If that fails, the key is not configured. If config.toml just gained a new source root, restart secretsd (systemctl --user restart secretsd.service).",
   AMBIGUOUS_KEY: "error: the key exists in more than one human-tier location; ask the human to remove one of the duplicate files.",
   DENIED: "denied: human approval was refused; do not retry unless the human asks you to.",
@@ -116,6 +116,39 @@ class BrokerProtocolError extends BrokerError {
 
 class BrokerRequestCancelledError extends BrokerError {
   readonly name = "BrokerRequestCancelledError";
+}
+
+/// The broker refused a REGISTER or UNREGISTER, with the daemon's code.
+///
+/// A refused REGISTER used to surface as a bare "rejected", and before the
+/// daemon checked ancestry on REGISTER it was not refused at all: on
+/// 2026-11-07 a copy of a live session took 59 sessions' registrations and
+/// nothing on either side said so (dispatch://INFRA-1644). The code is kept,
+/// not only folded into the message, because a caller that sees just a
+/// `BrokerProtocolError` tells the agent it got "an unrecognized protocol
+/// response" and sends it after a version mismatch that does not exist.
+///
+/// The message carries the daemon's own text after the guidance. The guidance
+/// table is written for REQUEST: `BAD_REQUEST`, which a REGISTER whose token
+/// is bound to another session also returns, tells the reader to check a key
+/// name, and only the daemon's text says what actually went wrong.
+class BrokerRejectedError extends BrokerError {
+  readonly name = "BrokerRejectedError";
+  readonly code: DaemonErrorCode | undefined;
+
+  constructor(operation: "registration" | "unregistration", sessionID: string, response: string) {
+    const code = responseCode(response);
+    super(`broker ${operation} rejected for session ${sessionID}: ${rejectionReason(code, response)}`);
+    this.code = code;
+  }
+}
+
+function rejectionReason(code: DaemonErrorCode | undefined, response: string): string {
+  if (!code) {
+    return response.replaceAll("\t", " ");
+  }
+  const detail = response.split("\t").slice(2).join(" ");
+  return detail ? `${DAEMON_ERROR_GUIDANCE[code]} (secretsd: ${detail})` : DAEMON_ERROR_GUIDANCE[code];
 }
 
 class ProtocolVersionMismatch extends Error {
@@ -441,14 +474,14 @@ export class BrokerClient {
   async register(state: SessionState, sessionID: string, pid: number): Promise<void> {
     const response = await this.command(`REGISTER\ttoken=${state.token}\tsession=${sessionID}\tpid=${pid}`);
     if (response !== "OK") {
-      throw new BrokerProtocolError("broker registration rejected");
+      throw new BrokerRejectedError("registration", sessionID, response);
     }
   }
 
   async unregister(sessionID: string): Promise<void> {
     const response = await this.command(`UNREGISTER\tsession=${sessionID}`);
     if (response !== "OK") {
-      throw new BrokerProtocolError("broker unregistration rejected");
+      throw new BrokerRejectedError("unregistration", sessionID, response);
     }
   }
 
@@ -549,6 +582,9 @@ export function failureOutcome(error: unknown): RequestOutcome {
   if (error instanceof BrokerRequestCancelledError) {
     return { kind: "request-cancelled" };
   }
+  if (error instanceof BrokerRejectedError) {
+    return error.code ? { kind: "daemon-error", code: error.code } : { kind: "unexpected-broker-response" };
+  }
   if (error instanceof BrokerProtocolError) {
     return { kind: "unexpected-broker-response" };
   }
@@ -616,6 +652,19 @@ export function createSecretsdPlugin(options: PluginOptions = {}) {
     }
     reportedRuntimeFailures.add(error.reason);
     console.error(`secretsd: no session token can be issued: ${error.reason}`);
+  }
+
+  /// Record, once per distinct refusal, that the broker would not register a
+  /// session. `shell.env` swallows the error to keep shells starting and runs
+  /// before every command, so without this the serve log -- the only place the
+  /// human looks -- would never say why the session has no token.
+  const reportedRejections = new Set<string>();
+  function noteRejection(error: unknown): void {
+    if (!(error instanceof BrokerRejectedError) || reportedRejections.has(error.message)) {
+      return;
+    }
+    reportedRejections.add(error.message);
+    console.error(`secretsd: ${error.message}`);
   }
 
   function ensureState(sessionID: string): SessionState {
@@ -705,6 +754,7 @@ export function createSecretsdPlugin(options: PluginOptions = {}) {
         }
       } catch (error) {
         noteRuntimeUnavailable(error);
+        noteRejection(error);
         return;
       }
     },
@@ -753,6 +803,7 @@ export function createSecretsdPlugin(options: PluginOptions = {}) {
           } catch (error) {
             // no-excuse-ok: catch — tool results must not surface broker failures.
             noteRuntimeUnavailable(error);
+            noteRejection(error);
             return guidance(failureOutcome(error));
           }
         },

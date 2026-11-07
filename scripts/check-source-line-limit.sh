@@ -21,7 +21,6 @@ done
 # over-cap files, or growth beyond a listed ceiling, fails the gate until the
 # file is split.
 readonly -A grandfathered_limits=(
-  [crates/containment/src/tests.rs]=326
   [crates/proto/src/response.rs]=338
   [crates/secrets/src/client/edit/new.rs]=377
   [crates/secrets/src/config.rs]=288

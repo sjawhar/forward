@@ -1,10 +1,56 @@
 use std::time::Instant;
 
 use super::{Decision, Outcome};
-use crate::grants::{ScopeKind, SessionToken};
+use crate::audit::sanitize_audit_value;
+use crate::grants::{Refusal, ScopeKind, SessionToken};
 use crate::proto::ErrCode;
 use crate::requests::RequestId;
 use crate::server::{Shared, lock_state};
+
+/// Report a refused change to a session's registration.
+///
+/// Both halves are deliberate. The log names the session and the processes
+/// involved, because the incident this guards against
+/// (<dispatch://INFRA-1644>) left no trace anywhere: the displaced session
+/// simply began answering `UNKNOWN_TOKEN`. The response carries
+/// `FOREIGN_CALLER` for an ancestry refusal -- the code the protocol already
+/// uses for "you are outside this session's process tree", so a client that has
+/// not been updated still renders a true explanation and no
+/// `PROTOCOL_VERSION` bump is needed -- and `BAD_REQUEST` for a token already
+/// bound elsewhere.
+///
+/// The two refusals get two messages rather than one. A token already bound
+/// elsewhere is not a claim on anyone's session, and logging it as one would
+/// put a false "held by another process tree" line, with no holder, in front
+/// of whoever is reading the log after the next incident.
+///
+/// The session identifier is debug-quoted, matching the request audit line:
+/// the sanitizer escapes control characters but keeps spaces and `=`, and a
+/// display-formatted field would let a crafted identifier forge further
+/// fields on the line.
+fn refused(
+    operation: &'static str,
+    session: &str,
+    caller: Option<i32>,
+    refusal: Refusal,
+) -> Decision {
+    match refusal {
+        Refusal::TokenBoundElsewhere => tracing::warn!(
+            operation,
+            untrusted_registered_session = ?sanitize_audit_value(session),
+            caller_pid = ?caller,
+            "refused a registration whose token is already bound to another session"
+        ),
+        Refusal::ForeignClaim { holder_pid } => tracing::warn!(
+            operation,
+            untrusted_registered_session = ?sanitize_audit_value(session),
+            caller_pid = ?caller,
+            holder_pid = ?holder_pid,
+            "refused a claim on a session the caller was not shown to belong to"
+        ),
+    }
+    Decision::new(Outcome::Failed(refusal.code(), refusal.message()))
+}
 
 pub(super) fn register(
     shared: &Shared,
@@ -14,6 +60,7 @@ pub(super) fn register(
 ) -> Decision {
     match SessionToken::parse_hex(token_hex) {
         Ok(token) => {
+            let caller_pid = root.pid();
             let (mutex, condvar) = &**shared;
             let mut state = lock_state(mutex);
             let registered = state.registry.register(crate::grants::Registration {
@@ -33,24 +80,35 @@ pub(super) fn register(
                         request_id: None,
                     }
                 }
-                Err(error) => Decision::new(Outcome::Failed(
-                    error,
-                    "token is already bound to another session",
-                )),
+                Err(refusal) => {
+                    drop(state);
+                    refused("REGISTER", session, caller_pid, refusal)
+                }
             }
         }
         Err(error) => Decision::new(Outcome::Failed(error, "invalid session token")),
     }
 }
 
-pub(super) fn unregister(shared: &Shared, session: &str) -> Decision {
+pub(super) fn unregister(
+    shared: &Shared,
+    session: &str,
+    caller: &crate::peer::PeerIdentity,
+) -> Decision {
     let (mutex, condvar) = &**shared;
     let mut state = lock_state(mutex);
-    let tokens = state.registry.unregister(session);
-    state.grants.revoke_tokens(&tokens);
-    drop(state);
-    condvar.notify_all();
-    Decision::new(Outcome::Ok)
+    match state.registry.unregister(session, caller) {
+        Ok(tokens) => {
+            state.grants.revoke_tokens(&tokens);
+            drop(state);
+            condvar.notify_all();
+            Decision::new(Outcome::Ok)
+        }
+        Err(refusal) => {
+            drop(state);
+            refused("UNREGISTER", session, caller.pid(), refusal)
+        }
+    }
 }
 
 pub(super) fn grants(shared: &Shared) -> Decision {

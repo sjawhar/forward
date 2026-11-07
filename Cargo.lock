@@ -979,6 +979,7 @@ dependencies = [
  "clap_complete",
  "containment",
  "hygiene",
+ "libc",
  "nix",
  "proptest",
  "proto",

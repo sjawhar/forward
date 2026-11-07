@@ -81,6 +81,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 |---|---|
 | Change how a request is authorized | `Registry::resolve`, `src/grants.rs:188`; `src/server/approval.rs:29` |
 | Change ancestry / peer identity | `src/peer.rs:46` (`from_stream`), `:97` (`descends_from`) |
+| Change who may claim or release a session identifier | `claim_allowed`, `Registry::register`, `Registry::unregister`, `src/grants/registry.rs`; the refusal is `refused`, `src/server/dispatch/control.rs` |
 | Change which peers may connect at all | `assert_owner_only`, `src/server/listener.rs:59`; `uid_is_authorized`, `:38`; the rationale is `docs/design.md` "Requests from other-UID peers" |
 | Add or change a protocol op | `src/proto.rs:97` (requests), `src/proto/response.rs` |
 | Change source-root configuration | `Sources::config_path`, `src/config.rs:54`; `Sources::load`, `src/config.rs:70` |
@@ -133,8 +134,14 @@ of them is a bug even if tests pass:
    unless the caller descends from the pid that registered that session, taken
    from the kernel via `SO_PEERPIDFD` at `REGISTER` — never from the wire. A
    failed ancestry check must never degrade to a tty scope; a caller can
-   allocate a pty. This contains callers outside the session tree; anything the
-   agent itself runs is inside it, and that residual is accepted.
+   allocate a pty. The same rule governs the registry itself: once a live
+   process holds a session, only it or one of its descendants may bind a
+   different token to that session identifier or `UNREGISTER` it
+   (`Registry::register` and `Registry::unregister`, `src/grants/registry.rs`).
+   Without that, any same-uid process could name a live session and displace
+   it, leaving the victim answering `UNKNOWN_TOKEN` with no error of its own —
+   dispatch://INFRA-1644. This contains callers outside the session tree;
+   anything the agent itself runs is inside it, and that residual is accepted.
 
 ## Development
 

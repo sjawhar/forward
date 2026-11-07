@@ -12,7 +12,7 @@
 
 use std::os::unix::net::UnixStream;
 
-pub use containment::pinned::PinnedPeer as PeerIdentity;
+pub use containment::pinned::{Liveness, PinnedPeer as PeerIdentity};
 
 use crate::proto::ErrCode;
 
@@ -42,4 +42,95 @@ pub(crate) fn current_for_test() -> PeerIdentity {
         identity
     });
     SHARED.clone()
+}
+
+/// A real child process pinned the way the daemon pins a connection's peer,
+/// for tests that need an identity this process does *not* descend from.
+///
+/// The registry's displacement rule can only be exercised against two
+/// genuinely different process trees, and every other identity a test can
+/// reach is this process itself. `cat` with a piped stdin is the child: it
+/// stays alive until its stdin is closed, so a test chooses when the holder
+/// dies.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct ChildPeer {
+    identity: PeerIdentity,
+    child: std::process::Child,
+}
+
+#[cfg(test)]
+impl ChildPeer {
+    /// Spawn the child and pin it.
+    pub(crate) fn spawn() -> Self {
+        let child = std::process::Command::new("cat")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn a child to pin");
+        let identity = PeerIdentity::from_owned_fd(pidfd_open(child.id()));
+        Self { identity, child }
+    }
+
+    /// The pinned identity, as the daemon would hold it for a registration.
+    pub(crate) const fn identity(&self) -> &PeerIdentity {
+        &self.identity
+    }
+
+    /// Let the child exit and reap it, so the pinned descriptor reports no pid.
+    pub(crate) fn exit(&mut self) {
+        drop(self.child.stdin.take());
+        self.child.wait().expect("reap the pinned child");
+    }
+
+    /// Let the child exit without reaping it, leaving a zombie.
+    ///
+    /// A zombie still has a pid, so the kernel has not yet said the process is
+    /// gone. Tests use this to pin down which of the two the registry treats
+    /// as a released session.
+    pub(crate) fn zombify(&mut self) {
+        drop(self.child.stdin.take());
+        let pid = self.identity.pid().expect("the child is pinned and alive");
+        for _ in 0..1000 {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let state = stat
+                .rsplit(')')
+                .next()
+                .and_then(|tail| tail.split_whitespace().next());
+            if state == Some("Z") {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        panic!("the child never became a zombie");
+    }
+}
+
+#[cfg(test)]
+impl Drop for ChildPeer {
+    fn drop(&mut self) {
+        // `wait` after a successful `exit` is the harmless no-child case.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// Open a pidfd for `pid`, the only way to pin a process that did not connect.
+///
+/// `nix` 0.31 wraps `SO_PEERPIDFD` but no `pidfd_open`, and production code
+/// never needs one: it pins the peer of a connection it already accepted.
+#[cfg(test)]
+fn pidfd_open(pid: u32) -> std::os::fd::OwnedFd {
+    use std::os::fd::FromRawFd;
+
+    let pid = libc::pid_t::try_from(pid).expect("pid fits in pid_t");
+    // SAFETY: `pidfd_open` reads only its two scalar arguments and returns a
+    // new descriptor or -1; it cannot touch this process's memory.
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    let raw = std::os::fd::RawFd::try_from(raw).expect("pidfd_open returned a descriptor");
+    assert!(raw >= 0, "pidfd_open failed for pid {pid}");
+    // SAFETY: `pidfd_open` just returned `raw` to this process and nothing else
+    // holds it, so the new `OwnedFd` is its sole owner.
+    unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) }
 }
