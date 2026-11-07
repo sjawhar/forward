@@ -233,7 +233,7 @@ fn the_anchor_falls_back_to_the_callers_immediate_parent() {
 mod pinned_peer {
     use std::os::unix::net::{UnixListener, UnixStream};
 
-    use crate::pinned::{PinnedPeer, descends_from_pid, parent_of};
+    use crate::pinned::{Liveness, PinnedPeer, descends_from_pid, parent_of};
     use crate::status_field;
 
     /// This process's pid as the signed value `/proc` uses.
@@ -259,8 +259,33 @@ mod pinned_peer {
         let (peer, _directory) = connected_pair();
 
         // Both ends are this test process, so the pinned pid must be our own.
+        assert_eq!(peer.liveness(), Liveness::Running(own_pid()));
         assert_eq!(peer.pid(), Some(own_pid()));
         assert!(peer.is_alive());
+    }
+
+    #[test]
+    #[cfg_attr(miri, ignore)]
+    fn an_identity_that_cannot_be_read_is_unknown_rather_than_exited() {
+        // An identity the kernel will not describe is not an identity that
+        // has died, and that difference decides whether a live session's
+        // registration may be taken away from it.
+        let (peer, _directory) = connected_pair();
+        assert_eq!(peer.liveness(), Liveness::Running(own_pid()));
+
+        // A descriptor that is not a pidfd carries no `Pid:` field, the same
+        // answer an `fdinfo` read that failed outright gives: nothing is
+        // known. `pid` goes quiet, which is why `pid().is_none()` must never
+        // be read as death.
+        let non_pidfd = PinnedPeer::from_owned_fd(
+            std::fs::File::open("/dev/null")
+                .expect("open /dev/null")
+                .into(),
+        );
+
+        assert_eq!(non_pidfd.liveness(), Liveness::Unknown);
+        assert_eq!(non_pidfd.pid(), None);
+        assert!(!non_pidfd.is_alive());
     }
 
     #[test]

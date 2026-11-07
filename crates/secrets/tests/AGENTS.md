@@ -27,6 +27,8 @@ a `mod.rs` would change how every existing file resolves.
 | `client/sources.rs` | source inspection output and malformed-file reporting |
 | `hardening.rs` | `mlockall` / dumpability / `RLIMIT_CORE`, spawning the real binary |
 | `e2e_client.rs` | drives `e2e-client-harness.sh` with real sops; exit 0 or 77 |
+| `e2e_sysbox_peer.rs` | drives `e2e-sysbox-peer.sh`: a container peer across the uid/pid namespace boundary; exit 0 or 77 |
+| `e2e_register_displacement.rs` | drives `e2e-register-displacement.sh`: an outsider claiming a live session's identifier; exit 0 or 77 |
 
 ## No real hardware
 
@@ -52,10 +54,20 @@ isolation.
 ## Ancestry affects test shape
 
 The daemon grants only to callers descended from the process that registered the
-session. A test that registers from a short-lived helper and then requests from
-a sibling gets `FOREIGN_CALLER` — correctly. `e2e-client-harness.sh` therefore
-`exec`s its continuation from the registering process, mirroring how the plugin
-registers from the long-lived OpenCode server.
+session, and holds `REGISTER` and `UNREGISTER` to the same rule once a live
+process holds the session. A test that registers from a short-lived helper and
+then requests from a sibling gets `FOREIGN_CALLER` — correctly.
+`e2e-client-harness.sh` therefore `exec`s its continuation from the registering
+process, mirroring how the plugin registers from the long-lived OpenCode server.
+
+What the `REGISTER`/`UNREGISTER` rule needs is a caller that does not descend
+from the registered holder, which is a direction rather than a second tree. An
+in-process harness registers itself and everything it spawns is beneath it, so
+a helper it starts is inside the session, not outside it. The unit tests
+invert that: `src/peer.rs`'s `ChildPeer` registers a *child* as the holder and
+calls from this process, which the child does not contain.
+`e2e-register-displacement.sh` arranges the deployed shape instead — the
+registrant and the outsider are siblings, both children of the harness.
 
 ## Miri
 

@@ -12,10 +12,12 @@ import {
 } from "fs";
 import { join } from "path";
 import secretsdPlugin, {
+  BrokerClient,
   DAEMON_ERROR_CODES,
   PROTOCOL_VERSION,
   REQUEST_TIMEOUT_MS,
   createSecretsdPlugin,
+  guidance,
   issueTokenFile,
   resolveRuntimeDir,
   resolveSocketPath,
@@ -252,6 +254,97 @@ test("shell.env registers a new session once before injecting its token-file pat
   broker.stop();
 });
 
+const HELD_ELSEWHERE = "this session is registered to a live process outside the caller's process tree";
+
+/// A broker that completes the handshake and refuses every other frame as the
+/// daemon refuses a claim on a session another live process tree holds.
+function refusingBroker(socketPath: string) {
+  const received: string[] = [];
+  let buffered = "";
+  const server = Bun.listen({
+    unix: socketPath,
+    socket: {
+      data(socket, data) {
+        buffered += new TextDecoder().decode(data);
+        for (;;) {
+          const newline = buffered.indexOf("\n");
+          if (newline < 0) {
+            return;
+          }
+          const line = buffered.slice(0, newline);
+          buffered = buffered.slice(newline + 1);
+          received.push(line);
+          socket.write(line === HELLO ? HANDSHAKE : `ERR\tFOREIGN_CALLER\t${HELD_ELSEWHERE}\n`);
+        }
+      },
+    },
+  });
+  return { received, stop: () => server.stop(true) };
+}
+
+async function rejectionMessage(work: Promise<void>): Promise<string> {
+  try {
+    await work;
+  } catch (error) {
+    return error instanceof Error ? error.message : String(error);
+  }
+  return "no rejection";
+}
+
+test("a refused REGISTER or UNREGISTER carries the daemon's reason, not a bare rejection", async () => {
+  // A displaced session used to learn nothing at all (dispatch://INFRA-1644),
+  // and "broker registration rejected" with no reason is barely better: the
+  // one fact worth having is that another live process holds this session id.
+  const runtimeDir = root();
+  const socketPath = join(runtimeDir, "broker.sock");
+  const server = refusingBroker(socketPath);
+  const broker = new BrokerClient(socketPath);
+  const state = issueTokenFile(runtimeDir, "session-held");
+  const expected = `${guidance({ kind: "daemon-error", code: "FOREIGN_CALLER" })} (secretsd: ${HELD_ELSEWHERE})`;
+
+  const refusedRegister = await rejectionMessage(broker.register(state, "session-held", 1));
+  const refusedUnregister = await rejectionMessage(broker.unregister("session-held"));
+
+  expect(refusedRegister).toBe(`broker registration rejected for session session-held: ${expected}`);
+  expect(refusedUnregister).toBe(`broker unregistration rejected for session session-held: ${expected}`);
+  expect(refusedRegister).toContain("another live process already holds that session id");
+  expect(refusedRegister.includes(state.token)).toBe(false);
+  server.stop();
+});
+
+test("a refused REGISTER reaches the serve log once and the agent as its daemon code", async () => {
+  // `shell.env` swallows every failure so shells keep starting, and the tool
+  // used to map any registration failure to "unrecognized protocol response".
+  // Either way the refusal's reason never reached anyone. The serve log is
+  // where the human looks, and the tool result is all the agent sees.
+  const runtimeDir = root();
+  const socketPath = join(runtimeDir, "broker.sock");
+  const server = refusingBroker(socketPath);
+  const plugin = createSecretsdPlugin({ runtimeDir, socketPath, pid: 55 });
+  const output: { env: Record<string, string> } = { env: {} };
+
+  const { result: raw, lines } = await capturingStderr(async () => {
+    await plugin.hooks["shell.env"]({ sessionID: "session-held" }, output);
+    await plugin.hooks["shell.env"]({ sessionID: "session-held" }, { env: {} });
+    return plugin.hooks.tool.secrets_request.execute({ key: "DEEL_API_KEY" }, toolContext("session-held"));
+  });
+  const result = toolOutput(raw);
+  const expected = guidance({ kind: "daemon-error", code: "FOREIGN_CALLER" });
+  const logged = `${expected} (secretsd: ${HELD_ELSEWHERE})`;
+
+  expect(output.env.SECRETSD_SESSION_TOKEN_FILE).toBeUndefined();
+  expect(lines).toEqual([`secretsd: broker registration rejected for session session-held: ${logged}`]);
+  expect(result).toBe(expected);
+  expect(/[0-9a-f]{64}/.test(result)).toBe(false);
+  expect(lines.some((line) => /[0-9a-f]{64}/.test(line))).toBe(false);
+
+  // A refused UNREGISTER at shutdown still removes this session's token file.
+  await plugin.hooks.dispose();
+  expect(server.received.at(-1)).toBe("UNREGISTER\tsession=session-held");
+  expect(existsSync(join(runtimeDir, "secretsd", "session-held.token"))).toBe(false);
+  server.stop();
+});
+
 test("dispose unregisters every live session and removes its token file", async () => {
   const runtimeDir = root();
   const socketPath = join(runtimeDir, "broker.sock");
@@ -402,7 +495,7 @@ test("maps every daemon ErrCode to distinct actionable guidance", async () => {
     ],
     [
       "ERR\tFOREIGN_CALLER\tforeign caller",
-      "error: secretsd refused this request because the session token was presented from outside that session's process tree; run the request from the session that owns the token.",
+      "error: secretsd refused this because the caller is outside the process tree of the session it named; run the request from the session that owns the token. On a REGISTER or UNREGISTER it means another live process already holds that session id, so claiming it would take its credentials away: use a session id of your own.",
     ],
     [
       "ERR\tNOT_HUMAN_KEY\tnot human",

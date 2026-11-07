@@ -111,7 +111,7 @@ pub(super) fn dispatch(
             session,
             pid: _wire_pid,
         } => register(shared, &token_hex, &session, caller.clone()),
-        Request::Unregister { session } => unregister(shared, &session),
+        Request::Unregister { session } => unregister(shared, &session, caller),
         Request::Get { key, .. } | Request::RequestGrant { key, .. }
             if key.starts_with(crate::capability::CAPABILITY_KEY_PREFIX) =>
         {

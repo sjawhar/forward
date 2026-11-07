@@ -1,5 +1,80 @@
 use super::{Scope, SessionToken};
+use crate::peer::{Liveness, PeerIdentity};
 use crate::proto::ErrCode;
+
+/// Why the registry refused to change a session's registration.
+///
+/// Carries the holder's pid so the refusal can name both sides: the incident
+/// that motivated the check (2026-11-07, <dispatch://INFRA-1644>) was silent on
+/// every surface, and the displaced session could not tell that anything had
+/// happened to it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Refusal {
+    /// The presented token is already bound to a different session.
+    TokenBoundElsewhere,
+    /// The caller was not shown to be the process that registered this
+    /// session or one of its descendants, and the holder was not shown to be
+    /// gone, so the caller may neither displace nor remove the registration.
+    ///
+    /// "Not shown to be" rather than "is not": the check fails closed, so an
+    /// identity the daemon could not read lands here too. Everything this
+    /// refusal says about itself has to stay true in that case, which is why
+    /// it does not assert that some other live process holds the session.
+    ForeignClaim {
+        /// The holder's pid as the kernel reports it through the pinned
+        /// descriptor, or `None` when the kernel will not report one.
+        holder_pid: Option<i32>,
+    },
+}
+
+impl Refusal {
+    /// The wire code this refusal is reported as.
+    #[must_use]
+    pub const fn code(self) -> ErrCode {
+        match self {
+            Self::TokenBoundElsewhere => ErrCode::BadRequest,
+            Self::ForeignClaim { .. } => ErrCode::ForeignCaller,
+        }
+    }
+
+    /// The message sent to the caller with the refusal.
+    ///
+    /// Each one names a next step. The incident this check exists for was
+    /// silent, and a refusal a caller cannot act on is the next worst thing.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::TokenBoundElsewhere => {
+                "token is already bound to another session; give this session a token of its own"
+            }
+            Self::ForeignClaim { .. } => {
+                "the caller was not shown to be this session's registered process or one of its descendants; use a session identifier of your own, or send this from that process or one of its descendants"
+            }
+        }
+    }
+}
+
+/// Whether `caller` may displace or remove the registration `holder` made.
+///
+/// The session identifier on the wire is untrusted, so possession of it proves
+/// nothing; only the caller's position in the holder's process tree does. A
+/// holder the kernel reports as *gone* is the one exception: it has no
+/// descendants, so nobody could ever satisfy the check again, and its
+/// registration already refuses every request because `resolve` needs a live
+/// root to walk to. Letting the next process claim the identifier is therefore
+/// the ordinary restart path -- a session killed outright never sends
+/// `UNREGISTER` -- and costs nothing that was still reachable.
+///
+/// That exception asks for [`Liveness::Exited`], the kernel's own statement
+/// that the process is gone. `PinnedPeer::pid` answers `None` for three
+/// different things -- reaped, unnumbered in this namespace, and not
+/// readable -- so releasing on `pid().is_none()` would let a daemon out of
+/// descriptors treat every live holder as gone and hand its session to
+/// whoever asked next. A read that did not happen is not evidence.
+fn claim_allowed(holder: &PeerIdentity, caller: &PeerIdentity) -> bool {
+    holder.liveness() == Liveness::Exited || caller.descends_from(holder)
+}
 
 /// A registered harness session.
 #[derive(Debug, Clone)]
@@ -51,10 +126,20 @@ impl Registry {
     /// keeps `sessions` in insertion order, so a re-registration cannot move an
     /// entry behind a colliding one and change which root `resolve` finds.
     ///
+    /// Presenting a *different* token for a session a live process already
+    /// holds is refused unless the caller is that process or one of its
+    /// descendants. The identifier on the wire is untrusted, so without this
+    /// any process sharing the uid could name a live session, displace its
+    /// token, and leave it answering `UNKNOWN_TOKEN` to every later request
+    /// with no error of its own -- which is what a session-copying script did
+    /// to 59 live sessions on 2026-11-07 (<dispatch://INFRA-1644>). The caller's
+    /// identity is the one the kernel pinned for this connection, never the pid
+    /// on the wire.
+    ///
     /// A token already bound to a *different* session is refused: a token
     /// identifies exactly one session, and two bindings would make the lookup
     /// in `resolve` order-dependent.
-    pub fn register(&mut self, registration: Registration) -> Result<Vec<SessionToken>, ErrCode> {
+    pub fn register(&mut self, registration: Registration) -> Result<Vec<SessionToken>, Refusal> {
         if self
             .sessions
             .iter()
@@ -65,8 +150,18 @@ impl Registry {
             }) {
                 Ok(Vec::new())
             } else {
-                Err(ErrCode::BadRequest)
+                Err(Refusal::TokenBoundElsewhere)
             };
+        }
+        if let Some(holder) = self
+            .sessions
+            .iter()
+            .find(|existing| existing.session == registration.session)
+            && !claim_allowed(&holder.root, &registration.root)
+        {
+            return Err(Refusal::ForeignClaim {
+                holder_pid: holder.root.pid(),
+            });
         }
         let displaced = self
             .sessions
@@ -81,7 +176,25 @@ impl Registry {
     }
 
     /// Forget a session, returning the tokens whose grants must be revoked.
-    pub fn unregister(&mut self, session: &str) -> Vec<SessionToken> {
+    ///
+    /// Held to the same rule as `register`: a session a live process holds is
+    /// removed only by that process or one of its descendants. `UNREGISTER`
+    /// names a session and carries no token, so without the check any caller
+    /// could end any session's scope by naming it. Removing a session nobody
+    /// holds stays a success, so a harness that shuts down after the daemon
+    /// restarted is not made to handle an error for work already done.
+    pub fn unregister(
+        &mut self,
+        session: &str,
+        caller: &PeerIdentity,
+    ) -> Result<Vec<SessionToken>, Refusal> {
+        if let Some(holder) = self.sessions.iter().find(|entry| entry.session == session)
+            && !claim_allowed(&holder.root, caller)
+        {
+            return Err(Refusal::ForeignClaim {
+                holder_pid: holder.root.pid(),
+            });
+        }
         let revoked: Vec<SessionToken> = self
             .sessions
             .iter()
@@ -89,7 +202,7 @@ impl Registry {
             .map(|entry| entry.token)
             .collect();
         self.sessions.retain(|entry| entry.session != session);
-        revoked
+        Ok(revoked)
     }
 
     /// Find the untrusted registration associated with a verified token.

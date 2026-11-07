@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
 use super::*;
+use crate::peer::ChildPeer;
 use crate::proto::ErrCode;
 use crate::secret::{SecretBytes, SecretName};
 use crate::store::{FileIdentity, FileTimestamp};

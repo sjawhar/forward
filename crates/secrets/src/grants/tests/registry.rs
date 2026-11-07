@@ -102,7 +102,9 @@ fn request_without_token_or_tty_has_no_scope() {
 #[cfg_attr(miri, ignore)]
 fn unregister_returns_tokens_to_revoke() {
     let mut registry = registered();
-    let revoked = registry.unregister("ses_a");
+    let revoked = registry
+        .unregister("ses_a", &crate::peer::current_for_test())
+        .unwrap();
     assert_eq!(revoked, vec![token(0xaa)]);
     assert_eq!(
         registry

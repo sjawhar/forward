@@ -242,6 +242,59 @@ A grant is `(session_token, key)`, held in broker memory.
   `FOREIGN_CALLER` unless it descends from that pinned root. Re-registering a
   live session therefore cannot replace its root, or a caller that read the
   token file could inherit its grants without a touch.
+- `REGISTER` and `UNREGISTER` are held to that same ancestry check, not just
+  the requests that follow them. The session identifier on the wire is
+  untrusted, so it proves nothing on its own: once a live process holds a
+  session, only that process or one of its descendants may bind a different
+  token to the identifier or remove it. Ancestry rather than a registration
+  secret handed to the first registrant, because the shapes such a secret can
+  take are each worse here: written to the runtime directory it is another
+  0600 file every same-uid process can read, exactly like the token, so the
+  capability this check exists to withdraw would be restored; inherited
+  through the environment it is readable through `/proc/<pid>/environ`, the
+  same; and kept only in the registrant's own memory it bars the descendants
+  that legitimately re-register. It would also need a new wire field and a
+  `PROTOCOL_VERSION` bump. Ancestry needs no new credential and is already
+  the rule governing every token-bearing session request. The edge cases:
+  - **The holder is gone.** Once the kernel reports the pinned process reaped
+    (`Pid: -1`), nothing can descend from it and `resolve` already refuses
+    every caller for want of a live root, so the identifier is free for the
+    next process to claim — the ordinary restart, since a session killed
+    outright never sends `UNREGISTER`. "Gone" means exactly that report: an
+    exited but unreaped holder is still a pid, and so is a holder whose
+    descriptor the daemon merely failed to read, and neither releases the
+    session (`PinnedPeer::liveness`). A read that did not happen is not
+    evidence of death, and treating it as such would have let a daemon out of
+    descriptors hand away every live session.
+    Reclaiming means presenting a *new* token. Re-presenting the dead
+    session's existing token stays the idempotent no-op it has always been,
+    deliberately: adopting the dead root would hand that session's surviving
+    grants to whoever read its token file, with no touch. A new token displaces
+    the registration and revokes those grants first.
+  - **A recycled pid.** The daemon never compares a number it remembered. Both
+    ends are pidfds it holds, so each read answers for the exact process that
+    registered or connected, and a reaped holder reports `-1` rather than
+    whichever process inherited its number. The residual is the window inside
+    the `/proc` parent walk, which reads unpinned intermediate pids: that is
+    the same residual every token-bearing request's ancestry check already
+    carries, and it is not widened here.
+  - **A caller in another PID namespace.** A sysbox container's pids are host
+    pids and the daemon reads them in its own namespace, so the walk crosses
+    the boundary unchanged — the same property `tests/e2e-sysbox-peer.sh`
+    already proves for requests. A box therefore re-registers its own session
+    freely, and a second box cannot claim it. When a box is restarted by a
+    supervisor outside the old box's tree, the old registrant is gone, so the
+    reaped-holder rule covers it. A holder with no number in the daemon's
+    namespace (`Pid: 0`) is not treated as dead either.
+
+  Refusals are reported as `FOREIGN_CALLER`, with a message naming the next
+  step, and logged with the session identifier and the pids the kernel will
+  still report for the caller and the holder. Before this check, a copy of a
+  live session that kept the session's own id took it silently: the displaced
+  session kept believing it was registered while every later request answered
+  `UNKNOWN_TOKEN`, which is how 59 of 153 live sessions lost their credentials
+  on 2026-11-07 (dispatch://INFRA-1644).
+
 - The token-file path is inherited by everything the session spawns (env), so
   session-owned jobs keep working as long as they remain inside the session's
   process tree. A job that escapes it (reparented after `setsid`, for example)
