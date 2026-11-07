@@ -5,12 +5,14 @@
 
 use crate::store::FileIdentity;
 
+mod refusal;
 mod registry;
 mod scope;
 mod table;
 mod token;
 
-pub use registry::{Refusal, Registration, Registry};
+pub use refusal::Refusal;
+pub use registry::{Registration, Registry};
 pub use scope::{Scope, ScopeKind};
 pub use table::GrantTable;
 pub use token::SessionToken;

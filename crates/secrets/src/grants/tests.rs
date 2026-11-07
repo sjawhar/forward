@@ -41,6 +41,26 @@ fn registered() -> Registry {
     registry
 }
 
+/// Register `session` as a process this test does not descend from.
+///
+/// The returned child is the holder: it stays alive until it is dropped or
+/// told to exit, so the registry sees a live root outside the caller's tree.
+fn held_by_a_stranger(registry: &mut Registry, session: &str, held: SessionToken) -> ChildPeer {
+    let holder = ChildPeer::spawn();
+    registry
+        .register(Registration {
+            token: held,
+            session: session.to_owned(),
+            root: holder.identity().clone(),
+        })
+        .unwrap();
+    holder
+}
+
+#[path = "tests/claim.rs"]
+mod claim;
+#[path = "tests/holder_lifecycle.rs"]
+mod holder_lifecycle;
 #[path = "tests/lookup.rs"]
 mod lookup;
 #[path = "tests/registration.rs"]
