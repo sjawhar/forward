@@ -13,6 +13,8 @@ pub(super) struct PendingRequest {
     pub(super) key: SecretName,
     pub(super) state: RequestState,
     pub(super) generation: u64,
+    /// Attempts that completed before the request's current queue position.
+    pub(super) attempts: u32,
     pub(super) created: Instant,
     /// Caller-requested lifetime for the grant this request may install.
     /// `None` defers to the daemon's own default backstop.
@@ -92,6 +94,7 @@ impl Queue {
             key,
             state: RequestState::Pending,
             generation: 0,
+            attempts: 0,
             created: now,
             requested_ttl,
         });
@@ -138,13 +141,46 @@ impl Queue {
         Some(generation)
     }
 
-    /// Whether a completing decrypt may still install its grant.
-    pub fn complete(&mut self, id: RequestId, generation: u64, now: Instant) -> bool {
-        let still_current = self.requests.iter().any(|request| {
+    /// The one-based number of a request's decrypt currently in flight.
+    pub fn attempt_number(&self, id: RequestId) -> Option<u32> {
+        self.requests
+            .iter()
+            .find(|request| request.id == id && request.state == RequestState::Decrypting)
+            .map(|request| request.attempts.saturating_add(1))
+    }
+
+    /// Whether this specific decrypt generation remains active.
+    pub fn is_decrypting(&self, id: RequestId, generation: u64) -> bool {
+        self.requests.iter().any(|request| {
             request.id == id
                 && request.generation == generation
                 && request.state == RequestState::Decrypting
-        });
+        })
+    }
+
+    /// Move a failed decrypt to the queue tail after starting the cooldown.
+    pub fn retry(&mut self, id: RequestId, now: Instant) -> bool {
+        let Some(index) = self.requests.iter().position(|request| request.id == id) else {
+            return false;
+        };
+        if !self
+            .requests
+            .get(index)
+            .is_some_and(|request| request.state == RequestState::Decrypting)
+        {
+            return false;
+        }
+        let mut request = self.requests.remove(index);
+        request.state = RequestState::Pending;
+        request.attempts = request.attempts.saturating_add(1);
+        self.requests.push(request);
+        self.finish(id, now);
+        true
+    }
+
+    /// Whether a completing decrypt may still install its grant.
+    pub fn complete(&mut self, id: RequestId, generation: u64, now: Instant) -> bool {
+        let still_current = self.is_decrypting(id, generation);
         if still_current
             && let Some(request) = self.requests.iter_mut().find(|request| request.id == id)
         {
@@ -162,11 +198,22 @@ impl Queue {
         self.last_finished = Some(now);
     }
 
-    /// Mark a decrypt as failed.
+    /// Mark a decrypt as failed without overriding a final request state.
     pub fn fail(&mut self, id: RequestId, now: Instant) {
-        if let Some(request) = self.requests.iter_mut().find(|request| request.id == id) {
-            request.state = RequestState::Failed;
+        let failed = self
+            .requests
+            .iter_mut()
+            .find(|request| request.id == id)
+            .is_some_and(|request| {
+                if request.state == RequestState::Decrypting {
+                    request.state = RequestState::Failed;
+                    true
+                } else {
+                    false
+                }
+            });
+        if failed {
+            self.finish(id, now);
         }
-        self.finish(id, now);
     }
 }

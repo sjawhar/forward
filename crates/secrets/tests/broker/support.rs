@@ -5,7 +5,44 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Duration;
 
 use secrets::store::HumanSource;
-use secrets::Config;
+use secrets::{Config, TouchPolicy};
+
+struct HarnessSettings {
+    cooldown: Duration,
+    request_ttl: Duration,
+    touch_policy: TouchPolicy,
+    pcsc_socket: Option<PathBuf>,
+    yubikey_probe_argv: Vec<String>,
+    always_stanza_keys: Vec<&'static str>,
+    fail_stderr: Option<&'static str>,
+    probe_always_fails: bool,
+    wait_for_marker: bool,
+}
+
+impl HarnessSettings {
+    const fn standard(wait_for_marker: bool) -> Self {
+        Self {
+            cooldown: Duration::from_secs(16),
+            request_ttl: Duration::from_secs(20),
+            touch_policy: TouchPolicy::Cached,
+            pcsc_socket: None,
+            yubikey_probe_argv: Vec::new(),
+            always_stanza_keys: Vec::new(),
+            fail_stderr: None,
+            probe_always_fails: false,
+            wait_for_marker,
+        }
+    }
+
+    fn fast() -> Self {
+        Self {
+            cooldown: Duration::from_secs(1),
+            request_ttl: Duration::from_secs(8),
+            touch_policy: TouchPolicy::Always,
+            ..Self::standard(false)
+        }
+    }
+}
 
 struct Harness {
     _dir: tempfile::TempDir,
@@ -15,6 +52,7 @@ struct Harness {
     sops_args_log: PathBuf,
     hang_marker: PathBuf,
     wait_marker: PathBuf,
+    sops_attempt_marker: PathBuf,
     _fake_sops_env_lock: MutexGuard<'static, ()>,
 }
 
@@ -37,17 +75,29 @@ impl Harness {
     }
 
     fn start_with_waiting_sops(keys: &[&str]) -> Self {
-        Self::start_with_sources_and_sops_waiting(&[("test", keys)], "fake-sops-ok", true)
+        Self::start_with_sources_and_sops_settings(
+            &[("test", keys)],
+            "fake-sops-ok",
+            HarnessSettings::standard(true),
+        )
+    }
+
+    fn start_with_settings(keys: &[&str], sops: &str, settings: HarnessSettings) -> Self {
+        Self::start_with_sources_and_sops_settings(&[("test", keys)], sops, settings)
     }
 
     fn start_with_sources_and_sops(sources: &[(&str, &[&str])], sops: &str) -> Self {
-        Self::start_with_sources_and_sops_waiting(sources, sops, false)
+        Self::start_with_sources_and_sops_settings(sources, sops, HarnessSettings::standard(false))
     }
 
-    fn start_with_sources_and_sops_waiting(
+    #[allow(
+        clippy::multiple_unsafe_ops_per_block,
+        reason = "the process-wide fixture lock protects the coordinated test environment setup"
+    )]
+    fn start_with_sources_and_sops_settings(
         sources: &[(&str, &[&str])],
         sops: &str,
-        wait_for_marker: bool,
+        settings: HarnessSettings,
     ) -> Self {
         let fake_sops_env_lock = fake_sops_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -59,23 +109,32 @@ impl Harness {
         // SAFETY: nextest executes every integration test in a separate process. This
         // test owns the harness environment lock and has not started daemon threads yet.
         unsafe { std::env::set_var("FAKE_SOPS_ARGS_LOG", &sops_args_log) };
-        // The hanging fixture is killed by the test that uses it, so it can never
-        // clean up after itself. Keeping its marker inside this TempDir means the
-        // file dies with the harness on every path, including a panic, instead of
-        // accumulating one `/tmp` entry per run -- and it is no longer at a shared,
-        // predictable path another user could create first to steer the pid the
-        // test kills.
         let hang_marker = dir.path().join("fake-sops-hang.pid");
         let wait_marker = dir.path().join("fake-sops-release");
-        // SAFETY: nextest executes every integration test in a separate process. This
-        // test owns the harness environment lock and has not started daemon threads yet.
-        unsafe { std::env::set_var("FAKE_SOPS_HANG_MARKER", &hang_marker) };
-        if wait_for_marker {
-            // SAFETY: the harness environment lock serializes every fake-sops child.
-            unsafe { std::env::set_var("FAKE_SOPS_WAIT_MARKER", &wait_marker) };
-        } else {
-            // SAFETY: the harness environment lock serializes every fake-sops child.
-            unsafe { std::env::remove_var("FAKE_SOPS_WAIT_MARKER") };
+        let sops_attempt_marker = dir.path().join("fake-sops-fail-once.count");
+        let sops_failure_marker = dir.path().join("fake-sops-failure.done");
+        let probe_marker = dir.path().join("fake-yubikey-probe.count");
+        // SAFETY: this test owns the environment lock and starts the daemon after setup.
+        unsafe {
+            std::env::set_var("FAKE_SOPS_HANG_MARKER", &hang_marker);
+            std::env::set_var("FAKE_SOPS_FAIL_ONCE_MARKER", &sops_attempt_marker);
+            std::env::set_var("FAKE_SOPS_FAIL_DONE_MARKER", sops_failure_marker);
+            std::env::set_var("FAKE_YUBIKEY_PROBE_MARKER", probe_marker);
+            if let Some(stderr) = settings.fail_stderr {
+                std::env::set_var("FAKE_SOPS_FAIL_STDERR", stderr);
+            } else {
+                std::env::remove_var("FAKE_SOPS_FAIL_STDERR");
+            }
+            if settings.probe_always_fails {
+                std::env::set_var("FAKE_YUBIKEY_PROBE_ALWAYS_FAIL", "1");
+            } else {
+                std::env::remove_var("FAKE_YUBIKEY_PROBE_ALWAYS_FAIL");
+            }
+            if settings.wait_for_marker {
+                std::env::set_var("FAKE_SOPS_WAIT_MARKER", &wait_marker);
+            } else {
+                std::env::remove_var("FAKE_SOPS_WAIT_MARKER");
+            }
         }
         let mut human_sources = Vec::with_capacity(sources.len());
         let mut configured_sources = Vec::with_capacity(sources.len());
@@ -83,7 +142,12 @@ impl Harness {
             let human = dir.path().join(format!("{label}.human.d"));
             std::fs::create_dir(&human).unwrap();
             for key in *keys {
-                std::fs::write(human.join(format!("{key}.env")), b"ciphertext").unwrap();
+                let ciphertext: &[u8] = if settings.always_stanza_keys.contains(key) {
+                    b"always-stanza"
+                } else {
+                    b"ciphertext"
+                };
+                std::fs::write(human.join(format!("{key}.env")), ciphertext).unwrap();
             }
             human_sources.push(((*label).to_owned(), human.clone()));
             configured_sources.push(HumanSource {
@@ -97,14 +161,14 @@ impl Harness {
             socket_path: socket.clone(),
             human_sources: configured_sources,
             sops_bin: fixtures.join(sops),
-            pcsc_socket: None,
-            yubikey_probe_argv: Vec::new(),
+            pcsc_socket: settings.pcsc_socket,
+            yubikey_probe_argv: settings.yubikey_probe_argv,
             yubikey_probe_timeout: Duration::from_secs(2),
-            touch_policy: secrets::TouchPolicy::Cached,
+            touch_policy: settings.touch_policy,
             max_grant: Duration::from_hours(12),
             max_requested_grant: Duration::from_hours(24),
-            cooldown: Duration::from_secs(16),
-            request_ttl: Duration::from_secs(20),
+            cooldown: settings.cooldown,
+            request_ttl: settings.request_ttl,
             max_pending_per_scope: 2,
         };
         std::thread::spawn(move || secrets::run(config));
@@ -122,6 +186,7 @@ impl Harness {
             sops_args_log,
             hang_marker,
             wait_marker,
+            sops_attempt_marker,
             _fake_sops_env_lock: fake_sops_env_lock,
         }
     }
@@ -160,6 +225,10 @@ impl Harness {
 
     const fn wait_marker(&self) -> &PathBuf {
         &self.wait_marker
+    }
+
+    const fn sops_attempt_marker(&self) -> &PathBuf {
+        &self.sops_attempt_marker
     }
 
     fn sops_invocations(&self) -> usize {

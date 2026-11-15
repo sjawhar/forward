@@ -138,7 +138,8 @@ fn omp_scope_each_authorize_decrypts_and_mints_a_new_receipt() {
     if !python_available() {
         return;
     }
-    let harness = Harness::start(&["CAP_BROWSER"]);
+    let harness =
+        Harness::start_with_settings(&["CAP_BROWSER"], "fake-sops-ok", HarnessSettings::fast());
     let directory = tempfile::tempdir().unwrap();
     let omp = fake_omp(directory.path());
 
@@ -149,13 +150,18 @@ fn omp_scope_each_authorize_decrypts_and_mints_a_new_receipt() {
     );
     let replies = replies.lines().collect::<Vec<_>>();
 
-    assert_eq!(replies.len(), 2);
-    assert!(replies.iter().all(|reply| reply.starts_with("OK\tstatus=authorized")));
+    assert_eq!(replies.len(), 2, "{replies:?}");
+    assert!(
+        replies
+            .iter()
+            .all(|reply| reply.starts_with("OK\tstatus=authorized")),
+        "{replies:?}"
+    );
     let [first, second] = replies.as_slice() else {
-        panic!("expected two authorization responses");
+        panic!("expected two authorization responses: {replies:?}");
     };
-    assert_ne!(receipt_from(first), receipt_from(second));
-    assert_eq!(harness.sops_invocations(), 2);
+    assert_ne!(receipt_from(first), receipt_from(second), "{replies:?}");
+    assert_eq!(harness.sops_invocations(), 2, "{replies:?}");
 }
 
 #[test]
@@ -171,7 +177,7 @@ fn omp_scope_ended_omp_denies_after_the_decrypt() {
         .spawn()
         .unwrap();
     let mut output = child.stdout.take().unwrap();
-    for _ in 0..100 {
+    for _ in 0..1_000 {
         if harness.sops_invocations() == 1 {
             break;
         }

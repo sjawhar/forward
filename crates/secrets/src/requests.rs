@@ -9,3 +9,6 @@ pub use types::{Clock, QueueLimits, RequestId, RequestState, SystemClock};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod retry_tests;

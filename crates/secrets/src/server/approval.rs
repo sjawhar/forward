@@ -25,6 +25,15 @@ enum Approval {
     },
 }
 
+fn failure_for(state: &super::State, id: RequestId, fallback: ErrCode) -> ErrCode {
+    state
+        .failures
+        .iter()
+        .rev()
+        .find(|(failed_id, _)| *failed_id == id)
+        .map_or(fallback, |(_, error)| *error)
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "one state machine owns the full grant-or-refuse decision; splitting it would only rename the seams"
@@ -105,17 +114,13 @@ fn await_approval(
             }
             Some(RequestState::TimedOut) => {
                 break Approval::Incomplete {
-                    error: ErrCode::Timeout,
+                    error: failure_for(&state, id, ErrCode::Timeout),
                     request_id: id,
                 };
             }
             Some(RequestState::Failed) => {
                 break Approval::Incomplete {
-                    error: state
-                        .failures
-                        .iter()
-                        .find(|(failed_id, _)| *failed_id == id)
-                        .map_or(ErrCode::Internal, |(_, error)| *error),
+                    error: failure_for(&state, id, ErrCode::Internal),
                     request_id: id,
                 };
             }
@@ -125,7 +130,7 @@ fn await_approval(
                     state.kill_active(id);
                     condvar.notify_all();
                     break Approval::Incomplete {
-                        error: ErrCode::Timeout,
+                        error: failure_for(&state, id, ErrCode::Timeout),
                         request_id: id,
                     };
                 };

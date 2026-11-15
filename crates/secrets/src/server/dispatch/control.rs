@@ -142,8 +142,8 @@ pub(super) fn lock(shared: &Shared) -> Decision {
     state.capability_grants.clear();
     state.lock_epoch = state.lock_epoch.saturating_add(1);
     let subscribers = std::sync::Arc::clone(&state.subscribers);
+    state.queue.deny_attempted();
     if let Some(active) = state.active_decrypt.take() {
-        state.queue.deny(active.id);
         let _ = nix::sys::signal::killpg(
             nix::unistd::Pid::from_raw(active.process_group),
             nix::sys::signal::Signal::SIGKILL,

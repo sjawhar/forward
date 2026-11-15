@@ -4,7 +4,10 @@
     reason = "the task specification provides this integration harness verbatim"
 )]
 
-use super::{Harness, TOKEN_A, install_request_log_capture, request_log, token};
+use super::{
+    Harness, HarnessSettings, TOKEN_A, TOKEN_B, install_request_log_capture, request_log, send_to,
+    token,
+};
 
 fn receipt_from(header: &str) -> String {
     header
@@ -35,3 +38,4 @@ include!("capability/audit.rs");
 include!("capability/ceremony.rs");
 include!("capability/redeem.rs");
 include!("capability/omp_scope.rs");
+include!("capability/retry.rs");
