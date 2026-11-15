@@ -67,7 +67,7 @@ nearest_omp_ancestor() {
   for ((hop = 0; hop < 12; hop++)); do
     [[ "$pid" =~ ^[0-9]+$ ]] && ((pid > 1)) || return 1
     exe="$(readlink "/proc/$pid/exe")" || return 1
-    if [[ "${exe##*/}" == omp ]]; then
+    if [[ "${exe##*/}" == omp || "${exe##*/}" == 'omp (deleted)' ]]; then
       printf '%s\n' "$pid"
       return 0
     fi
@@ -495,6 +495,9 @@ def attach_feed():
             if time.monotonic() >= deadline:
                 raise
             time.sleep(0.05)
+    # The 1 s timeout bounds each connect attempt only. A grant can wait on the
+    # broker for a touch far longer, and the feed must stay open through it.
+    feed.settimeout(None)
     with feed:
         feed.sendall(b"FEED\n")
         reader = feed.makefile("rb")
