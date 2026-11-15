@@ -371,6 +371,8 @@ request → pending → decrypting → granted ──(session end | lock | its o
   denies a request waiting to retry after it has made an attempt. A retryable
   hardware failure keeps its original deadline, moves the request to the back
   of the queue, and starts the cooldown before another request can decrypt.
+  When the request's scope has ended by then (its session root, terminal or
+  omp process is gone), the failure denies the request instead.
   Concurrent waiters are coalesced **only** for the same `(token, key)`; one
   session's approval never creates another session's grant.
 - Revocation triggers: plugin session-end event (primary), `secrets lock`

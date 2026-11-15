@@ -21,18 +21,7 @@ pub(super) fn finish_attempt(
 }
 
 fn finish_success(state: &mut State, job: Job, decrypted: DecryptedHumanFile) {
-    let session_is_active = match &job.scope {
-        Scope::Session(token) => state
-            .registry
-            .registration(token)
-            // A session whose root process is gone cannot receive the value,
-            // so the approval is dropped rather than waiting for the backstop
-            // to expire it.
-            .is_some_and(|registration| registration.root.is_alive()),
-        Scope::Tty { tty, .. } => Path::new(tty).exists(),
-        Scope::Omp { pid, start } => OmpProcess::new(*pid, *start).is_running(),
-    };
-    if state.lock_epoch != job.lock_epoch || !session_is_active {
+    if state.lock_epoch != job.lock_epoch || !scope_is_active(state, &job.scope) {
         state.queue.deny(job.id);
     }
     let now = Instant::now();
@@ -62,6 +51,20 @@ fn finish_success(state: &mut State, job: Job, decrypted: DecryptedHumanFile) {
     }
 }
 
+fn scope_is_active(state: &State, scope: &Scope) -> bool {
+    match scope {
+        Scope::Session(token) => state
+            .registry
+            .registration(token)
+            // A session whose root process is gone cannot receive the value,
+            // so the approval is dropped rather than waiting for the backstop
+            // to expire it.
+            .is_some_and(|registration| registration.root.is_alive()),
+        Scope::Tty { tty, .. } => Path::new(tty).exists(),
+        Scope::Omp { pid, start } => OmpProcess::new(*pid, *start).is_running(),
+    }
+}
+
 fn finish_failure(state: &mut State, job: &Job, error: AttemptError) {
     replace_failure(state, job.id, error.code);
     let now = Instant::now();
@@ -69,9 +72,16 @@ fn finish_failure(state: &mut State, job: &Job, error: AttemptError) {
         && state.lock_epoch == job.lock_epoch
         && state.queue.is_decrypting(job.id, job.generation)
         && state.queue.deadline_not_passed(job.id, now);
-    if !retryable || !state.queue.retry(job.id, now) {
-        state.queue.fail(job.id, now);
+    if retryable {
+        if !scope_is_active(state, &job.scope) {
+            state.queue.deny(job.id);
+            return;
+        }
+        if state.queue.retry(job.id, now) {
+            return;
+        }
     }
+    state.queue.fail(job.id, now);
 }
 
 fn replace_failure(

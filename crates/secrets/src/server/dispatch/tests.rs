@@ -220,3 +220,5 @@ fn omp_scope_wrong_start_denies_after_one_successful_decrypt_without_a_receipt()
         1
     );
 }
+
+mod retry_omp_scope;
