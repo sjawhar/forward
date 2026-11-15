@@ -19,6 +19,9 @@ a `mod.rs` would change how every existing file resolves.
 |---|---|
 | `broker.rs` | socket activation, dispatch, audit output, protocol errors |
 | `broker/sources.rs` | source-root configuration, multi-source resolution, and ambiguity coverage |
+| `broker/capability.rs` | wiring for capability authorization tests |
+| `broker/capability/omp_scope.rs` | capability scopes resolved from the caller's nearest omp process |
+| `broker/capability/retry.rs` and `broker/capability/retry/{attempts,control,expiry}.rs` | retry attempts, final failures, `DENY`, `LOCK`, and expiry |
 | `client.rs` | CLI surface end to end against a fake broker |
 | `client/broker_transport.rs` | frame-level transport, scope frames, no-`GET` guarantees |
 | `client/edit.rs` | edit command flags, source selection, and local human-file paths |
@@ -38,6 +41,8 @@ Nothing here may need a YubiKey. Point the daemon at a fixture instead:
 - `…/fake-sops-fail` — non-zero, writes to stderr
 - `…/fake-sops-stdin-fail` — consumes stdin, returns it on stderr, and exits non-zero to test that client errors do not disclose piped values
 - `…/fake-sops-hang` — sleeps, for timeout and process-group kill
+- `…/fake-sops-fail-once` — fails its first call, then succeeds; `FAKE_SOPS_WAIT_MARKER` makes it wait for a test marker before either result
+- `…/fake-yubikey-probe-fail-once` — fails its first reachability probe, then succeeds
 
 Also set `SECRETSD_CONFIG` to a scratch source-root configuration and
 `SECRETSD_SOCKET` to a scratch path.

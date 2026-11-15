@@ -89,20 +89,25 @@ while the human is at the keyboard — never mid-flight into long unattended wor
 3. Call `secrets_request(KEY)` (or run `secrets get KEY`, which triggers the same approval
    flow) and wait for the grant before moving to the next key.
 
-The YubiKey gives a touch about 15 seconds once it starts blinking; a request nobody touches in
-that window ends as `TIMEOUT` (the daemon logs `yubikey-stanza-undecryptable` just before) — that
-is not a broker error, it is an unwatched request expiring. Starting a long unattended run and
-only then discovering a key needs a touch means the run dies waiting on a human who was never
-told to look. Front-load every request while attention is on you.
+The YubiKey opens a touch window of about 15 seconds once it starts blinking. A
+request nobody touches blinks again about every 31 seconds: a 15-second touch
+window followed by the 16-second cooldown. It repeats until the request time
+to live ends (90 seconds by default), then returns `TIMEOUT`. `TIMEOUT` means
+no attempt received a touch during the whole request lifetime. Starting a long
+unattended run and only then discovering a key needs a touch means the run dies
+waiting on a human who was never told to look. Front-load every request while
+attention is on you.
 
 ## One at a time
 
-Never fire multiple `secrets_request` (or `secrets get KEY`) calls in parallel. The daemon
-services one YubiKey decrypt at a time, and each key needs its own physical touch a human
-can attribute to a specific request. Parallel requests just stack blinks nobody can tell
-apart: they queue one at a time, any the human does not touch dies as `TIMEOUT` about 15
-seconds after its blink starts, and stacking more than three pending requests fails immediately with
-`TOO_MANY_PENDING`. Request, wait for the grant (or denial), then request the next.
+Never fire multiple `secrets_request` (or `secrets get KEY`) calls in parallel.
+The daemon services one YubiKey decrypt at a time, and each key needs its own
+physical touch a human can attribute to a specific request. Parallel requests
+just stack blinks nobody can tell apart: they queue one at a time, and an
+untouched request blinks again about every 31 seconds until its request time to
+live ends as `TIMEOUT`. Stacking more than three pending requests fails
+immediately with `TOO_MANY_PENDING`. Request, wait for the grant (or denial),
+then request the next.
 
 ## Subagents inherit the parent's grants — don't re-request
 
@@ -261,7 +266,8 @@ not state: several codes cover more than one fault.
 | `secretsd failed while decrypting` | read `journalctl --user -u secretsd` for the daemon's *classification* (`sops_failure=…`). sops' own output is never logged, since it can quote what it decrypted |
 | `secret 'X' not found` | the key may live in the Legion credential broker alone, which a process outside a registered omp session's tree (a detached tmux, a systemd unit) cannot reach; `secret-run` there says `no secrets-broker identity`. Rerun it from the session's own shell. If that notice repeats, the session itself has no identity: check its registration, the agent-secrets helper and the machine login. Still not found: ask the human to add it; never invent a value |
 | `the broker restarted` | run the command **once** more; the plugin re-registers between commands, so expect a touch. Twice: tell the human |
-| `TIMEOUT` | tell the human, then request **once** more at most. If they say they touched it, read the journal before that request |
+| `YUBIKEY_UNREACHABLE` | the broker retried the unreachable-key failure until the request time to live ended. Check the YubiKey connection before requesting again |
+| `TIMEOUT` | no attempt received a touch during the full request time to live. Tell the human, then request **once** more at most. If they say they touched it, read the journal before that request |
 | `timed out waiting for approval` | the *client* gave up; the daemon may still be working. Tell the human and read the journal before another request |
 | `TOO_MANY_PENDING` | stop; let the pending request resolve before requesting again |
 

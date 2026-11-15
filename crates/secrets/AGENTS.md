@@ -26,7 +26,7 @@ client (secrets shim / opencode plugin)
    │  line protocol over <runtime>/secretsd.sock (0600)
    ▼
 secretsd ── grants: (scope, key) → SecretBytes, memory only
-   │        scope = token-verified session | (tty, boot-id)
+   │        scope = token-verified session | (tty, boot-id) | omp process (`AUTHORIZE` only)
    └──► sops + age + YubiKey       (blink = physical prompt; touch = authorization)
 ```
 
@@ -61,16 +61,19 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | `src/config.rs` | Source-root configuration, config-path resolution, and root validation. |
 | `src/hardening.rs` | `mlockall`, `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`. Fail-closed. |
 | `src/secret.rs` | `SecretBytes` (zeroize on drop), key-name validation, single-assignment dotenv parse. |
-| `src/decrypt.rs` | Spawning sops, timeout, killing the process group on cancel. |
-| `src/decrypt/classify.rs` | Reducing sops stderr to a stable label, and that label to an error code. Pure functions over bytes; the child's output never reaches a log. |
+| `src/decrypt.rs` | Spawns sops, enforces its timeout, kills its process group on cancel, and returns each attempt's stable result. |
+| `src/decrypt/attempt.rs` | The stable code, label, and retry eligibility for one decrypt attempt. |
+| `src/decrypt/classify.rs` | Reduces sops stderr to a stable label, error code, and retry eligibility. Pure functions over bytes; the child's output never reaches a log. |
 | `src/grants.rs` | Scopes, session registrations, grant table, revocation. |
 | `src/requests.rs` | Request state machine, single-flight YubiKey queue, cooldown, pending limits. |
 | `src/audit.rs` | Sanitizes values shared by audit-log surfaces. |
 | `src/server.rs` | Three connection lanes, per-connection `handle` (peer uid gate, pinning, dispatch), audit line. |
 | `src/server/listener.rs` | Creating or adopting the listening socket; proving its node is owner-only (`0600`); the peer uid gate that rests on that proof. |
 | `src/server/dispatch.rs` | Protocol-op routing and request/response decisions. |
-| `src/server/approval.rs` | Access resolution and the approval wait lifecycle. |
-| `src/server/worker.rs` | The single approval worker: dequeue → decrypt → insert grant. |
+| `src/server/approval.rs` | The approval wait lifecycle and the final error after expiry. |
+| `src/server/approval/access.rs` | Parses request access data and resolves token, terminal, or capability omp scopes. |
+| `src/server/worker.rs` | The single approval worker: dequeues work and logs each decrypt attempt. |
+| `src/server/worker/attempt.rs` | Completes an attempt: verifies scope liveness, inserts grants, or retries and records the last failure. |
 | `src/peer.rs` | `SO_PEERPIDFD` peer pinning and `/proc` ancestry walk. |
 | `src/store.rs` | Human-tier ciphertext discovery, descriptor opens, and `FileIdentity` snapshots used to invalidate stale grants. |
 | `src/client/` | The client half of the binary. See `src/client/AGENTS.md`. |
@@ -79,22 +82,22 @@ filenames in configured `secrets.human.d/` directories are brokered.
 
 | Task | Go to |
 |---|---|
-| Change how a request is authorized | `Registry::resolve`, `src/grants.rs:188`; `src/server/approval.rs:29` |
+| Change how a request is authorized | `Registry::resolve`, `src/grants/registry.rs`; `resolve_access`, `src/server/approval/access.rs` |
 | Change ancestry / peer identity | `src/peer.rs:46` (`from_stream`), `:97` (`descends_from`) |
 | Change who may claim or release a session identifier | `claim_allowed`, `Registry::register`, `Registry::unregister`, `src/grants/registry.rs`; the refusal is `refused`, `src/server/dispatch/control.rs` |
 | Change which peers may connect at all | `assert_owner_only`, `src/server/listener.rs:59`; `uid_is_authorized`, `:38`; the rationale is `docs/design.md` "Requests from other-UID peers" |
 | Add or change a protocol op | `src/proto.rs:97` (requests), `src/proto/response.rs` |
 | Change source-root configuration | `Sources::config_path`, `src/config.rs:54`; `Sources::load`, `src/config.rs:70` |
 | Change what the audit line records | `src/server.rs:305`, context built at `:165`; sanitization in `src/audit.rs:19` |
-| Change how sops is invoked | `src/decrypt.rs:188`; failure classes in `src/decrypt/classify.rs:16` |
+| Change how sops is invoked | `src/decrypt.rs`; attempt outcomes in `src/decrypt/attempt.rs`; failure classes in `src/decrypt/classify.rs` |
 | Change how the runtime directory is resolved | `resolveRuntimeDir`, `opencode/plugins/secretsd.ts`; `SocketPath::resolve` and `runtime_dir`, `src/client.rs:35` |
 | Change which socket either half connects to | `resolveSocketPath`, `opencode/plugins/secretsd.ts`; `BrokerClient::from_environment`, `src/client.rs:91` |
 | Change the session token file's lifetime | `restoreTokenFile`, `opencode/plugins/secretsd.ts`; `ensureState` beside it |
-| Change the approval lifecycle | `src/server/approval.rs:49`; `src/server/worker.rs:27` |
+| Change the approval lifecycle | `src/server/approval.rs`; attempt completion in `src/server/worker/attempt.rs` |
 | Change the CLI surface | `src/client/cli.rs:17` |
 | Change how an answer names its store | `Provenance`, `src/client/status/provenance.rs`; the refusals and the human-tier source in `src/client/cli/naming.rs`; the stderr notice in `announce`, `src/client/status.rs` |
 | Change human-secret creation | `src/client/edit/new.rs`: `human`, `write_piped_human`, `read_piped_assignment`, `encrypt`, and `encrypt_bytes` |
-| Change stale-grant invalidation | `resolve_access`, `src/server/approval.rs:30`; `HumanStore::identity`, `src/store.rs:145` |
+| Change stale-grant invalidation | `resolve_access`, `src/server/approval/access.rs`; `HumanStore::identity`, `src/store.rs:145` |
 | Change grant lifetime or revocation | `GrantTable::revoke`, `src/grants.rs:293` |
 
 ## Non-negotiables
