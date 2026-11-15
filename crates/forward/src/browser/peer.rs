@@ -22,6 +22,7 @@ pub use containment::anchored::{
     AnchoredPeer, Process, anchor_for, anchor_for_with, process_start, read_process, session_label,
     session_label_with,
 };
+pub use containment::omp::omp_anchor_for;
 pub use socket::pid_for_connection;
 
 #[cfg(test)]
