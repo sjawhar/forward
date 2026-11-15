@@ -106,12 +106,22 @@ fn nearest_omp_with(
 }
 
 /// Whether `pid`'s executable is named `omp`. Reads `/proc/<pid>/exe`, which
-/// the process cannot forge, never its argv.
+/// the process cannot forge, never its argv. An omp whose binary was deleted
+/// while it runs, such as a pruned mise version, still counts: the kernel then
+/// reports the link as `<dir>/omp (deleted)`. The anchor walk, the pinned
+/// peer's walk and `session_label` all decide through this one function.
 pub(crate) fn is_omp_executable(pid: u32) -> bool {
     std::fs::read_link(format!("/proc/{pid}/exe"))
         .ok()
-        .and_then(|executable| executable.file_name().map(|name| name == "omp"))
+        .and_then(|executable| executable.file_name().map(is_omp_name))
         .unwrap_or(false)
+}
+
+/// Whether an executable file name, as `/proc/<pid>/exe` reports it, is omp's:
+/// exactly `omp`, or `omp (deleted)` with the kernel's exact suffix for a
+/// deleted binary.
+pub(crate) fn is_omp_name(name: &std::ffi::OsStr) -> bool {
+    name == "omp" || name == "omp (deleted)"
 }
 
 fn read_process_state(pid: u32) -> Option<(u64, char)> {

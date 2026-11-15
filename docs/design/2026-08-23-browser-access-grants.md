@@ -65,6 +65,8 @@ in `forward serve`, and `forward serve` closing it ends the endpoint.
 Each grant anchors on the nearest ancestor whose executable is named `omp`.
 The walk begins at the grant CLI's parent and visits at most 12 processes. It
 reads `/proc/<pid>/exe`, so an ancestor is selected whatever its arguments say.
+An omp whose binary was deleted while it runs still counts: the kernel then
+names the executable `omp (deleted)`, and that exact name is accepted too.
 `omp --resume` supplies only the session label for reporting. If the walk finds
 no omp process, the CLI's immediate parent remains the anchor.
 
