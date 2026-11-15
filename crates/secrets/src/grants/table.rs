@@ -1,5 +1,7 @@
 use std::time::{Duration, Instant};
 
+use containment::omp::OmpProcess;
+
 use super::{GrantOrigin, Scope, SessionToken};
 use crate::secret::{SecretBytes, SecretName};
 use crate::store::FileIdentity;
@@ -104,7 +106,7 @@ impl GrantTable {
     pub fn revoke_tokens(&mut self, tokens: &[SessionToken]) {
         self.grants.retain(|grant| match &grant.scope {
             Scope::Session(token) => !tokens.contains(token),
-            Scope::Tty { .. } => true,
+            Scope::Tty { .. } | Scope::Omp { .. } => true,
         });
     }
 
@@ -122,11 +124,12 @@ impl GrantTable {
         self.grants.clear();
     }
 
-    /// Revoke tokenless grants whose terminal device vanished.
-    pub fn revoke_missing_ttys(&mut self) {
+    /// Revoke tokenless grants whose backing scope vanished.
+    pub fn revoke_vanished_scopes(&mut self) {
         self.grants.retain(|grant| match &grant.scope {
             Scope::Session(_) => true,
             Scope::Tty { tty, .. } => std::path::Path::new(tty).exists(),
+            Scope::Omp { pid, start } => OmpProcess::new(*pid, *start).is_running(),
         });
     }
 
@@ -145,6 +148,7 @@ impl GrantTable {
             let scope = match &grant.scope {
                 Scope::Session(_) => "session".to_owned(),
                 Scope::Tty { tty, .. } => format!("tty {tty}"),
+                Scope::Omp { pid, .. } => format!("omp {pid}"),
             };
             let age = now.duration_since(grant.created).as_secs();
             out.push_str(grant.key.as_str());

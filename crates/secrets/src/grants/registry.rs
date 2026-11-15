@@ -1,3 +1,5 @@
+use containment::omp::OmpProcess;
+
 use super::{Refusal, Scope, SessionToken};
 use crate::peer::{Liveness, PeerIdentity};
 use crate::proto::ErrCode;
@@ -38,12 +40,23 @@ pub struct Registration {
     pub root: crate::peer::PeerIdentity,
 }
 
+/// Whether a request seeks a secret value or a capability authorization.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ScopeUse {
+    /// Secret reads and grants require an established token or terminal scope.
+    Secret,
+    /// Capability authorization may use the caller's enclosing omp process.
+    Capability,
+}
+
 /// Known sessions and learned agent terminals.
 #[derive(Debug)]
 pub struct Registry {
     pub(super) sessions: Vec<Registration>,
     agent_ttys: Vec<String>,
     boot_id: String,
+    omp_locator: fn(&PeerIdentity) -> Option<OmpProcess>,
 }
 
 impl Default for Registry {
@@ -59,6 +72,20 @@ impl Registry {
             sessions: Vec::new(),
             agent_ttys: Vec::new(),
             boot_id,
+            omp_locator: PeerIdentity::nearest_omp,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn new_with_omp_locator(
+        boot_id: String,
+        omp_locator: fn(&PeerIdentity) -> Option<OmpProcess>,
+    ) -> Self {
+        Self {
+            sessions: Vec::new(),
+            agent_ttys: Vec::new(),
+            boot_id,
+            omp_locator,
         }
     }
     /// Record a session token, returning any *different* token previously bound
@@ -168,6 +195,7 @@ impl Registry {
         token: Option<&SessionToken>,
         tty: Option<&str>,
         caller: Option<&crate::peer::PeerIdentity>,
+        use_: ScopeUse,
     ) -> Result<Scope, ErrCode> {
         match token {
             Some(presented) => {
@@ -200,6 +228,13 @@ impl Registry {
                     tty: tty.to_owned(),
                     boot_id: self.boot_id.clone(),
                 }),
+                None if use_ == ScopeUse::Capability => caller
+                    .and_then(|caller| (self.omp_locator)(caller))
+                    .map(|omp| Scope::Omp {
+                        pid: omp.pid,
+                        start: omp.start,
+                    })
+                    .ok_or(ErrCode::NoScope),
                 None => Err(ErrCode::NoScope),
             },
         }

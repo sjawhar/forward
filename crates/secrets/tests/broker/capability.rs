@@ -34,3 +34,4 @@ fn epoch_from(header: &str) -> Option<u64> {
 include!("capability/audit.rs");
 include!("capability/ceremony.rs");
 include!("capability/redeem.rs");
+include!("capability/omp_scope.rs");

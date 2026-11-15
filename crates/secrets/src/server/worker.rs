@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use containment::omp::OmpProcess;
+
 use super::{HEARTBEAT_INTERVAL, Shared, lock_state, publish_current_authority, wait_state};
 use crate::audit::sanitize_audit_value;
 use crate::decrypt::Decryptor;
@@ -58,7 +60,7 @@ pub(super) fn worker(shared: &Shared) {
                 state.kill_active(id);
             }
             state.grants.revoke_expired(now);
-            state.grants.revoke_missing_ttys();
+            state.grants.revoke_vanished_scopes();
             state.queue.prune(now);
             state.receipts.sweep(now);
             state.capability_grants.sweep(now);
@@ -125,6 +127,7 @@ pub(super) fn worker(shared: &Shared) {
                         // waiting for the backstop to expire it.
                         .is_some_and(|registration| registration.root.is_alive()),
                     Scope::Tty { tty, .. } => std::path::Path::new(tty).exists(),
+                    Scope::Omp { pid, start } => OmpProcess::new(*pid, *start).is_running(),
                 };
                 if state.lock_epoch != job.lock_epoch || !session_is_active {
                     state.queue.deny(job.id);

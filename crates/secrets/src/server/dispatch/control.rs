@@ -76,6 +76,7 @@ pub(super) fn register(
                     Decision {
                         outcome: Outcome::Ok,
                         scope_kind: Some(ScopeKind::VerifiedSession),
+                        scope_omp_pid: None,
                         source: None,
                         request_id: None,
                     }

@@ -4,7 +4,7 @@ use zeroize::Zeroizing;
 
 use super::approval::dispatch_access;
 use super::{Shared, lock_state};
-use crate::grants::ScopeKind;
+use crate::grants::{ScopeKind, ScopeUse};
 use crate::proto::{ErrCode, PROTOCOL_VERSION, Request};
 use crate::requests::RequestId;
 use crate::secret::SecretBytes;
@@ -71,6 +71,7 @@ impl Outcome {
 pub(super) struct Decision {
     pub(super) outcome: Outcome,
     pub(super) scope_kind: Option<ScopeKind>,
+    pub(super) scope_omp_pid: Option<u32>,
     pub(super) source: Option<String>,
     pub(super) request_id: Option<RequestId>,
 }
@@ -80,6 +81,7 @@ impl Decision {
         Self {
             outcome,
             scope_kind: None,
+            scope_omp_pid: None,
             source: None,
             request_id: None,
         }
@@ -132,7 +134,7 @@ pub(super) fn dispatch(
                 tty,
                 requested_ttl: ttl_secs,
             };
-            dispatch_access(shared, &access, true, false, caller)
+            dispatch_access(shared, &access, ScopeUse::Secret, true, false, caller)
         }
         Request::RequestGrant {
             key,
@@ -146,7 +148,7 @@ pub(super) fn dispatch(
                 tty,
                 requested_ttl: ttl_secs,
             };
-            dispatch_access(shared, &access, false, false, caller)
+            dispatch_access(shared, &access, ScopeUse::Secret, false, false, caller)
         }
         Request::Grants => grants(shared),
         Request::Deny { id } => deny(shared, id),

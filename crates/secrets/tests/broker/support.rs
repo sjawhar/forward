@@ -14,6 +14,7 @@ struct Harness {
     sops_log: PathBuf,
     sops_args_log: PathBuf,
     hang_marker: PathBuf,
+    wait_marker: PathBuf,
     _fake_sops_env_lock: MutexGuard<'static, ()>,
 }
 
@@ -35,7 +36,19 @@ impl Harness {
         Self::start_with_sources_and_sops(sources, "fake-sops-ok")
     }
 
+    fn start_with_waiting_sops(keys: &[&str]) -> Self {
+        Self::start_with_sources_and_sops_waiting(&[("test", keys)], "fake-sops-ok", true)
+    }
+
     fn start_with_sources_and_sops(sources: &[(&str, &[&str])], sops: &str) -> Self {
+        Self::start_with_sources_and_sops_waiting(sources, sops, false)
+    }
+
+    fn start_with_sources_and_sops_waiting(
+        sources: &[(&str, &[&str])],
+        sops: &str,
+        wait_for_marker: bool,
+    ) -> Self {
         let fake_sops_env_lock = fake_sops_env_lock().lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
         let sops_log = dir.path().join("fake-sops-invocations.log");
@@ -53,9 +66,17 @@ impl Harness {
         // predictable path another user could create first to steer the pid the
         // test kills.
         let hang_marker = dir.path().join("fake-sops-hang.pid");
+        let wait_marker = dir.path().join("fake-sops-release");
         // SAFETY: nextest executes every integration test in a separate process. This
         // test owns the harness environment lock and has not started daemon threads yet.
         unsafe { std::env::set_var("FAKE_SOPS_HANG_MARKER", &hang_marker) };
+        if wait_for_marker {
+            // SAFETY: the harness environment lock serializes every fake-sops child.
+            unsafe { std::env::set_var("FAKE_SOPS_WAIT_MARKER", &wait_marker) };
+        } else {
+            // SAFETY: the harness environment lock serializes every fake-sops child.
+            unsafe { std::env::remove_var("FAKE_SOPS_WAIT_MARKER") };
+        }
         let mut human_sources = Vec::with_capacity(sources.len());
         let mut configured_sources = Vec::with_capacity(sources.len());
         for (label, keys) in sources {
@@ -100,6 +121,7 @@ impl Harness {
             sops_log,
             sops_args_log,
             hang_marker,
+            wait_marker,
             _fake_sops_env_lock: fake_sops_env_lock,
         }
     }
@@ -134,6 +156,10 @@ impl Harness {
 
     const fn hang_marker(&self) -> &PathBuf {
         &self.hang_marker
+    }
+
+    const fn wait_marker(&self) -> &PathBuf {
+        &self.wait_marker
     }
 
     fn sops_invocations(&self) -> usize {

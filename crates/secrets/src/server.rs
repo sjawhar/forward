@@ -298,6 +298,7 @@ fn handle(mut stream: UnixStream, shared: &Shared) -> std::io::Result<()> {
                 peer_pid = ?peer_pid,
                 caller_pid = ?caller.pid(),
                 scope_kind = ?decision.scope_kind,
+                scope_omp_pid = ?decision.scope_omp_pid,
                 untrusted_registered_session = ?audit.untrusted_registered_session,
                 registered_root_pid = ?audit.registered_root_pid,
                 request_id = ?decision.request_id,

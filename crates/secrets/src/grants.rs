@@ -12,7 +12,7 @@ mod table;
 mod token;
 
 pub use refusal::Refusal;
-pub use registry::{Registration, Registry};
+pub use registry::{Registration, Registry, ScopeUse};
 pub use scope::{Scope, ScopeKind};
 pub use table::GrantTable;
 pub use token::SessionToken;

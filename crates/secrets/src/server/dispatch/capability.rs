@@ -5,6 +5,7 @@ use std::time::Instant;
 use zeroize::Zeroizing;
 
 use super::{Decision, Outcome};
+use crate::grants::ScopeUse;
 use crate::proto::ErrCode;
 use crate::server::approval::{Access, dispatch_access};
 use crate::server::{Shared, lock_state};
@@ -49,6 +50,7 @@ pub(super) fn finish_authorization(
     Decision {
         outcome,
         scope_kind,
+        scope_omp_pid,
         source,
         request_id,
     }: Decision,
@@ -73,6 +75,7 @@ pub(super) fn finish_authorization(
     Decision {
         outcome,
         scope_kind,
+        scope_omp_pid,
         source,
         request_id,
     }
@@ -97,7 +100,7 @@ pub(super) fn authorize(
     };
     let (mutex, _) = &**shared;
     let epoch_before = lock_state(mutex).lock_epoch;
-    let decision = dispatch_access(shared, &access, false, true, caller);
+    let decision = dispatch_access(shared, &access, ScopeUse::Capability, false, true, caller);
     finish_authorization(shared, &cap, epoch_before, decision)
 }
 

@@ -1,17 +1,41 @@
+use containment::omp::OmpProcess;
+
 use super::*;
+
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "the injectable registry locator is a function pointer returning Option"
+)]
+fn found_omp(_: &crate::peer::PeerIdentity) -> Option<OmpProcess> {
+    Some(OmpProcess::new(42, 84))
+}
+
+fn no_omp(_: &crate::peer::PeerIdentity) -> Option<OmpProcess> {
+    None
+}
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn resolves_registered_token_to_session_scope() {
-    let mut registry = registered();
+fn omp_scope_token_stays_the_scope_when_an_omp_is_available() {
+    let mut registry = Registry::new_with_omp_locator("test-boot".to_owned(), found_omp);
+    registry
+        .register(Registration {
+            token: token(0xaa),
+            session: "ses_a".to_owned(),
+            root: crate::peer::current_for_test(),
+        })
+        .unwrap();
+
     let scope = registry
         .resolve(
             Some(&token(0xaa)),
-            Some("/dev/pts/3"),
+            None,
             Some(&crate::peer::current_for_test()),
+            ScopeUse::Capability,
         )
         .unwrap();
-    assert_eq!(scope.kind(), ScopeKind::VerifiedSession);
+
+    assert_eq!(scope, Scope::Session(token(0xaa)));
 }
 
 #[test]
@@ -23,7 +47,8 @@ fn rejects_unregistered_token() {
             .resolve(
                 Some(&token(0xbb)),
                 Some("/dev/pts/3"),
-                Some(&crate::peer::current_for_test())
+                Some(&crate::peer::current_for_test()),
+                ScopeUse::Secret
             )
             .err(),
         Some(ErrCode::UnknownToken)
@@ -42,6 +67,7 @@ fn unknown_token_never_falls_back_to_tokenless() {
             Some(&token(0xcc)),
             Some("/dev/pts/9"),
             Some(&crate::peer::current_for_test()),
+            ScopeUse::Capability,
         )
         .err();
     assert_eq!(err, Some(ErrCode::UnknownToken));
@@ -50,36 +76,47 @@ fn unknown_token_never_falls_back_to_tokenless() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn tokenless_request_from_fresh_tty_is_interactive() {
-    let mut registry = registered();
+fn omp_scope_tty_stays_the_scope_when_an_omp_is_available() {
+    let mut registry = Registry::new_with_omp_locator("test-boot".to_owned(), found_omp);
     let scope = registry
         .resolve(
             None,
             Some("/dev/pts/7"),
             Some(&crate::peer::current_for_test()),
+            ScopeUse::Capability,
         )
         .unwrap();
+
     assert_eq!(scope.kind(), ScopeKind::TokenlessTty);
 }
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn tokenless_request_from_learned_agent_tty_is_rejected() {
-    let mut registry = registered();
+fn omp_scope_agent_tty_stays_refused_when_an_omp_is_available() {
+    let mut registry = Registry::new_with_omp_locator("test-boot".to_owned(), found_omp);
+    registry
+        .register(Registration {
+            token: token(0xaa),
+            session: "ses_a".to_owned(),
+            root: crate::peer::current_for_test(),
+        })
+        .unwrap();
     registry
         .resolve(
             Some(&token(0xaa)),
             Some("/dev/pts/3"),
             Some(&crate::peer::current_for_test()),
+            ScopeUse::Secret,
         )
         .unwrap();
-    assert!(registry.is_agent_tty("/dev/pts/3"));
+
     assert_eq!(
         registry
             .resolve(
                 None,
                 Some("/dev/pts/3"),
-                Some(&crate::peer::current_for_test())
+                Some(&crate::peer::current_for_test()),
+                ScopeUse::Capability
             )
             .err(),
         Some(ErrCode::AgentTty)
@@ -88,11 +125,53 @@ fn tokenless_request_from_learned_agent_tty_is_rejected() {
 
 #[test]
 #[cfg_attr(miri, ignore)]
-fn request_without_token_or_tty_has_no_scope() {
-    let mut registry = registered();
+fn omp_scope_capability_uses_the_injected_omp() {
+    let mut registry = Registry::new_with_omp_locator("test-boot".to_owned(), found_omp);
+
+    let scope = registry
+        .resolve(
+            None,
+            None,
+            Some(&crate::peer::current_for_test()),
+            ScopeUse::Capability,
+        )
+        .unwrap();
+
+    assert_eq!(scope, Scope::Omp { pid: 42, start: 84 });
+    assert_eq!(scope.kind(), ScopeKind::OmpProcess);
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn omp_scope_capability_without_an_omp_has_no_scope() {
+    let mut registry = Registry::new_with_omp_locator("test-boot".to_owned(), no_omp);
+
     assert_eq!(
         registry
-            .resolve(None, None, Some(&crate::peer::current_for_test()))
+            .resolve(
+                None,
+                None,
+                Some(&crate::peer::current_for_test()),
+                ScopeUse::Capability
+            )
+            .err(),
+        Some(ErrCode::NoScope)
+    );
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn omp_scope_secret_use_never_falls_back_to_an_omp() {
+    let mut registry = Registry::new_with_omp_locator("test-boot".to_owned(), found_omp);
+
+    assert_eq!(
+        registry
+            .resolve(
+                None,
+                None,
+                Some(&crate::peer::current_for_test()),
+                ScopeUse::Secret
+            )
             .err(),
         Some(ErrCode::NoScope)
     );
@@ -111,7 +190,8 @@ fn unregister_returns_tokens_to_revoke() {
             .resolve(
                 Some(&token(0xaa)),
                 None,
-                Some(&crate::peer::current_for_test())
+                Some(&crate::peer::current_for_test()),
+                ScopeUse::Secret
             )
             .err(),
         Some(ErrCode::UnknownToken)

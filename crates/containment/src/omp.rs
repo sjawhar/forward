@@ -17,6 +17,12 @@ pub struct OmpProcess {
 }
 
 impl OmpProcess {
+    /// Identify an omp process by its pid and kernel start time.
+    #[must_use]
+    pub const fn new(pid: u32, start: u64) -> Self {
+        Self { pid, start }
+    }
+
     /// Whether this exact omp process is still running.
     #[must_use]
     pub fn is_running(&self) -> bool {
