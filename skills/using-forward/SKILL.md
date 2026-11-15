@@ -58,6 +58,23 @@ A Legion pane runs under `omp` without `--resume` and has no terminal. It does
 not need a session token for `forward browser grant`: the broker uses the
 caller's nearest omp process as the capability scope.
 
+Run `forward browser grant` from the pane's bash tool, not from omp's eval
+kernel. The eval kernel is itself an `omp` executable, a child process of the
+pane's omp, so a grant started from the kernel anchors on the kernel process:
+its endpoint admits only the kernel and the processes below it. A grant started
+from the bash tool anchors on the pane's omp.
+
+Run one grant at a time. Two grants started from one session's bash tool share
+one scope, and the broker holds at most one pending capability request per
+scope. A second `forward browser grant` started while the first still waits for
+its touch is refused at once with this line, and no touch is requested for it:
+
+```text
+forward: the broker's approval queue is full; wait for a pending touch to resolve and retry
+```
+
+Wait until the first grant prints its endpoint or fails.
+
 With no session token, terminal, or omp process above the command, `forward
 browser grant` prints this line and exits before it contacts the broker:
 
