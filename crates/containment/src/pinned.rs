@@ -128,6 +128,13 @@ impl PinnedPeer {
         matches!(self.liveness(), Liveness::Running(_))
     }
 
+    /// The nearest omp executable above this running pinned peer.
+    #[must_use]
+    pub fn nearest_omp(&self) -> Option<crate::omp::OmpProcess> {
+        let pid = u32::try_from(self.pid()?).ok()?;
+        crate::omp::nearest_omp_for(pid)
+    }
+
     /// Whether this peer is `root` itself or one of its descendants.
     ///
     /// Each end is read from a pinned descriptor, so each answers for the

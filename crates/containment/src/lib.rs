@@ -12,6 +12,7 @@
 //!   connection, which cannot be pidfd-pinned at all. It pairs the pid with the
 //!   kernel start time so a recycled pid fails the comparison instead of
 //!   inheriting authority.
+//! - [`omp::OmpProcess`] identifies the nearest enclosing `omp` executable.
 //!
 //! A single identity type would make that difference invisible to every
 //! downstream caller, so a future change could route a secrets decision through
@@ -26,6 +27,7 @@
 //! deep broker callers. They are different because the risk is different.
 
 pub mod anchored;
+pub mod omp;
 pub mod pinned;
 pub mod uid;
 

@@ -7,6 +7,7 @@
 //! time is what closes that: a recycled pid has a later start time and fails the
 //! comparison instead of inheriting authority.
 
+use crate::omp::is_omp_executable;
 use crate::{Step, walk};
 
 /// Longest ancestry walk before giving up. A worker nested deeper than this is
@@ -79,18 +80,12 @@ impl AnchoredPeer {
     }
 }
 
-/// Derive the anchor a grant should record for `pid`, verifying the executable.
+/// Derive the anchor a grant should record for `pid`.
 ///
-/// A grant CLI is short lived, so authority belongs to its nearest enclosing
-/// `omp --resume <uuid>` ancestor; without one, the immediate parent is still
-/// the narrowest real subtree that can use the grant.
-///
-/// The session shape is matched on **argv**, which is forgeable, so this
-/// verifies `/proc/<pid>/exe` for any candidate it selects on that basis. That
-/// check used to live in a separate function which the request path happened to
-/// call first; two coupled functions where only the call ordering saves you is
-/// exactly the arrangement this crate exists to eliminate. It is fused here, so
-/// the anchor cannot be obtained without it.
+/// A grant belongs to its nearest enclosing process whose executable is named
+/// `omp`, because a nested omp session is the narrowest real subtree that can
+/// use it. Selection reads `/proc/<pid>/exe`, never argv. Without an omp
+/// ancestor, the immediate parent remains the fallback anchor.
 #[must_use]
 pub fn anchor_for(pid: u32) -> Option<AnchoredPeer> {
     anchor_for_with(pid, &mut read_process, &mut is_omp_executable)
@@ -104,31 +99,14 @@ pub fn anchor_for_with(
     lookup: &mut dyn FnMut(u32) -> Option<Process>,
     is_omp: &mut dyn FnMut(u32) -> bool,
 ) -> Option<AnchoredPeer> {
+    if let Some(anchor) = crate::omp::omp_anchor_for_with(pid, lookup, is_omp) {
+        return Some(anchor);
+    }
     let parent = lookup(pid)?.parent;
     if parent <= 1 || parent == pid {
         return None;
     }
-    let mut current = parent;
-    let mut fallback = None;
-    for _ in 0..MAX_ANCESTRY_HOPS {
-        let Some(process) = lookup(current) else {
-            break;
-        };
-        if current == parent {
-            fallback = Some(AnchoredPeer::new(current, process.start));
-        }
-        // An argv-selected candidate is only accepted once its executable is
-        // confirmed, so a process presenting a forged `omp --resume` argv
-        // cannot widen the anchor to a subtree it controls.
-        if session_of(&process).is_some() && is_omp(current) {
-            return Some(AnchoredPeer::new(current, process.start));
-        }
-        if process.parent <= 1 || process.parent == current {
-            break;
-        }
-        current = process.parent;
-    }
-    fallback
+    lookup(parent).map(|process| AnchoredPeer::new(parent, process.start))
 }
 
 /// The omp session id `pid` belongs to, for logs and status output.
@@ -166,13 +144,6 @@ pub fn session_label_with(
 #[must_use]
 pub fn process_start(pid: u32) -> Option<u64> {
     read_process(pid).map(|process| process.start)
-}
-
-fn is_omp_executable(pid: u32) -> bool {
-    std::fs::read_link(format!("/proc/{pid}/exe"))
-        .ok()
-        .and_then(|executable| executable.file_name().map(|name| name == "omp"))
-        .unwrap_or(false)
 }
 
 /// `omp --resume <uuid>` and nothing else. Another program taking `--resume`
