@@ -360,7 +360,7 @@ process identified by its pid and start time.
 
 ```
 request → pending → decrypting → granted ──(session end | lock | its own ttl)→ revoked+zeroized
-                        ├─ retryable hardware failure → pending at the queue tail after cooldown
+                        ├─ retryable hardware failure → pending at the queue tail, retried after max(cooldown, 1 s)
                         ├─ DENY / LOCK after an attempt → denied
                         ├─ expiry → timed out
                         └─ non-retryable decrypt error → failed
@@ -372,9 +372,17 @@ request → pending → decrypting → granted ──(session end | lock | its o
   hardware failure keeps its original deadline, moves the request to the back
   of the queue, and starts the cooldown before another request can decrypt.
   When the request's scope has ended by then (its session root, terminal or
-  omp process is gone), the failure denies the request instead.
-  Concurrent waiters are coalesced **only** for the same `(token, key)`; one
-  session's approval never creates another session's grant.
+  omp process is gone), the failure denies the request instead. The retried
+  request waits the cooldown or 1 second, whichever is longer, before its next
+  attempt, so a failure that returns at once (no PC/SC socket, an instant sops
+  error) cannot re-run without pause for the whole time to live; other
+  requests wait only the cooldown. Deny, `LOCK`, and expiry still end it
+  during that wait.
+  Concurrent waiters are coalesced **only** for the same `(scope, key)`, and
+  only for a secret: a second `GET` or `REQUEST` for that pair joins the
+  request already pending or decrypting. A capability is never coalesced: a
+  second `AUTHORIZE` in a scope that already has one pending or decrypting gets
+  `TOO_MANY_PENDING`. One scope's approval never creates another scope's grant.
 - Revocation triggers: plugin session-end event (primary), `secrets lock`
   (wipe all + revoke all), and each grant's own backstop -- 12h by default,
   or up to the `SECRETSD_MAX_REQUESTED_GRANT_SECS` ceiling (24h by default)
@@ -454,7 +462,8 @@ client stops waiting first.
    decrypt then demands its own physical touch. The declaration is trusted,
    not probed: a false `always` on cached hardware reopens the
    one-touch-two-grants window for queued requests. A retryable failure moves
-   to the back of the queue and starts the cooldown. Per-scope
+   to the back of the queue and starts the cooldown; that request's next
+   attempt waits at least 1 second even when the cooldown is shorter. Per-scope
    pending-request limits with backoff after deny or timeout prevent one
    hostile or broken session from flooding the queue and locking out
    legitimate grants; `secrets deny` and `secrets lock` are always serviced

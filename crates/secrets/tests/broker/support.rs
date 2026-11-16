@@ -7,42 +7,7 @@ use std::time::Duration;
 use secrets::store::HumanSource;
 use secrets::{Config, TouchPolicy};
 
-struct HarnessSettings {
-    cooldown: Duration,
-    request_ttl: Duration,
-    touch_policy: TouchPolicy,
-    pcsc_socket: Option<PathBuf>,
-    yubikey_probe_argv: Vec<String>,
-    always_stanza_keys: Vec<&'static str>,
-    fail_stderr: Option<&'static str>,
-    probe_always_fails: bool,
-    wait_for_marker: bool,
-}
-
-impl HarnessSettings {
-    const fn standard(wait_for_marker: bool) -> Self {
-        Self {
-            cooldown: Duration::from_secs(16),
-            request_ttl: Duration::from_secs(20),
-            touch_policy: TouchPolicy::Cached,
-            pcsc_socket: None,
-            yubikey_probe_argv: Vec::new(),
-            always_stanza_keys: Vec::new(),
-            fail_stderr: None,
-            probe_always_fails: false,
-            wait_for_marker,
-        }
-    }
-
-    fn fast() -> Self {
-        Self {
-            cooldown: Duration::from_secs(1),
-            request_ttl: Duration::from_secs(8),
-            touch_policy: TouchPolicy::Always,
-            ..Self::standard(false)
-        }
-    }
-}
+include!("harness_settings.rs");
 
 struct Harness {
     _dir: tempfile::TempDir,
@@ -109,6 +74,12 @@ impl Harness {
         // SAFETY: nextest executes every integration test in a separate process. This
         // test owns the harness environment lock and has not started daemon threads yet.
         unsafe { std::env::set_var("FAKE_SOPS_ARGS_LOG", &sops_args_log) };
+        // The hanging fixture is killed by the test that uses it, so it can never
+        // clean up after itself. Keeping its marker inside this TempDir means the
+        // file dies with the harness on every path, including a panic, instead of
+        // accumulating one `/tmp` entry per run -- and it is no longer at a shared,
+        // predictable path another user could create first to steer the pid the
+        // test kills.
         let hang_marker = dir.path().join("fake-sops-hang.pid");
         let wait_marker = dir.path().join("fake-sops-release");
         let sops_attempt_marker = dir.path().join("fake-sops-fail-once.count");

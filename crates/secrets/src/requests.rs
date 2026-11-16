@@ -2,6 +2,7 @@
 
 mod expiry;
 mod queue;
+mod retry;
 mod types;
 
 pub use queue::Queue;

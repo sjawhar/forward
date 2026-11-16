@@ -21,8 +21,13 @@ const NO_OMP_WRAPPER: &str = concat!(
     "fi\n",
 );
 
-fn python_available() -> bool {
-    Command::new("python3").arg("--version").output().is_ok()
+fn require_python() {
+    let available = Command::new("python3")
+        .arg("--version")
+        .stdout(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success());
+    assert!(available, "python3 is required to send the omp-scope frames");
 }
 
 fn fake_omp(directory: &Path) -> PathBuf {
@@ -81,9 +86,7 @@ fn prepare_log_capture() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn omp_scope_authorize_uses_the_enclosing_omp_and_audits_its_pid() {
-    if !python_available() {
-        return;
-    }
+    require_python();
     prepare_log_capture();
     let harness = Harness::start(&["CAP_BROWSER"]);
     let directory = tempfile::tempdir().unwrap();
@@ -100,9 +103,7 @@ fn omp_scope_authorize_uses_the_enclosing_omp_and_audits_its_pid() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn omp_scope_no_omp_refuses_before_sops_runs() {
-    if !python_available() {
-        return;
-    }
+    require_python();
     let harness = Harness::start(&["CAP_BROWSER"]);
 
     let reply = no_omp_frame(harness.socket(), "AUTHORIZE\tcap=browser");
@@ -114,9 +115,7 @@ fn omp_scope_no_omp_refuses_before_sops_runs() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn omp_scope_secret_operations_do_not_use_the_omp_scope() {
-    if !python_available() {
-        return;
-    }
+    require_python();
     let harness = Harness::start(&["DEEL_API_KEY"]);
     let directory = tempfile::tempdir().unwrap();
     let omp = fake_omp(directory.path());
@@ -135,9 +134,7 @@ fn omp_scope_secret_operations_do_not_use_the_omp_scope() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn omp_scope_each_authorize_decrypts_and_mints_a_new_receipt() {
-    if !python_available() {
-        return;
-    }
+    require_python();
     let harness =
         Harness::start_with_settings(&["CAP_BROWSER"], "fake-sops-ok", HarnessSettings::fast());
     let directory = tempfile::tempdir().unwrap();
@@ -167,9 +164,7 @@ fn omp_scope_each_authorize_decrypts_and_mints_a_new_receipt() {
 #[test]
 #[cfg_attr(miri, ignore)]
 fn omp_scope_ended_omp_denies_after_the_decrypt() {
-    if !python_available() {
-        return;
-    }
+    require_python();
     let harness = Harness::start_with_waiting_sops(&["CAP_BROWSER"]);
     let directory = tempfile::tempdir().unwrap();
     let omp = fake_omp(directory.path());

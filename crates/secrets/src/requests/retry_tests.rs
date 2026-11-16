@@ -1,5 +1,6 @@
 use std::time::{Duration, Instant};
 
+use super::retry::MIN_RETRY_DELAY;
 use super::{Queue, QueueLimits, RequestState};
 use crate::grants::{Scope, SessionToken};
 use crate::proto::ErrCode;
@@ -18,6 +19,13 @@ fn limits() -> QueueLimits {
         cooldown: Duration::from_secs(10),
         ttl: Duration::from_secs(90),
         max_pending_per_scope: 2,
+    }
+}
+
+fn zero_cooldown() -> QueueLimits {
+    QueueLimits {
+        cooldown: Duration::ZERO,
+        ..limits()
     }
 }
 
@@ -121,4 +129,58 @@ fn retry_deny_attempted_leaves_never_started_requests_pending() {
     assert!(retry.retry(retried, start));
     retry.deny_attempted();
     assert_eq!(retry.state_of(retried), Some(RequestState::Denied));
+}
+
+#[test]
+fn retry_waits_the_minimum_delay_when_the_cooldown_is_zero() {
+    let mut queue = Queue::new(zero_cooldown());
+    let start = Instant::now();
+    let id = queue.enqueue(scope(0xaa), name("K"), start, None).unwrap();
+    queue.mark_decrypting(id, start).unwrap();
+    assert!(queue.retry(id, start));
+
+    let early = start + MIN_RETRY_DELAY.saturating_sub(Duration::from_millis(1));
+    assert_eq!(queue.next_ready(start), None);
+    assert_eq!(queue.next_ready(early), None);
+    assert_eq!(queue.mark_decrypting(id, early), None);
+    let due = start + MIN_RETRY_DELAY;
+    assert_eq!(queue.next_ready(due), Some(id));
+    assert!(queue.mark_decrypting(id, due).is_some());
+    assert_eq!(queue.attempt_number(id), Some(2));
+}
+
+#[test]
+fn retry_delay_does_not_hold_back_other_pending_requests() {
+    let mut queue = Queue::new(zero_cooldown());
+    let start = Instant::now();
+    let retried = queue.enqueue(scope(0xaa), name("A"), start, None).unwrap();
+    let waiting = queue.enqueue(scope(0xbb), name("B"), start, None).unwrap();
+    queue.mark_decrypting(retried, start).unwrap();
+    assert!(queue.retry(retried, start));
+
+    assert_eq!(queue.next_ready(start), Some(waiting));
+    assert!(queue.mark_decrypting(waiting, start).is_some());
+}
+
+#[test]
+fn retry_a_request_waiting_out_its_delay_still_expires_and_can_be_denied() {
+    let mut queue = Queue::new(zero_cooldown());
+    let start = Instant::now();
+    let expiring = queue.enqueue(scope(0xaa), name("A"), start, None).unwrap();
+    let near_deadline = start + Duration::from_millis(89_500);
+    queue.mark_decrypting(expiring, near_deadline).unwrap();
+    assert!(queue.retry(expiring, near_deadline));
+    let past_deadline = start + Duration::from_millis(90_100);
+    assert_eq!(queue.next_ready(past_deadline), None);
+
+    assert_eq!(queue.sweep_timeouts(past_deadline), vec![expiring]);
+    assert_eq!(queue.state_of(expiring), Some(RequestState::TimedOut));
+
+    let denied = queue
+        .enqueue(scope(0xbb), name("B"), past_deadline, None)
+        .unwrap();
+    queue.mark_decrypting(denied, past_deadline).unwrap();
+    assert!(queue.retry(denied, past_deadline));
+    assert!(queue.deny(denied));
+    assert_eq!(queue.state_of(denied), Some(RequestState::Denied));
 }

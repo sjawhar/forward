@@ -15,6 +15,9 @@ pub(super) struct PendingRequest {
     pub(super) generation: u64,
     /// Attempts that completed before the request's current queue position.
     pub(super) attempts: u32,
+    /// When a failed attempt last sent this request back to the queue. It is
+    /// not ready again until the retry delay has passed since then.
+    pub(super) retried_at: Option<Instant>,
     pub(super) created: Instant,
     /// Caller-requested lifetime for the grant this request may install.
     /// `None` defers to the daemon's own default backstop.
@@ -95,6 +98,7 @@ impl Queue {
             state: RequestState::Pending,
             generation: 0,
             attempts: 0,
+            retried_at: None,
             created: now,
             requested_ttl,
         });
@@ -113,9 +117,10 @@ impl Queue {
         {
             return None;
         }
+        let retry_delay = self.retry_delay();
         self.requests
             .iter()
-            .find(|request| request.state == RequestState::Pending)
+            .find(|request| request.is_ready(retry_delay, now))
             .map(|request| request.id)
     }
 
@@ -129,8 +134,9 @@ impl Queue {
         {
             return None;
         }
+        let retry_delay = self.retry_delay();
         let request = self.requests.iter_mut().find(|request| request.id == id)?;
-        if request.state != RequestState::Pending {
+        if !request.is_ready(retry_delay, now) {
             return None;
         }
         self.generation = self.generation.saturating_add(1);
@@ -156,26 +162,6 @@ impl Queue {
                 && request.generation == generation
                 && request.state == RequestState::Decrypting
         })
-    }
-
-    /// Move a failed decrypt to the queue tail after starting the cooldown.
-    pub fn retry(&mut self, id: RequestId, now: Instant) -> bool {
-        let Some(index) = self.requests.iter().position(|request| request.id == id) else {
-            return false;
-        };
-        if !self
-            .requests
-            .get(index)
-            .is_some_and(|request| request.state == RequestState::Decrypting)
-        {
-            return false;
-        }
-        let mut request = self.requests.remove(index);
-        request.state = RequestState::Pending;
-        request.attempts = request.attempts.saturating_add(1);
-        self.requests.push(request);
-        self.finish(id, now);
-        true
     }
 
     /// Whether a completing decrypt may still install its grant.

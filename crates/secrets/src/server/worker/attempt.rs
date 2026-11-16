@@ -66,11 +66,16 @@ fn scope_is_active(state: &State, scope: &Scope) -> bool {
 }
 
 fn finish_failure(state: &mut State, job: &Job, error: AttemptError) {
+    // `DENY`, `LOCK` or expiry already ended this request and killed its sops.
+    // The killed sops reads as `INTERNAL`; recording that would replace the
+    // last real failure that a waiter still answers with.
+    if !state.queue.is_decrypting(job.id, job.generation) {
+        return;
+    }
     replace_failure(state, job.id, error.code);
     let now = Instant::now();
     let retryable = error.retryable
         && state.lock_epoch == job.lock_epoch
-        && state.queue.is_decrypting(job.id, job.generation)
         && state.queue.deadline_not_passed(job.id, now);
     if retryable {
         if !scope_is_active(state, &job.scope) {
@@ -99,3 +104,6 @@ fn replace_failure(
         state.failures.push((id, error));
     }
 }
+
+#[cfg(test)]
+mod tests;

@@ -94,3 +94,28 @@ fn retry_always_failing_probe_reports_unreachable_at_the_request_ttl() {
     assert!(reply.contains("YUBIKEY_UNREACHABLE"), "{reply}");
     assert_eq!(harness.sops_invocations(), 0, "{reply}");
 }
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn retry_zero_cooldown_still_spaces_unreachable_attempts() {
+    prepare_retry_log();
+    let (_directory, mut settings) = probe_settings(true);
+    settings.cooldown = Duration::ZERO;
+    settings.request_ttl = Duration::from_secs(3);
+    let ttl = settings.request_ttl;
+    let harness = Harness::start_with_settings(&["CAP_BROWSER"], "fake-sops-ok", settings);
+    register(&harness, TOKEN_A, "spaced");
+    let started = Instant::now();
+
+    let (reply, _) = harness.send(&format!("AUTHORIZE\tcap=browser\ttoken={}", token(TOKEN_A)));
+
+    let attempts = attempt_lines().len();
+    assert!(started.elapsed() >= ttl, "{reply}");
+    assert!(reply.contains("YUBIKEY_UNREACHABLE"), "{reply}");
+    // One attempt at once, then at most one per second of the time to live.
+    assert!(
+        (2..=4).contains(&attempts),
+        "{attempts} decrypt attempts within {ttl:?}"
+    );
+    assert_eq!(harness.sops_invocations(), 0, "{reply}");
+}

@@ -65,7 +65,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | `src/decrypt/attempt.rs` | The stable code, label, and retry eligibility for one decrypt attempt. |
 | `src/decrypt/classify.rs` | Reduces sops stderr to a stable label, error code, and retry eligibility. Pure functions over bytes; the child's output never reaches a log. |
 | `src/grants.rs` | Scopes, session registrations, grant table, revocation. |
-| `src/requests.rs` | Request state machine, single-flight YubiKey queue, cooldown, pending limits. |
+| `src/requests.rs` | Request state machine, single-flight YubiKey queue, cooldown, the minimum delay before a failed request retries, pending limits. |
 | `src/audit.rs` | Sanitizes values shared by audit-log surfaces. |
 | `src/server.rs` | Three connection lanes, per-connection `handle` (peer uid gate, pinning, dispatch), audit line. |
 | `src/server/listener.rs` | Creating or adopting the listening socket; proving its node is owner-only (`0600`); the peer uid gate that rests on that proof. |
