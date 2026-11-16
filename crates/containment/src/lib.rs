@@ -43,7 +43,7 @@ pub mod uid;
 /// Longest ancestry walk an anchor or an omp lookup makes before giving up. A
 /// worker nested deeper than this is not a session's child in any arrangement
 /// we run.
-pub(crate) const MAX_ANCESTRY_HOPS: usize = 12;
+pub const MAX_ANCESTRY_HOPS: usize = 12;
 
 /// What a walk step concluded about one process.
 pub(crate) enum Step {
@@ -98,10 +98,41 @@ pub(crate) fn status_field(contents: &str, key: &str) -> Option<i32> {
 /// Field 2 is the comm, parenthesised, and a process controls its contents —
 /// including `)` and whitespace. The fields therefore begin after the *last*
 /// `)`, which is unforgeable no matter what the comm holds. Index into the
-/// result: state 0, ppid 1, starttime 19.
+/// result: state 0, ppid 1, starttime 19. [`parse_stat`] reads all three.
 pub(crate) fn stat_fields(stat: &str) -> Option<&str> {
     let begin = stat.rfind(')')?.checked_add(2)?;
     stat.get(begin..)
+}
+
+/// The fields of `/proc/<pid>/stat` that containment reads.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct Stat {
+    /// Process state, such as `S`, or `Z` for a zombie.
+    pub(crate) state: char,
+    /// Parent pid.
+    pub(crate) parent: u32,
+    /// Kernel start time, which distinguishes a recycled pid.
+    pub(crate) start: u64,
+}
+
+/// Read `/proc/<pid>/stat`; `None` when it cannot be read or parsed.
+pub(crate) fn read_stat(pid: u32) -> Option<Stat> {
+    parse_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
+}
+
+/// Parse a `/proc/<pid>/stat` line after its comm, as [`stat_fields`] finds
+/// it: state is field 3, ppid field 4 and starttime field 22.
+pub(crate) fn parse_stat(line: &str) -> Option<Stat> {
+    let mut fields = stat_fields(line)?.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    let parent = fields.next()?.parse().ok()?;
+    // Fields 5 through 21, seventeen of them, lie between ppid and starttime.
+    let start = fields.nth(17)?.parse().ok()?;
+    Some(Stat {
+        state,
+        parent,
+        start,
+    })
 }
 
 #[cfg(test)]

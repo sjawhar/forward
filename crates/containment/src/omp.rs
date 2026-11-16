@@ -1,7 +1,7 @@
 //! Find the nearest enclosing `omp` process by executable name.
 
 use crate::anchored::{AnchoredPeer, Process};
-use crate::{MAX_ANCESTRY_HOPS, Step, stat_fields, walk};
+use crate::{MAX_ANCESTRY_HOPS, Step, read_stat, walk};
 
 /// An `omp` process instance, identified by pid and kernel start time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,7 +45,9 @@ pub(crate) fn nearest_omp_for(pid: u32) -> Option<OmpProcess> {
     nearest_omp_from_with(pid, &mut stat_process, &mut is_omp_executable)
 }
 
-/// Test seam: derive an omp anchor against caller-supplied process data.
+/// The table-driven core of the omp anchor: derive it from caller-supplied
+/// process data. [`anchor_for`](crate::anchored::anchor_for) runs it on the
+/// live `/proc`; the injectable lookups are what let miri and tests drive it.
 #[doc(hidden)]
 #[must_use]
 pub fn omp_anchor_for_with(
@@ -56,7 +58,10 @@ pub fn omp_anchor_for_with(
     nearest_omp_with(pid, lookup, is_omp).map(|(pid, start)| AnchoredPeer::new(pid, start))
 }
 
-/// Find the nearest omp ancestor of a pinned process.
+/// Find the nearest omp ancestor of `pid` against caller-supplied process data.
+///
+/// It walks parent pids from any starting pid and knows nothing of a pinned
+/// descriptor, so what it returns is pid and start-time evidence only.
 #[doc(hidden)]
 #[must_use]
 pub fn nearest_omp_from_with(
@@ -122,11 +127,7 @@ pub(crate) fn is_omp_name(name: &std::ffi::OsStr) -> bool {
 }
 
 fn read_process_state(pid: u32) -> Option<(u64, char)> {
-    let contents = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let mut fields = stat_fields(&contents)?.split_whitespace();
-    let state = fields.next()?.chars().next()?;
-    let start = fields.nth(18)?.parse().ok()?;
-    Some((start, state))
+    read_stat(pid).map(|stat| (stat.start, stat.state))
 }
 
 /// Parent and start time for `pid`, with an empty argv.
@@ -135,13 +136,9 @@ fn read_process_state(pid: u32) -> Option<(u64, char)> {
 /// every ancestor of a caller while it holds its state lock, so it reads each
 /// ancestor's `stat` only and never its command line.
 pub(crate) fn stat_process(pid: u32) -> Option<Process> {
-    let contents = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let mut fields = stat_fields(&contents)?.split_whitespace();
-    let parent = fields.nth(1)?.parse().ok()?;
-    let start = fields.nth(17)?.parse().ok()?;
-    Some(Process {
+    read_stat(pid).map(|stat| Process {
         argv: Vec::new(),
-        parent,
-        start,
+        parent: stat.parent,
+        start: stat.start,
     })
 }

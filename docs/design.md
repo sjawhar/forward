@@ -50,12 +50,15 @@ secrets keep working unattended with zero interaction, exactly as today.
   records retain kernel-derived peer attribution for after-the-fact review.
 - **Tokenless path abuse**: an agent that strips its own environment can reach
   the interactive `(tty, boot-id)` flow. A process below an omp process can
-  also ask for an `AUTHORIZE` capability scope. Each capability authorization
-  runs a fresh decrypt and needs its own touch. The audit record includes
-  `scope_kind` and `scope_omp_pid`. Best-effort hardening: the plugin registers
-  PTYs it allocates and the broker rejects tokenless requests from them; ttys
-  the plugin cannot see (for example, agent-created tmux panes) remain an
-  accepted same-UID residual.
+  also ask for an `AUTHORIZE` capability scope. The omp test reads only the
+  executable's file name, so any same-UID process that runs a binary named
+  `omp`, or one named `omp` that was since deleted, gets an omp capability
+  scope for the processes below it, not only a process below a real omp. Each
+  capability authorization, these included, runs a fresh decrypt and needs its
+  own touch. The audit record includes `scope_kind` and `scope_omp_pid`.
+  Best-effort hardening: the plugin registers PTYs it allocates and the broker
+  rejects tokenless requests from them; ttys the plugin cannot see (for
+  example, agent-created tmux panes) remain an accepted same-UID residual.
 - **Plaintext temp file while creating a new secret**: `secrets edit-human KEY`
   on a key that does not exist yet runs the editor on a `0600` plaintext file
   in the runtime directory, then encrypts it into place. The value therefore

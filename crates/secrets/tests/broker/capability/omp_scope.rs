@@ -65,7 +65,8 @@ fn no_omp_frame(socket: &Path, frame: &str) -> String {
         .arg("-c")
         .arg(NO_OMP_WRAPPER)
         .arg(NO_OMP_WRAPPER)
-        .arg("12")
+        // Counts down to 0: one shell past the hop cap, so no omp running this test is seen.
+        .arg(containment::MAX_ANCESTRY_HOPS.to_string())
         .arg(PYTHON_FRAMES)
         .arg(socket)
         .arg(frame)

@@ -4,11 +4,14 @@ use std::process::{Command, Stdio};
 
 const NO_GRANT_SCOPE: &str = "forward: grant refused before any touch: no omp process runs above this command, and it has no session token and no terminal; run it from an omp session or an interactive terminal";
 const NESTED_SHELL: &str = "depth=$1; shift; if [ \"$depth\" -gt 1 ]; then sh -c \"$0\" \"$0\" \"$((depth - 1))\" \"$@\"; else \"$@\"; fi; status=$?; :; exit \"$status\"";
+// One shell past the hop cap, so the omp walk stops short of any omp running this test.
+const SHELLS: usize = containment::MAX_ANCESTRY_HOPS + 1;
 
-fn grant_beneath_thirteen_shells(config: &Path) -> Command {
+fn grant_beneath_more_shells_than_the_hop_cap(config: &Path) -> Command {
     let mut command = Command::new("sh");
     command
-        .args(["-c", NESTED_SHELL, NESTED_SHELL, "13"])
+        .args(["-c", NESTED_SHELL, NESTED_SHELL])
+        .arg(SHELLS.to_string())
         .arg(env!("CARGO_BIN_EXE_forward"))
         .args(["browser", "grant", "--config"])
         .arg(config)
@@ -28,7 +31,7 @@ fn browser_grant_scope_refuses_before_any_connection() {
     let config = directory.path().join("forward.toml");
     std::fs::write(&config, "").unwrap();
 
-    let output = grant_beneath_thirteen_shells(&config)
+    let output = grant_beneath_more_shells_than_the_hop_cap(&config)
         .env("SECRETSD_SOCK", &broker_socket)
         .env("XDG_RUNTIME_DIR", &runtime)
         .env_remove("SECRETSD_SESSION_TOKEN_FILE")

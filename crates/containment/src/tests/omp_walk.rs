@@ -67,6 +67,9 @@ fn chain(omp_hop: u32) -> Table {
 
 #[test]
 fn omp_anchor_walk_boundaries_and_termination() {
+    // These boundary cases are written for the 12-hop cap; fail here, not
+    // with a confusing table mismatch, if the cap changes.
+    assert_eq!(crate::MAX_ANCESTRY_HOPS, 12);
     let cases = [
         (
             "twelfth ancestor",

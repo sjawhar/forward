@@ -7,7 +7,11 @@ use super::{Queue, RequestId, RequestState};
 /// when the cooldown is shorter. A failure that returns at once (an absent PC/SC
 /// socket, an instant sops error) would otherwise re-run without pause until
 /// the request's time to live ends.
-pub(super) const MIN_RETRY_DELAY: Duration = Duration::from_secs(1);
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "the worker's attempt test steps past this minimum through a crate-private module"
+)]
+pub(crate) const MIN_RETRY_DELAY: Duration = Duration::from_secs(1);
 
 impl PendingRequest {
     /// Whether this request waits for its turn and, after a failed attempt,

@@ -102,16 +102,15 @@ pub fn anchor_for_with(
 /// no omp executable encloses the command.
 ///
 /// `None` when that parent is init or `pid` itself, which is a command whose
-/// calling process has already gone.
+/// calling process has already gone, or when `/proc` cannot be read for `pid`
+/// or its parent.
 #[must_use]
 pub fn parent_anchor_for(pid: u32) -> Option<AnchoredPeer> {
     parent_anchor_with(pid, &mut read_process)
 }
 
-/// Test seam: resolve the parent anchor against a caller-supplied lookup.
-#[doc(hidden)]
-#[must_use]
-pub fn parent_anchor_with(
+/// Resolve the parent anchor against `lookup`.
+fn parent_anchor_with(
     pid: u32,
     lookup: &mut dyn FnMut(u32) -> Option<Process>,
 ) -> Option<AnchoredPeer> {
@@ -197,13 +196,10 @@ pub fn read_process(pid: u32) -> Option<Process> {
         .filter(|part| !part.is_empty())
         .map(|part| String::from_utf8_lossy(part).into_owned())
         .collect();
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let tail = crate::stat_fields(&stat)?;
-    let parent = tail.split_whitespace().nth(1)?.parse().ok()?;
-    let started = tail.split_whitespace().nth(19)?.parse().ok()?;
+    let stat = crate::read_stat(pid)?;
     Some(Process {
         argv,
-        parent,
-        start: started,
+        parent: stat.parent,
+        start: stat.start,
     })
 }

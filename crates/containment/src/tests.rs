@@ -242,3 +242,6 @@ mod omp_anchor;
 
 #[path = "tests/omp_walk.rs"]
 mod omp_walk;
+
+#[path = "tests/stat.rs"]
+mod stat;

@@ -5,6 +5,7 @@ use super::{Job, State, finish_attempt};
 use crate::decrypt::AttemptError;
 use crate::grants::Scope;
 use crate::proto::ErrCode;
+use crate::requests::retry::MIN_RETRY_DELAY;
 use crate::requests::{RequestId, RequestState};
 use crate::secret::SecretName;
 
@@ -71,7 +72,8 @@ fn retry_a_killed_attempt_keeps_the_last_real_failure() {
     assert_eq!(state.failures, vec![(id, ErrCode::YubikeyUnreachable)]);
 
     // When a waiter's deadline ends the second attempt and its killed sops fails.
-    let later = Instant::now() + Duration::from_secs(2);
+    // The first failure began the MIN_RETRY_DELAY wait, so `later` is past it.
+    let later = Instant::now() + MIN_RETRY_DELAY;
     let second = state.queue.mark_decrypting(id, later).unwrap();
     assert!(state.queue.timeout(id, later));
     let second_job = job(&state, id, second, 2, &scope);

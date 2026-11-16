@@ -15,7 +15,7 @@ use std::os::fd::{AsRawFd, OwnedFd};
 use std::os::unix::net::UnixStream;
 use std::sync::Arc;
 
-use crate::{Step, stat_fields, status_field, walk};
+use crate::{Step, read_stat, status_field, walk};
 
 /// Upper bound on a `/proc` parent walk, so a pathological tree cannot spin the
 /// daemon. Deeper than the anchored cap because a broker caller may sit far
@@ -186,6 +186,5 @@ pub(crate) fn descends_from_pid(caller: i32, ancestor: i32) -> bool {
 /// Read positionally out of `stat`, not by key out of `status`: a process
 /// controls its own comm, and in `status` that comm precedes `PPid:`.
 pub(crate) fn parent_of(pid: i32) -> Option<i32> {
-    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    stat_fields(&stat)?.split_whitespace().nth(1)?.parse().ok()
+    i32::try_from(read_stat(u32::try_from(pid).ok()?)?.parent).ok()
 }
