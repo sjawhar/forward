@@ -8,6 +8,7 @@
 
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -151,6 +152,7 @@ fn spawn_serve(grants: Grants, slot: FeedSlot, runtime: &std::path::Path, relay_
     });
 }
 
+#[cfg_attr(miri, ignore)]
 #[test]
 fn a_granted_endpoint_answers_json_version_in_the_callers_namespace() {
     // The bug this whole shape exists to fix: the printed endpoint had no
@@ -181,14 +183,19 @@ fn a_granted_endpoint_answers_json_version_in_the_callers_namespace() {
     let token_file = runtime.join("session.token");
     std::fs::write(&token_file, "endpoint-test-session").unwrap();
 
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_forward"))
+    let grant = Command::new(env!("CARGO_BIN_EXE_forward"))
         .args(["browser", "grant", "--ttl", "45s", "--config"])
         .arg(&config)
         .env("XDG_RUNTIME_DIR", runtime)
         .env("SECRETSD_SOCK", runtime.join("secretsd.sock"))
         .env("SECRETSD_SESSION_TOKEN_FILE", &token_file)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .unwrap();
+    let grant_start = forward::browser::peer::process_start(grant.id()).unwrap();
+    let output = grant.wait_with_output().unwrap();
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert_eq!(output.status.code(), Some(0), "stderr: {stderr}");
@@ -225,7 +232,7 @@ fn a_granted_endpoint_answers_json_version_in_the_callers_namespace() {
         .live_for_descendant(caller)
         .expect("the grant is recorded for this test's process tree");
     assert_eq!(recorded_port, port);
-    assert_is_a_session_leader(relay_child());
+    assert_is_a_session_leader(relay_child(grant_start));
 
     // Retire the detached child rather than leaving it running for the TTL.
     grants.invalidate_authority();

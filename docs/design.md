@@ -48,12 +48,17 @@ secrets keep working unattended with zero interaction, exactly as today.
   metadata. A same-UID "private plugin channel" would be security theater
   (any such credential is readable by the same UID); structured journald
   records retain kernel-derived peer attribution for after-the-fact review.
-- **Tokenless path abuse**: an agent that strips its own env can reach the
-  interactive `(tty, boot-id)` flow. It still cannot get a grant without a
-  touch, and the request's scope is recorded in journald. Best-effort
-  hardening: the plugin registers PTYs it allocates and the broker rejects
-  tokenless requests from them; ttys the plugin cannot see (for example,
-  agent-created tmux panes) remain an accepted same-UID residual.
+- **Tokenless path abuse**: an agent that strips its own environment can reach
+  the interactive `(tty, boot-id)` flow. A process below an omp process can
+  also ask for an `AUTHORIZE` capability scope. The omp test reads only the
+  executable's file name, so any same-UID process that runs a binary named
+  `omp`, or one named `omp` that was since deleted, gets an omp capability
+  scope for the processes below it, not only a process below a real omp. Each
+  capability authorization, these included, runs a fresh decrypt and needs its
+  own touch. The audit record includes `scope_kind` and `scope_omp_pid`.
+  Best-effort hardening: the plugin registers PTYs it allocates and the broker
+  rejects tokenless requests from them; ttys the plugin cannot see (for
+  example, agent-created tmux panes) remain an accepted same-UID residual.
 - **Plaintext temp file while creating a new secret**: `secrets edit-human KEY`
   on a key that does not exist yet runs the editor on a `0600` plaintext file
   in the runtime directory, then encrypts it into place. The value therefore
@@ -230,7 +235,9 @@ with — enforcement is cryptographic.
 
 ## Authorization model
 
-A grant is `(session_token, key)`, held in broker memory.
+A secret grant is stored under a `(scope, key)` pair in broker memory. A scope
+is a token-verified session, `(tty, boot-id)`, or, for `AUTHORIZE` only, an omp
+process identified by its pid and start time.
 
 - Requests carry the session token, read by the shim from the file named in
   `SECRETSD_SESSION_TOKEN_FILE`, and authorization is a constant-time token
@@ -356,15 +363,29 @@ A grant is `(session_token, key)`, held in broker memory.
 
 ```
 request → pending → decrypting → granted ──(session end | lock | its own ttl)→ revoked+zeroized
-                        │
-                        ├─ denied  (secrets deny / timeout 90s)
-                        └─ failed  (YubiKey unreachable, decrypt error)
+                        ├─ retryable hardware failure → pending at the queue tail, retried after max(cooldown, 1 s)
+                        ├─ DENY / LOCK after an attempt → denied
+                        ├─ expiry → timed out
+                        └─ non-retryable decrypt error → failed
 ```
 
-- State transitions are atomic with generation IDs. Deny/timeout kills the
-  decrypt child process group and discards late output. Concurrent waiters
-  are coalesced **only** for the same `(token, key)`; one session's approval
-  never creates another session's grant.
+- State transitions are atomic with generation IDs. Deny, `LOCK`, and expiry
+  kill the decrypt child process group and discard late output. A `LOCK` also
+  denies a request waiting to retry after it has made an attempt. A retryable
+  hardware failure keeps its original deadline, moves the request to the back
+  of the queue, and starts the cooldown before another request can decrypt.
+  When the request's scope has ended by then (its session root, terminal or
+  omp process is gone), the failure denies the request instead. The retried
+  request waits the cooldown or 1 second, whichever is longer, before its next
+  attempt, so a failure that returns at once (no PC/SC socket, an instant sops
+  error) cannot re-run without pause for the whole time to live; other
+  requests wait only the cooldown. Deny, `LOCK`, and expiry still end it
+  during that wait.
+  Concurrent waiters are coalesced **only** for the same `(scope, key)`, and
+  only for a secret: a second `GET` or `REQUEST` for that pair joins the
+  request already pending or decrypting. A capability is never coalesced: a
+  second `AUTHORIZE` in a scope that already has one pending or decrypting gets
+  `TOO_MANY_PENDING`. One scope's approval never creates another scope's grant.
 - Revocation triggers: plugin session-end event (primary), `secrets lock`
   (wipe all + revoke all), and each grant's own backstop -- 12h by default,
   or up to the `SECRETSD_MAX_REQUESTED_GRANT_SECS` ceiling (24h by default)
@@ -410,13 +431,18 @@ The capability protocol is line-oriented and tab-delimited:
 ```
 AUTHORIZE\tcap=<name>\ttoken=<64-hex>\n
 AUTHORIZE\tcap=<name>\ttty=<path>\n
+AUTHORIZE\tcap=<name>\n
     → OK\tstatus=authorized receipt=<64-hex>\n
 REDEEM\treceipt=<64-hex>\tcap=<name>\n
     → OK\tstatus=redeemed cap=<name>\n
 ```
 
-The `token` and `tty` forms are alternative authorization scopes. The
-authorization reply is a receipt, never a capability value.
+The token and terminal forms are scopes. The scope-less form makes the broker
+use the pinned caller's nearest omp process, and only `AUTHORIZE` accepts it.
+The authorization reply is a receipt, never a capability value. The shared
+client waits at most 120 seconds for that reply. The default request time to
+live is 90 seconds; when the daemon has a longer request time to live, the
+client stops waiting first.
 
 ## Approval UX
 
@@ -426,23 +452,27 @@ authorization reply is a receipt, never a capability value.
    acknowledgement gates this step. The operator initiates the request, and
    the structured journald event is the sole after-the-fact attribution when
    asking why the key blinked.
-3. **One touch completes the grant**. `secrets deny <id>` or the 90s timeout
-   rejects it.
+3. **One successful touch completes the grant.** A retryable hardware failure
+   starts another attempt while the request time to live remains. Each attempt
+   needs its own touch. `secrets deny <id>` and expiry are final. `LOCK` is
+   final after the request has made an attempt.
 4. **Single-flight**: at most one YubiKey operation is in flight; the broker
    waits out the hardware touch cache before starting the next pending
    decrypt, so one touch can never approve two requests. With cached-touch
-   keys (the default assumption) that wait must exceed the 15s PIV cache;
-   an operator whose every human-tier key is touch-policy Always declares
+   keys (the default assumption) that wait must exceed the 15s PIV cache; an
+   operator whose every human-tier key is touch-policy Always declares
    `SECRETSD_TOUCH_POLICY=always`, which removes the floor because each
    decrypt then demands its own physical touch. The declaration is trusted,
    not probed: a false `always` on cached hardware reopens the
-   one-touch-two-grants window for queued requests.
-   Per-scope pending-request limits with backoff after deny/timeout prevent
-   one hostile or broken session from flooding the single-flight queue and
-   locking out legitimate grants; `secrets deny` and `secrets lock` are
-   always serviced immediately, ahead of the queue.
-5. Devbox: approval requires the YubiKey tunnel. If unreachable, fail fast
-   with "YubiKey unreachable — connect the pcscd bridge", not a hang.
+   one-touch-two-grants window for queued requests. A retryable failure moves
+   to the back of the queue and starts the cooldown; that request's next
+   attempt waits at least 1 second even when the cooldown is shorter. Per-scope
+   pending-request limits with backoff after deny or timeout prevent one
+   hostile or broken session from flooding the queue and locking out
+   legitimate grants; `secrets deny` and `secrets lock` are always serviced
+   immediately, ahead of the queue.
+5. Devbox: approval requires the YubiKey tunnel. An unreachable key is retried
+   until the request time to live ends, then returns `YUBIKEY_UNREACHABLE`.
 6. Repeat access within a granted session: instant, silent, no hardware
    interaction.
 

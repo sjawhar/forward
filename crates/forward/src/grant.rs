@@ -1,8 +1,8 @@
 //! The `browser` CLI subcommands: `grant`, and the relay it leaves behind.
 //!
-//! Ordering is the point: every refusal forward serve can predict is answered
-//! by the probe before the broker's YubiKey ceremony, so a refusal never costs
-//! the human a touch or a single-use receipt.
+//! The no-scope refusal is first: it must not contact either service or cost a
+//! human a touch. Once scope is available, the forward-serve probe still runs
+//! before the broker ceremony, so a predictable serve refusal costs no touch.
 
 use std::io::Write as _;
 use std::net::TcpListener;
@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use forward::browser::grant::ProcessAnchor;
-use forward::browser::peer::anchor_for;
+use forward::browser::peer::{omp_anchor_for, parent_anchor_for};
 use forward::browser::relay;
 use forward::browser::request::{
     ProbeOutcome, RequestFailure, describe_refusal, parse_ttl, probe, request, socket_path,
@@ -51,35 +51,59 @@ pub(crate) fn run(action: BrowserCommand) -> anyhow::Result<()> {
     }
 }
 
+const NO_GRANT_SCOPE: &str = "forward: grant refused before any touch: no omp process runs above this command, and it has no session token and no terminal; run it from an omp session or an interactive terminal";
+
 fn grant(ttl: &str, config: Option<PathBuf>) -> anyhow::Result<()> {
     let _ = crate::load_config(config)?;
     let Some(ttl_secs) = parse_ttl(ttl) else {
         eprintln!("forward: invalid --ttl {ttl:?}; use 45s, 30m, or 2h");
         std::process::exit(1);
     };
-    let socket = socket_path();
-    match probe(&socket) {
-        ProbeOutcome::Unreachable => exit_unreachable(&socket),
-        ProbeOutcome::Refused(reason) => exit_refused(&reason),
-        ProbeOutcome::Grantable => {}
+
+    // Read these once before any probe. The no-scope refusal must come before
+    // either service is contacted, and the exact values selected here must form
+    // the AUTHORIZE scope after a successful probe.
+    let token =
+        forward::secretsd::session_token().unwrap_or_else(|error| crate::exit_with_error(error));
+    let tty = forward::secretsd::caller_tty();
+    let pid = std::process::id();
+    // The anchor is derived here, in the command itself, because here is the
+    // only place it can be: this process's ancestry is intact and its
+    // `/proc/<pid>/exe` entries are readable, neither of which holds for a
+    // `forward serve` on the other side of an agent box's user namespace.
+    let omp_anchor = omp_anchor_for(pid);
+    if let Some(refusal) = grant_scope_refusal(token.is_some(), tty.is_some(), omp_anchor.is_some())
+    {
+        eprintln!("{refusal}");
+        std::process::exit(1);
     }
-    // Derived here, before the ceremony, because here is the only place it can
-    // be: this process's ancestry is intact and its `/proc/<pid>/exe` entries
-    // are readable, neither of which holds for a `forward serve` on the other
-    // side of an agent box's user namespace.
-    let Some(anchor) = anchor_for(std::process::id()) else {
+
+    // The nearest omp executable is both this relay's anchor and the broker's
+    // tokenless capability scope. A token or tty preserves the immediate-parent
+    // fallback for an interactive command with no omp ancestor, and taking that
+    // parent directly keeps the ancestry walk above to a single pass.
+    let Some(anchor) = omp_anchor.or_else(|| parent_anchor_for(pid)) else {
         // Not `describe_refusal("ANCHOR")`: that sentence blames `forward serve`,
         // and here it is this command that could not find its session.
         eprintln!("forward: grant refused: could not anchor this command to a calling session");
         std::process::exit(1);
     };
-    // Bound before the ceremony for the same reason the probe runs before it:
-    // a local bind failure is a refusal this command can predict, and a
-    // predictable refusal must never cost a touch or a single-use receipt.
+
+    let socket = socket_path();
+    // Scope is settled before this probe; after that gate, a deterministic
+    // forward-serve refusal must still happen before the broker touch ceremony.
+    match probe(&socket) {
+        ProbeOutcome::Unreachable => exit_unreachable(&socket),
+        ProbeOutcome::Refused(reason) => exit_refused(&reason),
+        ProbeOutcome::Grantable => {}
+    }
+    // Bound before the ceremony for the same reason as the probe: a local bind
+    // failure is predictable and must never cost a touch or receipt.
     let (listener, port) = bind_endpoint();
-    // The broker runs the YubiKey ceremony; this blocks through the touch
-    // window and prints nothing until it resolves.
-    let receipt = forward::secretsd::authorize(forward::secretsd::CAP_BROWSER)
+    // The broker owns the ceremony and retries failed hardware attempts inside
+    // its request TTL. This waits for its final result using the token and tty
+    // already read for the refusal decision above.
+    let receipt = forward::secretsd::authorize_with(forward::secretsd::CAP_BROWSER, token, tty)
         .unwrap_or_else(|error| crate::exit_with_error(error));
     let granted = request(&socket, ttl_secs, &receipt, port);
     drop(receipt);
@@ -92,6 +116,10 @@ fn grant(ttl: &str, config: Option<PathBuf>) -> anyhow::Result<()> {
     let mut stdout = std::io::stdout().lock();
     writeln!(stdout, "http://127.0.0.1:{port}")?;
     Ok(())
+}
+
+fn grant_scope_refusal(has_token: bool, has_tty: bool, has_omp: bool) -> Option<&'static str> {
+    (!has_token && !has_tty && !has_omp).then_some(NO_GRANT_SCOPE)
 }
 
 /// Bind the grant's endpoint in this process's own network namespace, which is
@@ -130,4 +158,25 @@ fn exit_unreachable(socket: &Path) -> ! {
 fn exit_refused(reason: &str) -> ! {
     eprintln!("forward: grant refused: {}", describe_refusal(reason));
     std::process::exit(1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{NO_GRANT_SCOPE, grant_scope_refusal};
+
+    #[test]
+    fn grant_scope_refuses_only_without_token_tty_or_omp() {
+        for (has_token, has_tty, has_omp, expected) in [
+            (false, false, false, Some(NO_GRANT_SCOPE)),
+            (true, false, false, None),
+            (false, true, false, None),
+            (false, false, true, None),
+            (true, true, false, None),
+            (true, false, true, None),
+            (false, true, true, None),
+            (true, true, true, None),
+        ] {
+            assert_eq!(grant_scope_refusal(has_token, has_tty, has_omp), expected);
+        }
+    }
 }

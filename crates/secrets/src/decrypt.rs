@@ -16,9 +16,11 @@ use crate::proto::ErrCode;
 use crate::secret::{SecretBytes, SecretName, parse_single_assignment};
 use crate::store::{FileIdentity, HumanStore, OpenedHumanFile};
 
+mod attempt;
 mod classify;
 
-use classify::{classify_sops_stderr, failure_code};
+pub(crate) use attempt::AttemptError;
+use classify::{classify_sops_stderr, failure_code, retryable_failure};
 
 /// Polling period while a sops child is active.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
@@ -164,26 +166,31 @@ impl Decryptor {
     {
         self.decrypt_opened_with_start(store, key, on_started)
             .map(|decrypted| decrypted.value)
+            .map_err(|error| error.code)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one sops child lifecycle keeps its descriptor, process group, and zeroized buffers together"
+    )]
     pub(crate) fn decrypt_opened_with_start<F>(
         &self,
         store: &HumanStore,
         key: &SecretName,
         on_started: F,
-    ) -> Result<DecryptedHumanFile, ErrCode>
+    ) -> Result<DecryptedHumanFile, AttemptError>
     where
         F: FnOnce(i32),
     {
         if !self.reachable() {
-            return Err(ErrCode::YubikeyUnreachable);
+            return Err(AttemptError::unreachable_probe());
         }
         let OpenedHumanFile {
             label: source,
             identity,
             file: validated,
-        } = store.open(key)?;
-        let inherited = duplicate_ciphertext_fd(&validated)?;
+        } = store.open(key).map_err(AttemptError::from)?;
+        let inherited = duplicate_ciphertext_fd(&validated).map_err(AttemptError::from)?;
         let fd_path = format!("/proc/self/fd/{}", inherited.as_raw_fd());
         let mut child = Command::new(&self.sops_bin)
             .arg("-d")
@@ -207,13 +214,18 @@ impl Decryptor {
                     %error,
                     "could not spawn sops"
                 );
-                ErrCode::Internal
+                AttemptError::non_retryable(ErrCode::Internal, "sops-spawn-failed")
             })?;
-        let process_id = i32::try_from(child.id()).map_err(|_| ErrCode::Internal)?;
+        let process_id = i32::try_from(child.id())
+            .map_err(|_| AttemptError::non_retryable(ErrCode::Internal, "sops-process-id"))?;
         on_started(process_id);
-        let deadline = Instant::now()
-            .checked_add(self.timeout)
-            .ok_or(ErrCode::Internal)?;
+        let deadline =
+            Instant::now()
+                .checked_add(self.timeout)
+                .ok_or(AttemptError::non_retryable(
+                    ErrCode::Internal,
+                    "decrypt-deadline",
+                ))?;
 
         loop {
             match child.try_wait() {
@@ -222,7 +234,10 @@ impl Decryptor {
                     let read_result = child
                         .stderr
                         .take()
-                        .ok_or(ErrCode::Internal)?
+                        .ok_or(AttemptError::non_retryable(
+                            ErrCode::Internal,
+                            "sops-stderr-unavailable",
+                        ))?
                         .by_ref()
                         .take(MAX_SOPS_STDERR_BYTES)
                         .read_to_end(&mut stderr);
@@ -239,29 +254,48 @@ impl Decryptor {
                             sops_stderr_bytes = stderr_bytes,
                             "sops decrypt failed"
                         );
-                        return Err(failure_code(failure));
+                        return Err(AttemptError {
+                            code: failure_code(failure),
+                            retryable: retryable_failure(failure),
+                            label: failure,
+                        });
                     }
                     let mut stdout = Vec::new();
-                    let mut stdout_pipe = child.stdout.take().ok_or(ErrCode::Internal)?;
+                    let mut stdout_pipe = child.stdout.take().ok_or(
+                        AttemptError::non_retryable(ErrCode::Internal, "sops-stdout-unavailable"),
+                    )?;
                     if stdout_pipe.read_to_end(&mut stdout).is_err() {
                         stdout.zeroize();
-                        return Err(ErrCode::Internal);
+                        return Err(AttemptError::non_retryable(
+                            ErrCode::Internal,
+                            "sops-stdout-unreadable",
+                        ));
                     }
                     let result = parse_single_assignment(&stdout, key);
                     stdout.zeroize();
-                    return result.map(|value| DecryptedHumanFile {
-                        source,
-                        identity,
-                        value,
-                    });
+                    return result
+                        .map(|value| DecryptedHumanFile {
+                            source,
+                            identity,
+                            value,
+                        })
+                        .map_err(AttemptError::from);
                 }
                 Ok(None) if Instant::now() >= deadline => {
                     let _ = killpg(Pid::from_raw(process_id), Signal::SIGKILL);
                     let _ = child.wait();
-                    return Err(ErrCode::Timeout);
+                    return Err(AttemptError::non_retryable(
+                        ErrCode::Timeout,
+                        "decrypt-timeout",
+                    ));
                 }
                 Ok(None) => std::thread::sleep(POLL_INTERVAL),
-                Err(_) => return Err(ErrCode::Internal),
+                Err(_) => {
+                    return Err(AttemptError::non_retryable(
+                        ErrCode::Internal,
+                        "sops-wait-failed",
+                    ));
+                }
             }
         }
     }

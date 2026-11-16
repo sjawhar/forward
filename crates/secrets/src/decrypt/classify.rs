@@ -66,6 +66,11 @@ const UNREACHABLE_FAILURE_LABELS: &[&str] = &["yubikey-plugin-error", "pcsc-comm
 /// no approval happened -- so both must say so instead of blaming sops.
 const UNTOUCHED_FAILURE_LABELS: &[&str] = &["yubikey-stanza-undecryptable"];
 
+/// Labels whose hardware failures may resolve when the next touch window opens.
+pub(super) fn retryable_failure(label: &str) -> bool {
+    UNREACHABLE_FAILURE_LABELS.contains(&label) || UNTOUCHED_FAILURE_LABELS.contains(&label)
+}
+
 pub(super) fn failure_code(label: &str) -> ErrCode {
     if UNREACHABLE_FAILURE_LABELS.contains(&label) {
         ErrCode::YubikeyUnreachable

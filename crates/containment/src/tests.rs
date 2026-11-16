@@ -90,7 +90,7 @@ fn the_anchor_falls_back_to_the_immediate_parent_without_a_session() {
         (20, process(&["sshd"], 1, 2_000)),
     ]);
 
-    let anchor = anchor_for_with(40, &mut lookup(plain), &mut |_| true).expect("fallback");
+    let anchor = anchor_for_with(40, &mut lookup(plain), &mut |_| false).expect("fallback");
 
     assert_eq!(anchor, AnchoredPeer::new(30, 3_000));
 }
@@ -99,7 +99,7 @@ fn the_anchor_falls_back_to_the_immediate_parent_without_a_session() {
 fn a_caller_whose_parent_is_init_has_no_anchor() {
     let orphan = HashMap::from([(40, process(&["worker"], 1, 4_000))]);
 
-    assert!(anchor_for_with(40, &mut lookup(orphan), &mut |_| true).is_none());
+    assert!(anchor_for_with(40, &mut lookup(orphan), &mut |_| false).is_none());
 }
 
 #[test]
@@ -117,7 +117,9 @@ fn the_session_label_matches_only_omp_resume_with_a_session_id() {
 
     for (argv, expected) in cases {
         let table = HashMap::from([(40, process(argv, 1, 1))]);
-        let resolved = session_label_with(40, &mut lookup(table), &mut |_| true);
+        // The single process has an omp executable; argv still decides only
+        // whether its display label is a resumed session.
+        let resolved = session_label_with(40, &mut lookup(table), &mut |pid| pid == 40);
         assert_eq!(resolved.is_some(), expected, "argv {argv:?}");
     }
 }
@@ -154,12 +156,13 @@ fn over_deep_ancestry_is_not_authorized() {
 
 #[test]
 fn over_deep_ancestry_does_not_reach_a_session() {
+    // Only pid 2 has an omp executable; the other entries are workers.
     assert_eq!(
-        session_label_with(30, &mut lookup(deep_chain(30)), &mut |_| true),
+        session_label_with(30, &mut lookup(deep_chain(30)), &mut |pid| pid == 2),
         None
     );
     assert_eq!(
-        session_label_with(8, &mut lookup(deep_chain(30)), &mut |_| true).as_deref(),
+        session_label_with(8, &mut lookup(deep_chain(30)), &mut |pid| pid == 2).as_deref(),
         Some(SESSION)
     );
 }
@@ -203,9 +206,9 @@ fn process_start_reads_the_live_process_table() {
 }
 
 #[test]
-fn the_anchor_selects_the_nearest_session_ancestor_not_the_outermost() {
-    // Nested sessions: the grant belongs to the innermost enclosing one, so a
-    // nested agent cannot anchor its grant to its parent session's whole tree.
+fn the_anchor_selects_the_nearest_omp_executable_not_the_outermost() {
+    // Only pids 10 and 11 have omp executables; the sh process is not an omp
+    // even though it sits between the command and the nearest one.
     let nested = HashMap::from([
         (13, process(&["forward", "browser", "grant"], 12, 10)),
         (12, process(&["sh", "-c", "forward"], 11, 20)),
@@ -213,7 +216,8 @@ fn the_anchor_selects_the_nearest_session_ancestor_not_the_outermost() {
         (10, process(&["omp", "--resume", SESSION], 1, 40)),
     ]);
 
-    let anchor = anchor_for_with(13, &mut lookup(nested), &mut |_| true).expect("anchor");
+    let anchor = anchor_for_with(13, &mut lookup(nested), &mut |pid| matches!(pid, 10 | 11))
+        .expect("anchor");
 
     assert_eq!(anchor, AnchoredPeer::new(11, 30));
 }
@@ -225,10 +229,19 @@ fn the_anchor_falls_back_to_the_callers_immediate_parent() {
         (11, process(&["sh", "-c", "forward"], 1, 20)),
     ]);
 
-    let anchor = anchor_for_with(12, &mut lookup(no_session), &mut |_| true).expect("fallback");
+    let anchor = anchor_for_with(12, &mut lookup(no_session), &mut |_| false).expect("fallback");
 
     assert_eq!(anchor, AnchoredPeer::new(11, 20));
 }
 
 #[path = "tests/pinned_peer.rs"]
 mod pinned_peer;
+
+#[path = "tests/omp_anchor.rs"]
+mod omp_anchor;
+
+#[path = "tests/omp_walk.rs"]
+mod omp_walk;
+
+#[path = "tests/stat.rs"]
+mod stat;

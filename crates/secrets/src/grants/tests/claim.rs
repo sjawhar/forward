@@ -77,14 +77,20 @@ fn a_descendant_of_the_holder_may_re_register_the_session() {
     assert_eq!(displaced, vec![token(0xaa)]);
     assert!(registry.registration(&token(0xaa)).is_none());
     assert_eq!(
-        registry.resolve(Some(&token(0xbb)), None, Some(caller.identity())),
+        registry.resolve(
+            Some(&token(0xbb)),
+            None,
+            Some(caller.identity()),
+            ScopeUse::Secret,
+        ),
         Ok(Scope::Session(token(0xbb)))
     );
     assert_eq!(
         registry.resolve(
             Some(&token(0xbb)),
             None,
-            Some(&crate::peer::current_for_test())
+            Some(&crate::peer::current_for_test()),
+            ScopeUse::Secret,
         ),
         Err(ErrCode::ForeignCaller)
     );
@@ -110,7 +116,12 @@ fn refuses_a_register_that_would_displace_a_live_holder() {
     assert_eq!(registry.sessions.len(), 1);
     assert_eq!(
         registry
-            .resolve(Some(&token(0xaa)), None, Some(holder.identity()))
+            .resolve(
+                Some(&token(0xaa)),
+                None,
+                Some(holder.identity()),
+                ScopeUse::Secret,
+            )
             .ok(),
         Some(Scope::Session(token(0xaa)))
     );
@@ -131,7 +142,12 @@ fn refuses_an_unregister_from_outside_the_holders_process_tree() {
     assert_eq!(refused.err(), Some(Refusal::ForeignClaim { holder_pid }));
     assert_eq!(
         registry
-            .resolve(Some(&token(0xaa)), None, Some(holder.identity()))
+            .resolve(
+                Some(&token(0xaa)),
+                None,
+                Some(holder.identity()),
+                ScopeUse::Secret,
+            )
             .ok(),
         Some(Scope::Session(token(0xaa)))
     );

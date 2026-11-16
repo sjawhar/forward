@@ -62,14 +62,20 @@ in `forward serve`, and `forward serve` closing it ends the endpoint.
 
 ### Containment
 
-Each grant identifies an `omp --resume` session and anchors it to that session
-root's kernel PID plus process start time. The short-lived grant CLI is not the
-anchor: it exits immediately, so making it the boundary would refuse every
-later browser connection. The relay resolves each loopback client's owning
-process and requires that it descend from the enclosing session root. Every
-descendant of that root, including a sibling process in the same agent session,
-may use the endpoint; a process outside that tree may not. The session
-identifier is for reporting, while the PID-and-start-time anchor is the
+Each grant anchors on the nearest ancestor whose executable is named `omp`.
+The walk begins at the grant CLI's parent and visits at most 12 processes. It
+reads `/proc/<pid>/exe`, so an ancestor is selected whatever its arguments say.
+An omp whose binary was deleted while it runs still counts: the kernel then
+names the executable `omp (deleted)`, and that exact name is accepted too.
+`omp --resume` supplies only the session label for reporting. If the walk finds
+no omp process, the CLI's immediate parent remains the anchor.
+
+The short-lived grant CLI is not the anchor: it exits immediately, so making it
+the boundary would refuse every later browser connection. The relay resolves
+each loopback client's owning process and requires that it descend from the
+anchor. Every descendant of that process, including a sibling process in the
+same agent session, may use the endpoint; a process outside that tree may not.
+The session label is for reporting, while the PID-and-start-time anchor is the
 authorization value.
 
 There are two anchors, derived separately and used for different things. The
@@ -96,13 +102,24 @@ secretsd and is never returned to `forward`. The browser client requests the
 `browser` capability. This is deliberately a yes-or-no authorization interface,
 not a secret-fetch interface.
 
-`forward` implements the client side of secretsd protocol v3. It opens a
-separate `HELLO` connection that requires protocol version 3 before each
+`forward` implements the client side of secretsd protocol v4. It opens a
+separate `HELLO` connection that requires protocol version 4 before each
 operation. The session-resident CLI sends `AUTHORIZE` with `cap=browser` and
-either the session token or its terminal path as scope. It validates request
-fields and caps that frame at 4096 bytes. A successful reply must contain exactly
-`status=authorized` and a 64-character lowercase-hex `receipt`; replies are
-bounded to 256 bytes and checked for their expected schema.
+either the session token or its terminal path as scope. When it has neither,
+it sends a scope-less `AUTHORIZE`; the broker derives the scope from the
+caller's nearest omp process. Only `AUTHORIZE` accepts that omp scope. `GET`
+and `REQUEST` still require a token or terminal scope.
+
+When the command has no token, terminal, or omp ancestor, it exits before it
+contacts either service or starts a touch ceremony. A failed hardware attempt
+returns the request to the queue while its request time to live remains. Each
+new attempt needs its own touch; denial, expiry, and `LOCK` end the request
+instead of starting another attempt.
+
+It validates request fields and caps that frame at 4096 bytes. A successful
+reply must contain exactly `status=authorized` and a 64-character lowercase-hex
+`receipt`; replies are bounded to 256 bytes and checked for their expected
+schema.
 
 The CLI hands that receipt to the devbox `forward serve` request socket, which
 is mode 0600. The daemon sends `REDEEM` directly to secretsd and accepts only a

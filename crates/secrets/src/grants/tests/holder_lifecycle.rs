@@ -25,7 +25,8 @@ fn a_session_whose_holder_exited_can_be_claimed_again() {
             .resolve(
                 Some(&token(0xbb)),
                 None,
-                Some(&crate::peer::current_for_test())
+                Some(&crate::peer::current_for_test()),
+                ScopeUse::Secret,
             )
             .ok(),
         Some(Scope::Session(token(0xbb)))
@@ -89,7 +90,8 @@ fn reclaiming_a_dead_session_needs_a_new_token_not_the_old_one() {
             .resolve(
                 Some(&token(0xaa)),
                 None,
-                Some(&crate::peer::current_for_test())
+                Some(&crate::peer::current_for_test()),
+                ScopeUse::Secret,
             )
             .err(),
         Some(ErrCode::ForeignCaller),
@@ -136,15 +138,20 @@ fn known_tokens_cannot_move_or_shadow_either_sessions_registration() {
 
     assert_eq!(registry.sessions.len(), 2);
     assert_eq!(
-        registry.resolve(Some(&token(0xaa)), None, Some(&caller)),
+        registry.resolve(Some(&token(0xaa)), None, Some(&caller), ScopeUse::Secret,),
         Err(ErrCode::ForeignCaller)
     );
     assert_eq!(
-        registry.resolve(Some(&token(0xaa)), None, Some(holder.identity())),
+        registry.resolve(
+            Some(&token(0xaa)),
+            None,
+            Some(holder.identity()),
+            ScopeUse::Secret,
+        ),
         Ok(Scope::Session(token(0xaa)))
     );
     assert_eq!(
-        registry.resolve(Some(&token(0xbb)), None, Some(&caller)),
+        registry.resolve(Some(&token(0xbb)), None, Some(&caller), ScopeUse::Secret,),
         Ok(Scope::Session(token(0xbb)))
     );
 }

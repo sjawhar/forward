@@ -28,8 +28,7 @@ use reply::{authorized_receipt, redeemed_cap, valid_field, valid_hex_bytes};
 #[cfg(test)]
 use transport::map_code;
 use transport::{call, call_with_socket};
-pub use validation::authorize_request;
-use validation::{caller_tty, session_token};
+pub use validation::{authorize_request, caller_tty, session_token};
 
 const SUBSCRIPTION_WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -108,7 +107,7 @@ pub enum BrokerError {
     )]
     NotProvisioned(String, String),
     #[error(
-        "forward: no session token and no terminal; run inside an omp session or an interactive shell"
+        "forward: secretsd rejected this command's authorization scope; run it from the shell of the omp session it belongs to, or from an interactive terminal"
     )]
     NoScope,
     #[error("forward: secretsd rejected the receipt")]
@@ -143,8 +142,20 @@ pub fn socket_path() -> PathBuf {
 /// Run the broker's touch ceremony for `cap`; blocks through the touch window.
 /// Returns the single-use receipt as lowercase hex bytes, wiped on drop.
 pub fn authorize(cap: &str) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
+    authorize_with(cap, session_token()?, caller_tty())
+}
+
+/// Run the broker's touch ceremony using scope inputs the caller already read.
+///
+/// A browser grant uses this to make its refusal decision and `AUTHORIZE` frame
+/// from the same token and terminal observations.
+pub fn authorize_with(
+    cap: &str,
+    token: Option<String>,
+    tty: Option<String>,
+) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
     let path = socket_path();
-    let frame = Zeroizing::new(authorize_request(cap, session_token()?, caller_tty())?);
+    let frame = Zeroizing::new(authorize_request(cap, token, tty)?);
     let fields = call(&path, &frame, Verb::Authorize { cap })?;
     let receipt = authorized_receipt(&fields)?;
     Ok(Zeroizing::new(receipt.as_bytes().to_vec()))

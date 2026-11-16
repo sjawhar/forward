@@ -63,6 +63,8 @@ mod claim;
 mod holder_lifecycle;
 #[path = "tests/lookup.rs"]
 mod lookup;
+#[path = "tests/omp_scope.rs"]
+mod omp_scope;
 #[path = "tests/registration.rs"]
 mod registration;
 #[path = "tests/registry.rs"]

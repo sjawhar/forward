@@ -45,7 +45,7 @@ fn lock_between_authorization_and_mint_clears_capability_grants_and_refuses_the_
     use std::sync::{Arc, Condvar};
     use std::time::Duration;
 
-    use crate::grants::{Registration, SessionToken};
+    use crate::grants::{Registration, ScopeUse, SessionToken};
     use crate::store::HumanSource;
 
     let directory = tempfile::tempdir();
@@ -114,7 +114,7 @@ fn lock_between_authorization_and_mint_clears_capability_grants_and_refuses_the_
     let epoch_before = super::super::lock_state(&shared.0).lock_epoch;
     let worker_shared = Arc::clone(&shared);
     let _worker = std::thread::spawn(move || super::super::worker(&worker_shared));
-    let decision = dispatch_access(&shared, &access, false, true, &caller);
+    let decision = dispatch_access(&shared, &access, ScopeUse::Secret, false, true, &caller);
     assert!(decision.request_id.is_some());
     assert!(matches!(&decision.outcome, Outcome::Fields(_)));
     let (entered_tx, entered_rx) = mpsc::sync_channel(0);
@@ -149,3 +149,76 @@ fn lock_between_authorization_and_mint_clears_capability_grants_and_refuses_the_
         Outcome::Failed(ErrCode::Denied, "locked during authorization")
     ));
 }
+
+fn omp_with_wrong_start(
+    caller: &crate::peer::PeerIdentity,
+) -> Option<containment::omp::OmpProcess> {
+    Some(containment::omp::OmpProcess::new(
+        u32::try_from(caller.pid()?).ok()?,
+        u64::MAX,
+    ))
+}
+
+#[test]
+#[cfg_attr(miri, ignore)]
+fn omp_scope_wrong_start_denies_after_one_successful_decrypt_without_a_receipt() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::sync::{Arc, Condvar};
+    use std::time::Duration;
+
+    use crate::grants::Registry;
+    use crate::store::HumanSource;
+
+    let directory = tempfile::tempdir().unwrap();
+    let human_dir = directory.path().join("human");
+    std::fs::create_dir(&human_dir).unwrap();
+    std::fs::write(human_dir.join("CAP_BROWSER.env"), b"ciphertext").unwrap();
+    let sops = directory.path().join("fake-sops");
+    std::fs::write(
+        &sops,
+        "#!/bin/sh\nprintf 'run\\n' >> \"${0}.calls\"\nprintf 'CAP_BROWSER=value\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&sops, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let config = crate::Config {
+        socket_path: PathBuf::from("/tmp/secretsd-omp-scope-test.sock"),
+        human_sources: vec![HumanSource {
+            label: "test".to_owned(),
+            dir: human_dir,
+        }],
+        sops_bin: sops.clone(),
+        pcsc_socket: None,
+        yubikey_probe_argv: Vec::new(),
+        yubikey_probe_timeout: Duration::from_secs(2),
+        touch_policy: crate::TouchPolicy::Cached,
+        max_grant: Duration::from_secs(1),
+        max_requested_grant: Duration::from_secs(1),
+        cooldown: Duration::ZERO,
+        request_ttl: Duration::from_secs(1),
+        max_pending_per_scope: 1,
+    };
+    let mut state = super::super::State::new(config).unwrap();
+    state.registry = Registry::new_with_omp_locator("test-boot".to_owned(), omp_with_wrong_start);
+    let shared = Arc::new((Mutex::new(state), Condvar::new()));
+    let caller = crate::peer::ChildPeer::spawn();
+    let worker_shared = Arc::clone(&shared);
+    let _worker = std::thread::spawn(move || super::super::worker(&worker_shared));
+
+    let decision = authorize(&shared, "browser", None, None, caller.identity());
+
+    assert!(matches!(
+        &decision.outcome,
+        Outcome::Failed(ErrCode::Denied, _)
+    ));
+    assert!(!matches!(&decision.outcome, Outcome::Receipt(_)));
+    assert_eq!(
+        std::fs::read_to_string(format!("{}.calls", sops.display()))
+            .unwrap_or_default()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+mod retry_omp_scope;

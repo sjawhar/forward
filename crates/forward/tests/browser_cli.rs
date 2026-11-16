@@ -53,12 +53,19 @@ fn a_deterministic_refusal_never_contacts_the_broker() {
     broker.set_nonblocking(true).unwrap();
     let config = runtime.join("config.toml");
     std::fs::write(&config, "").unwrap();
+    // A scope is needed to reach the probe at all: with no token, terminal or
+    // omp ancestor the command refuses before the probe. The token is a
+    // stand-in, so no real session's token reaches this listener.
+    let token_file = runtime.join("session.token");
+    std::fs::write(&token_file, "probe-test-session").unwrap();
 
     let output = Command::new(env!("CARGO_BIN_EXE_forward"))
         .args(["browser", "grant", "--ttl", "45s", "--config"])
         .arg(&config)
         .env("XDG_RUNTIME_DIR", runtime)
         .env("SECRETSD_SOCK", &broker_socket)
+        .env("SECRETSD_SESSION_TOKEN_FILE", &token_file)
+        .stdin(std::process::Stdio::null())
         .output()
         .unwrap();
 

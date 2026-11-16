@@ -21,15 +21,12 @@ fn authorize_request_prefers_a_token_over_a_tty() {
 }
 
 #[test]
-fn authorize_request_uses_a_tty_or_rejects_an_unknown_scope() {
+fn authorize_request_uses_a_tty_or_omits_scope() {
     let request = authorize_request("browser", None, Some("/dev/pts/1".to_owned())).unwrap();
     assert_eq!(request, "AUTHORIZE\tcap=browser\ttty=/dev/pts/1");
 
-    // No token and no terminal is not an anonymous request; it is a refusal.
-    assert!(matches!(
-        authorize_request("browser", None, None),
-        Err(BrokerError::NoScope)
-    ));
+    let request = authorize_request("browser", None, None).unwrap();
+    assert_eq!(request, "AUTHORIZE\tcap=browser");
 }
 
 #[test]
@@ -92,7 +89,8 @@ fn broker_errors_map_per_verb() {
         panic!("expected NotProvisioned");
     };
     assert_eq!((cap.as_str(), key.as_str()), ("browser", "BROWSER"));
-    // Every scope-shaped refusal collapses to one actionable message.
+    // Every scope-shaped refusal collapses to one message, whose action — run
+    // from the session's own shell or a terminal — answers each of them.
     for code in ["NO_SCOPE", "UNKNOWN_TOKEN", "FOREIGN_CALLER", "AGENT_TTY"] {
         assert!(
             matches!(map_code(code, authorize), BrokerError::NoScope),

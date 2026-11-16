@@ -1,36 +1,17 @@
-use std::fmt;
 use std::time::Instant;
-
-use zeroize::Zeroizing;
 
 use super::dispatch::{Decision, Outcome};
 use super::{Shared, lock_state, wait_state};
 use crate::audit::sanitize_audit_value;
-use crate::grants::{Scope, SessionToken};
+use crate::grants::{Scope, ScopeUse};
 use crate::proto::ErrCode;
 use crate::requests::{RequestId, RequestState};
 use crate::secret::SecretName;
 
-pub(super) struct Access {
-    pub(super) key: String,
-    pub(super) token_hex: Option<Zeroizing<String>>,
-    pub(super) tty: Option<String>,
-    /// Caller-requested lifetime for a freshly created grant. `None` means no
-    /// preference: the daemon's own default backstop governs.
-    pub(super) requested_ttl: Option<u64>,
-}
+mod access;
 
-impl fmt::Debug for Access {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Access")
-            .field("key", &self.key)
-            .field("token_present", &self.token_hex.is_some())
-            .field("tty", &self.tty)
-            .field("requested_ttl", &self.requested_ttl)
-            .finish()
-    }
-}
+pub(super) use access::Access;
+use access::resolve_access;
 
 enum Approval {
     Granted {
@@ -44,24 +25,13 @@ enum Approval {
     },
 }
 
-fn resolve_access(
-    shared: &Shared,
-    access: &Access,
-    caller: &crate::peer::PeerIdentity,
-) -> Result<(Scope, SecretName), ErrCode> {
-    let key = SecretName::parse(&access.key)?;
-    let token = access
-        .token_hex
-        .as_deref()
-        .map(|token_hex| SessionToken::parse_hex(token_hex.as_str()))
-        .transpose()?;
-    let (mutex, _) = &**shared;
-    let mut state = lock_state(mutex);
-    let scope = state
-        .registry
-        .resolve(token.as_ref(), access.tty.as_deref(), Some(caller))?;
-    drop(state);
-    Ok((scope, key))
+fn failure_for(state: &super::State, id: RequestId, fallback: ErrCode) -> ErrCode {
+    state
+        .failures
+        .iter()
+        .rev()
+        .find(|(failed_id, _)| *failed_id == id)
+        .map_or(fallback, |(_, error)| *error)
 }
 
 #[allow(
@@ -144,17 +114,13 @@ fn await_approval(
             }
             Some(RequestState::TimedOut) => {
                 break Approval::Incomplete {
-                    error: ErrCode::Timeout,
+                    error: failure_for(&state, id, ErrCode::Timeout),
                     request_id: id,
                 };
             }
             Some(RequestState::Failed) => {
                 break Approval::Incomplete {
-                    error: state
-                        .failures
-                        .iter()
-                        .find(|(failed_id, _)| *failed_id == id)
-                        .map_or(ErrCode::Internal, |(_, error)| *error),
+                    error: failure_for(&state, id, ErrCode::Internal),
                     request_id: id,
                 };
             }
@@ -164,7 +130,7 @@ fn await_approval(
                     state.kill_active(id);
                     condvar.notify_all();
                     break Approval::Incomplete {
-                        error: ErrCode::Timeout,
+                        error: failure_for(&state, id, ErrCode::Timeout),
                         request_id: id,
                     };
                 };
@@ -185,22 +151,28 @@ fn await_approval(
 pub(super) fn dispatch_access(
     shared: &Shared,
     access: &Access,
+    use_: ScopeUse,
     return_value: bool,
     force_fresh: bool,
     caller: &crate::peer::PeerIdentity,
 ) -> Decision {
-    let (scope, key) = match resolve_access(shared, access, caller) {
+    let (scope, key) = match resolve_access(shared, access, caller, use_) {
         Ok(resolved) => resolved,
         Err(error) => {
             return Decision {
                 outcome: Outcome::Failed(error, "request has no usable scope"),
                 scope_kind: None,
+                scope_omp_pid: None,
                 source: None,
                 request_id: None,
             };
         }
     };
     let scope_kind = Some(scope.kind());
+    let scope_omp_pid = match &scope {
+        Scope::Omp { pid, .. } => Some(*pid),
+        Scope::Session(_) | Scope::Tty { .. } => None,
+    };
     let (outcome, source, request_id) =
         match await_approval(shared, &scope, &key, force_fresh, access.requested_ttl) {
             Approval::Refused(error) => (Outcome::Failed(error, "request refused"), None, None),
@@ -242,6 +214,7 @@ pub(super) fn dispatch_access(
     Decision {
         outcome,
         scope_kind,
+        scope_omp_pid,
         source,
         request_id,
     }

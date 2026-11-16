@@ -13,6 +13,13 @@ pub enum Scope {
         /// Kernel boot identity captured when the daemon started.
         boot_id: String,
     },
+    /// An omp process identified by its kernel pid and start time.
+    Omp {
+        /// The omp process id.
+        pid: u32,
+        /// The kernel start time that distinguishes a reused pid.
+        start: u64,
+    },
 }
 
 /// Coarse classification for a grant scope.
@@ -23,6 +30,8 @@ pub enum ScopeKind {
     VerifiedSession,
     /// No token; scoped to a terminal.
     TokenlessTty,
+    /// No token or terminal; scoped to an enclosing omp process.
+    OmpProcess,
 }
 
 impl Scope {
@@ -31,6 +40,7 @@ impl Scope {
         match self {
             Self::Session(_) => ScopeKind::VerifiedSession,
             Self::Tty { .. } => ScopeKind::TokenlessTty,
+            Self::Omp { .. } => ScopeKind::OmpProcess,
         }
     }
 }

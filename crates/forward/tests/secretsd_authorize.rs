@@ -11,6 +11,10 @@ use zeroize::Zeroizing;
 const TOKEN: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const RECEIPT: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HELLO_OK: &str = "OK\tversion=4 instance=abc123\n";
+const AUTHORIZE_TOKEN: &str = "AUTHORIZE\tcap=browser\ttoken=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n";
+const AUTHORIZE_TTY: &str = "AUTHORIZE\tcap=browser\ttty=/dev/pts/1\n";
+const AUTHORIZE_WITHOUT_SCOPE: &str = "AUTHORIZE\tcap=browser\n";
+const AUTHORIZED: &str = "OK\tstatus=authorized receipt=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n";
 static AUTHORIZE_ENV: Mutex<()> = Mutex::new(());
 
 struct AuthorizeEnvironment {
@@ -19,7 +23,7 @@ struct AuthorizeEnvironment {
 }
 
 impl AuthorizeEnvironment {
-    fn set(socket: &Path, token_file: &Path) -> Self {
+    fn set(socket: &Path, token_file: Option<&Path>) -> Self {
         let environment = Self {
             socket: std::env::var_os("SECRETSD_SOCK"),
             token_file: std::env::var_os("SECRETSD_SESSION_TOKEN_FILE"),
@@ -27,7 +31,10 @@ impl AuthorizeEnvironment {
         // Serialized by AUTHORIZE_ENV because process environment is global.
         unsafe {
             std::env::set_var("SECRETSD_SOCK", socket);
-            std::env::set_var("SECRETSD_SESSION_TOKEN_FILE", token_file);
+            match token_file {
+                Some(token_file) => std::env::set_var("SECRETSD_SESSION_TOKEN_FILE", token_file),
+                None => std::env::remove_var("SECRETSD_SESSION_TOKEN_FILE"),
+            }
         }
         environment
     }
@@ -55,17 +62,14 @@ struct FakeBroker {
 }
 
 impl FakeBroker {
-    fn start(reply: &'static str) -> Self {
+    fn start(expected_authorize: &'static str, reply: &'static str) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secretsd.sock");
         let listener = UnixListener::bind(&path).unwrap();
         let worker = thread::spawn(move || {
             let steps = [
                 ("HELLO\tversion=4\n", HELLO_OK),
-                (
-                    "AUTHORIZE\tcap=browser\ttoken=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n",
-                    reply,
-                ),
+                (expected_authorize, reply),
             ];
             for (expected, reply) in steps {
                 let (stream, _) = listener.accept().unwrap();
@@ -89,16 +93,23 @@ impl FakeBroker {
 fn authorize(broker: &FakeBroker) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
     let token_file = broker.dir.path().join("token");
     std::fs::write(&token_file, TOKEN).unwrap();
-    let _environment = AuthorizeEnvironment::set(&broker.path, &token_file);
+    let _environment = AuthorizeEnvironment::set(&broker.path, Some(&token_file));
     secretsd::authorize(CAP_BROWSER)
+}
+
+fn authorize_with(
+    broker: &FakeBroker,
+    token: Option<String>,
+    tty: Option<String>,
+) -> Result<Zeroizing<Vec<u8>>, BrokerError> {
+    let _environment = AuthorizeEnvironment::set(&broker.path, None);
+    secretsd::authorize_with(CAP_BROWSER, token, tty)
 }
 
 #[test]
 fn authorize_returns_a_receipt_after_a_broker_approval() {
     let _lock = AUTHORIZE_ENV.lock();
-    let broker = FakeBroker::start(
-        "OK\tstatus=authorized receipt=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n",
-    );
+    let broker = FakeBroker::start(AUTHORIZE_TOKEN, AUTHORIZED);
 
     let result = authorize(&broker);
     broker.finish();
@@ -110,7 +121,7 @@ fn authorize_returns_a_receipt_after_a_broker_approval() {
 #[test]
 fn authorize_maps_denied_to_authorization_denied() {
     let _lock = AUTHORIZE_ENV.lock();
-    let broker = FakeBroker::start("ERR\tDENIED\tapproval declined\n");
+    let broker = FakeBroker::start(AUTHORIZE_TOKEN, "ERR\tDENIED\tapproval declined\n");
 
     let result = authorize(&broker);
     broker.finish();
@@ -125,12 +136,49 @@ fn authorize_rejects_wrong_duplicate_or_unexpected_success_fields() {
         "OK\tstatus=authorized receipt=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa extra=value\n",
     ] {
         let _lock = AUTHORIZE_ENV.lock();
-        let broker = FakeBroker::start(response);
+        let broker = FakeBroker::start(AUTHORIZE_TOKEN, response);
 
         let result = authorize(&broker);
         broker.finish();
         assert!(matches!(result, Err(BrokerError::Protocol(_))));
     }
+}
+
+#[cfg_attr(miri, ignore)]
+#[test]
+fn authorize_sends_a_scope_less_frame() {
+    let _lock = AUTHORIZE_ENV.lock();
+    let broker = FakeBroker::start(AUTHORIZE_WITHOUT_SCOPE, AUTHORIZED);
+
+    let result = authorize_with(&broker, None, None);
+    broker.finish();
+    assert!(result.is_ok());
+}
+
+#[cfg_attr(miri, ignore)]
+#[test]
+fn authorize_prefers_a_token_to_a_tty() {
+    let _lock = AUTHORIZE_ENV.lock();
+    let broker = FakeBroker::start(AUTHORIZE_TOKEN, AUTHORIZED);
+
+    let result = authorize_with(
+        &broker,
+        Some(TOKEN.to_owned()),
+        Some("/dev/pts/1".to_owned()),
+    );
+    broker.finish();
+    assert!(result.is_ok());
+}
+
+#[cfg_attr(miri, ignore)]
+#[test]
+fn authorize_uses_a_tty_without_a_token() {
+    let _lock = AUTHORIZE_ENV.lock();
+    let broker = FakeBroker::start(AUTHORIZE_TTY, AUTHORIZED);
+
+    let result = authorize_with(&broker, None, Some("/dev/pts/1".to_owned()));
+    broker.finish();
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -142,7 +190,7 @@ fn an_oversized_authorize_frame_never_reaches_the_broker() {
     listener.set_nonblocking(true).unwrap();
     let token_file = dir.path().join("token");
     std::fs::write(&token_file, TOKEN).unwrap();
-    let _environment = AuthorizeEnvironment::set(&path, &token_file);
+    let _environment = AuthorizeEnvironment::set(&path, Some(&token_file));
 
     let cap = "a".repeat(4_096);
     let result = secretsd::authorize(&cap);
@@ -162,7 +210,7 @@ fn a_control_containing_token_file_never_reaches_the_broker() {
     listener.set_nonblocking(true).unwrap();
     let token_file = dir.path().join("token");
     std::fs::write(&token_file, format!("{TOKEN}\n")).unwrap();
-    let _environment = AuthorizeEnvironment::set(&path, &token_file);
+    let _environment = AuthorizeEnvironment::set(&path, Some(&token_file));
 
     let result = secretsd::authorize(CAP_BROWSER);
     assert!(matches!(result, Err(BrokerError::Protocol(_))));

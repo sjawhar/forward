@@ -42,14 +42,48 @@ That pair means: the relay is fine, this session has no grant. Ask for one:
 forward browser grant --ttl 30m
 ```
 
-It blinks the operator's key and blocks until they tap it (about 20 seconds before it gives up with
-`authorization timed out waiting for the YubiKey touch`). On success it prints the
-session-local endpoint, e.g. `http://127.0.0.1:38987`, and leaves a small `forward browser
-relay` process behind to serve it — that endpoint is served **here**, on the loopback of
-whatever machine ran the command, so it works the same from the host and from inside an
-agent box. `forward doctor` then reads `browser grant: live for this session at
-http://127.0.0.1:38987 (1779s left) — endpoint served here; the laptop side is not probed
-from forward`.
+It opens a touch window of about 15 seconds. After each missed window, the
+broker waits for its cooldown and starts another decrypt, so the key blinks
+again until the request's time to live ends (90 seconds by default). `TIMEOUT`
+means no attempt received a touch during that whole request lifetime. On
+success it prints the session-local endpoint, e.g. `http://127.0.0.1:38987`,
+and leaves a small `forward browser relay` process behind to serve it — that
+endpoint is served **here**, on the loopback of whatever machine ran the
+command, so it works the same from the host and from inside an agent box.
+`forward doctor` then reads `browser grant: live for this session at
+http://127.0.0.1:38987 (1779s left) — endpoint served here; the laptop side is
+not probed from forward`.
+
+A Legion pane runs under `omp` without `--resume` and has no terminal. It does
+not need a session token for `forward browser grant`: the broker uses the
+caller's nearest omp process as the capability scope.
+
+Run `forward browser grant` from the pane's bash tool, not from omp's eval
+kernel. The eval kernel is itself an `omp` executable, a child process of the
+pane's omp, so a grant started from the kernel anchors on the kernel process:
+its endpoint admits only the kernel and the processes below it. A grant started
+from the bash tool anchors on the pane's omp.
+
+Run one grant at a time. Two grants started from one session's bash tool share
+one scope, and the broker holds at most one pending capability request per
+scope. A second `forward browser grant` started while the first still waits for
+its touch is refused at once with this line, and no touch is requested for it:
+
+```text
+forward: the broker's approval queue is full; wait for a pending touch to resolve and retry
+```
+
+Wait until the first grant prints its endpoint or fails.
+
+With no session token, terminal, or omp process above the command, `forward
+browser grant` prints this line and exits before it contacts the broker:
+
+```text
+forward: grant refused before any touch: no omp process runs above this command, and it has no session token and no terminal; run it from an omp session or an interactive terminal
+```
+
+This message means the command cannot form an authorization scope. No touch
+was requested.
 
 **That endpoint is a CDP discovery URL** (`/json/version` answers with the operator's Chrome and a
 `webSocketDebuggerUrl`). Hand it to the `browser` tool as `app.cdp_url`; do not use

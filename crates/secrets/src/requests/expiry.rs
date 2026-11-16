@@ -43,6 +43,35 @@ impl Queue {
         }
     }
 
+    /// Reject requests that have begun an attempt while preserving untouched work.
+    pub fn deny_attempted(&mut self) {
+        let now = Instant::now();
+        let mut inflight = None;
+        for request in &mut self.requests {
+            let decrypting = request.state == RequestState::Decrypting;
+            let waiting_to_retry = request.state == RequestState::Pending && request.attempts >= 1;
+            if decrypting || waiting_to_retry {
+                request.state = RequestState::Denied;
+                request.generation = request.generation.saturating_add(1);
+                if decrypting {
+                    inflight = Some(request.id);
+                }
+            }
+        }
+        if let Some(id) = inflight {
+            self.finish(id, now);
+        }
+    }
+
+    /// Whether the request has not passed its queue deadline.
+    pub fn deadline_not_passed(&self, id: RequestId, now: Instant) -> bool {
+        self.requests
+            .iter()
+            .find(|request| request.id == id)
+            .and_then(|request| request.created.checked_add(self.limits.ttl))
+            .is_some_and(|deadline| now <= deadline)
+    }
+
     /// Expire requests that waited too long.
     pub fn sweep_timeouts(&mut self, now: Instant) -> Vec<RequestId> {
         let ttl = self.limits.ttl;
