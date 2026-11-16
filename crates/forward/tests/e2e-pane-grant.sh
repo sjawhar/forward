@@ -5,7 +5,7 @@
 set -euo pipefail
 
 readonly skip_status=77
-readonly r4_refusal='forward: grant refused before any touch: no omp process runs above this command, and it has no session token and no terminal; run it from an omp session or an interactive terminal'
+readonly no_scope_refusal='forward: grant refused before any touch: no omp process runs above this command, and it has no session token and no terminal; run it from an omp session or an interactive terminal'
 
 scratch=''
 failed=false
@@ -66,7 +66,10 @@ nearest_omp_ancestor() {
   pid="$(proc_parent "$1")" || return 1
   for ((hop = 0; hop < 12; hop++)); do
     [[ "$pid" =~ ^[0-9]+$ ]] && ((pid > 1)) || return 1
-    exe="$(readlink "/proc/$pid/exe")" || return 1
+    # An ancestor whose exe link this process may not read is not omp, and the
+    # walk carries on to its parent, as forward's own walk does. Unreadable
+    # stat is different: without a parent pid there is nowhere to carry on to.
+    exe="$(readlink "/proc/$pid/exe" 2>/dev/null)" || exe=''
     if [[ "${exe##*/}" == omp || "${exe##*/}" == 'omp (deleted)' ]]; then
       printf '%s\n' "$pid"
       return 0
@@ -618,8 +621,8 @@ else
   systemd_grant_status=$?
 fi
 (( systemd_grant_status == 1 )) || fail 'systemd-run browser grant did not exit 1'
-printf '%s\n' "$r4_refusal" > "$scratch/expected-r4.stderr"
-cmp -s "$scratch/expected-r4.stderr" "$systemd_forward_stderr" || fail 'systemd-run browser grant did not print the R4 refusal exactly'
+printf '%s\n' "$no_scope_refusal" > "$scratch/expected-no-scope.stderr"
+cmp -s "$scratch/expected-no-scope.stderr" "$systemd_forward_stderr" || fail 'systemd-run browser grant did not print the no-scope refusal exactly'
 pass 'systemd-run browser grant refused before broker access'
 
 capability_audits=()

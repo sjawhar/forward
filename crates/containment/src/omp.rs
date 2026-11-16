@@ -1,10 +1,7 @@
 //! Find the nearest enclosing `omp` process by executable name.
 
-use crate::anchored::{AnchoredPeer, Process, read_process};
-use crate::{Step, stat_fields, walk};
-
-/// The anchored ancestry bound also limits omp discovery from a pinned peer.
-const MAX_ANCESTRY_HOPS: usize = 12;
+use crate::anchored::{AnchoredPeer, Process};
+use crate::{MAX_ANCESTRY_HOPS, Step, stat_fields, walk};
 
 /// An `omp` process instance, identified by pid and kernel start time.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -45,7 +42,7 @@ pub fn omp_anchor_for(pid: u32) -> Option<AnchoredPeer> {
 
 /// Find the nearest omp ancestor of `pid` on the live `/proc`.
 pub(crate) fn nearest_omp_for(pid: u32) -> Option<OmpProcess> {
-    nearest_omp_from_with(pid, &mut read_process, &mut is_omp_executable)
+    nearest_omp_from_with(pid, &mut stat_process, &mut is_omp_executable)
 }
 
 /// Test seam: derive an omp anchor against caller-supplied process data.
@@ -130,4 +127,21 @@ fn read_process_state(pid: u32) -> Option<(u64, char)> {
     let state = fields.next()?.chars().next()?;
     let start = fields.nth(18)?.parse().ok()?;
     Some((start, state))
+}
+
+/// Parent and start time for `pid`, with an empty argv.
+///
+/// The omp walk decides on `/proc/<pid>/exe` alone, and the broker runs it for
+/// every ancestor of a caller while it holds its state lock, so it reads each
+/// ancestor's `stat` only and never its command line.
+pub(crate) fn stat_process(pid: u32) -> Option<Process> {
+    let contents = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let mut fields = stat_fields(&contents)?.split_whitespace();
+    let parent = fields.nth(1)?.parse().ok()?;
+    let start = fields.nth(17)?.parse().ok()?;
+    Some(Process {
+        argv: Vec::new(),
+        parent,
+        start,
+    })
 }

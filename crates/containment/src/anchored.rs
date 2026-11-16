@@ -7,12 +7,8 @@
 //! time is what closes that: a recycled pid has a later start time and fails the
 //! comparison instead of inheriting authority.
 
-use crate::omp::is_omp_executable;
-use crate::{Step, walk};
-
-/// Longest ancestry walk before giving up. A worker nested deeper than this is
-/// not a session's child in any arrangement we run.
-const MAX_ANCESTRY_HOPS: usize = 12;
+use crate::omp::{is_omp_executable, omp_anchor_for_with};
+use crate::{MAX_ANCESTRY_HOPS, Step, walk};
 
 /// One process as attribution needs it.
 #[derive(Clone, Debug)]
@@ -99,9 +95,26 @@ pub fn anchor_for_with(
     lookup: &mut dyn FnMut(u32) -> Option<Process>,
     is_omp: &mut dyn FnMut(u32) -> bool,
 ) -> Option<AnchoredPeer> {
-    if let Some(anchor) = crate::omp::omp_anchor_for_with(pid, lookup, is_omp) {
-        return Some(anchor);
-    }
+    omp_anchor_for_with(pid, lookup, is_omp).or_else(|| parent_anchor_with(pid, lookup))
+}
+
+/// Anchor `pid` to its immediate parent: the anchor a grant falls back to when
+/// no omp executable encloses the command.
+///
+/// `None` when that parent is init or `pid` itself, which is a command whose
+/// calling process has already gone.
+#[must_use]
+pub fn parent_anchor_for(pid: u32) -> Option<AnchoredPeer> {
+    parent_anchor_with(pid, &mut read_process)
+}
+
+/// Test seam: resolve the parent anchor against a caller-supplied lookup.
+#[doc(hidden)]
+#[must_use]
+pub fn parent_anchor_with(
+    pid: u32,
+    lookup: &mut dyn FnMut(u32) -> Option<Process>,
+) -> Option<AnchoredPeer> {
     let parent = lookup(pid)?.parent;
     if parent <= 1 || parent == pid {
         return None;

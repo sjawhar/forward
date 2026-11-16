@@ -152,3 +152,16 @@ fn omp_anchor_process_running_states() {
         assert_eq!(omp.is_running_with(&mut |_| state), expected, "{name}");
     }
 }
+
+// Reads this process's own `/proc` entry, which miri's isolation forbids.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn omp_anchor_stat_lookup_reports_what_the_full_read_does() {
+    let pid = std::process::id();
+    let stat = crate::omp::stat_process(pid).expect("stat lookup");
+    let full = crate::anchored::read_process(pid).expect("full read");
+
+    assert_eq!((stat.parent, stat.start), (full.parent, full.start));
+    assert!(stat.argv.is_empty(), "the walk never reads argv");
+    assert!(!full.argv.is_empty(), "the full read still carries argv");
+}

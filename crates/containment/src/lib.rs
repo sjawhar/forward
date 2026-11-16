@@ -12,24 +12,38 @@
 //!   connection, which cannot be pidfd-pinned at all. It pairs the pid with the
 //!   kernel start time so a recycled pid fails the comparison instead of
 //!   inheriting authority.
-//! - [`omp::OmpProcess`] identifies the nearest enclosing `omp` executable.
+//! - [`omp::OmpProcess`] identifies the nearest enclosing `omp` executable,
+//!   selected by `/proc/<pid>/exe` and paired with that process's start time.
 //!
 //! A single identity type would make that difference invisible to every
 //! downstream caller, so a future change could route a secrets decision through
 //! unpinned evidence with the compiler silent and the code reading identically.
-//! The types do not convert into each other. What is shared is the [`walk`]:
-//! one bounded, cycle-detecting parent traversal, with each type supplying its
-//! own stop-and-match policy and its own depth cap.
+//! None of the three converts into another, and the one route from one to the
+//! next says in its signature what it gives up: [`pinned::PinnedPeer`] can ask
+//! for the omp process above it, and that walk leaves the pinned descriptor
+//! behind and follows pids, so what it finds comes back as an
+//! [`omp::OmpProcess`] rather than as more pinned evidence. What is shared is
+//! the [`walk`]: one bounded, cycle-detecting parent traversal, with each type
+//! supplying its own stop-and-match policy.
 //!
-//! The depth caps differ on purpose and stay per-type: 64 hops for a pinned
-//! peer, 12 for an anchored one. Unifying upward would widen the set of
-//! processes forward authorizes under a grant; unifying downward would refuse
-//! deep broker callers. They are different because the risk is different.
+//! One cap of 12 hops (`MAX_ANCESTRY_HOPS`) bounds every walk that looks for a
+//! session: the anchored walk and the omp walk, whether it starts at a grant
+//! command or at a pinned broker caller, because the command and the broker
+//! have to reach the same omp process. A pinned peer's walk to its session
+//! root keeps its own, deeper cap of 64 hops. Unifying upward would widen the
+//! set of processes forward authorizes under a grant; unifying downward would
+//! refuse deep broker callers. They are different because the risk is
+//! different.
 
 pub mod anchored;
 pub mod omp;
 pub mod pinned;
 pub mod uid;
+
+/// Longest ancestry walk an anchor or an omp lookup makes before giving up. A
+/// worker nested deeper than this is not a session's child in any arrangement
+/// we run.
+pub(crate) const MAX_ANCESTRY_HOPS: usize = 12;
 
 /// What a walk step concluded about one process.
 pub(crate) enum Step {

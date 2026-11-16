@@ -106,7 +106,9 @@ pub enum BrokerError {
         "forward: capability {0} is not provisioned; create secrets.human.d/CAP_{1}.env with `secrets edit-human`"
     )]
     NotProvisioned(String, String),
-    #[error("forward: secretsd rejected this command's authorization scope")]
+    #[error(
+        "forward: secretsd rejected this command's authorization scope; run it from the shell of the omp session it belongs to, or from an interactive terminal"
+    )]
     NoScope,
     #[error("forward: secretsd rejected the receipt")]
     ReceiptRejected,

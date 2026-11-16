@@ -80,7 +80,8 @@ pub enum ErrCode {
     VersionMismatch,
     /// Token was not issued by a registered session.
     UnknownToken,
-    /// Neither a token nor a usable tty accompanied the request.
+    /// No scope accompanied the request: no session token, no usable tty, and
+    /// for `AUTHORIZE` no omp process above the caller either.
     NoScope,
     /// Tokenless request arrived from a tty known to belong to an agent session.
     AgentTty,

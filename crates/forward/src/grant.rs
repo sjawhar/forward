@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use clap::Subcommand;
 use forward::browser::grant::ProcessAnchor;
-use forward::browser::peer::{anchor_for, omp_anchor_for};
+use forward::browser::peer::{omp_anchor_for, parent_anchor_for};
 use forward::browser::relay;
 use forward::browser::request::{
     ProbeOutcome, RequestFailure, describe_refusal, parse_ttl, probe, request, socket_path,
@@ -60,13 +60,17 @@ fn grant(ttl: &str, config: Option<PathBuf>) -> anyhow::Result<()> {
         std::process::exit(1);
     };
 
-    // Read these once before any probe. R4 must refuse before either service is
-    // contacted, and the exact values selected here must form the AUTHORIZE
-    // scope after a successful probe.
+    // Read these once before any probe. The no-scope refusal must come before
+    // either service is contacted, and the exact values selected here must form
+    // the AUTHORIZE scope after a successful probe.
     let token =
         forward::secretsd::session_token().unwrap_or_else(|error| crate::exit_with_error(error));
     let tty = forward::secretsd::caller_tty();
     let pid = std::process::id();
+    // The anchor is derived here, in the command itself, because here is the
+    // only place it can be: this process's ancestry is intact and its
+    // `/proc/<pid>/exe` entries are readable, neither of which holds for a
+    // `forward serve` on the other side of an agent box's user namespace.
     let omp_anchor = omp_anchor_for(pid);
     if let Some(refusal) = grant_scope_refusal(token.is_some(), tty.is_some(), omp_anchor.is_some())
     {
@@ -76,16 +80,17 @@ fn grant(ttl: &str, config: Option<PathBuf>) -> anyhow::Result<()> {
 
     // The nearest omp executable is both this relay's anchor and the broker's
     // tokenless capability scope. A token or tty preserves the immediate-parent
-    // fallback for an interactive command with no omp ancestor.
-    let anchor = omp_anchor.unwrap_or_else(|| {
-        anchor_for(pid).unwrap_or_else(|| {
-            eprintln!("forward: grant refused: could not anchor this command to a calling session");
-            std::process::exit(1);
-        })
-    });
+    // fallback for an interactive command with no omp ancestor, and taking that
+    // parent directly keeps the ancestry walk above to a single pass.
+    let Some(anchor) = omp_anchor.or_else(|| parent_anchor_for(pid)) else {
+        // Not `describe_refusal("ANCHOR")`: that sentence blames `forward serve`,
+        // and here it is this command that could not find its session.
+        eprintln!("forward: grant refused: could not anchor this command to a calling session");
+        std::process::exit(1);
+    };
 
     let socket = socket_path();
-    // Scope is known before this probe; after that R4 gate, a deterministic
+    // Scope is settled before this probe; after that gate, a deterministic
     // forward-serve refusal must still happen before the broker touch ceremony.
     match probe(&socket) {
         ProbeOutcome::Unreachable => exit_unreachable(&socket),
@@ -97,7 +102,7 @@ fn grant(ttl: &str, config: Option<PathBuf>) -> anyhow::Result<()> {
     let (listener, port) = bind_endpoint();
     // The broker owns the ceremony and retries failed hardware attempts inside
     // its request TTL. This waits for its final result using the token and tty
-    // already read for the R4 decision.
+    // already read for the refusal decision above.
     let receipt = forward::secretsd::authorize_with(forward::secretsd::CAP_BROWSER, token, tty)
         .unwrap_or_else(|error| crate::exit_with_error(error));
     let granted = request(&socket, ttl_secs, &receipt, port);

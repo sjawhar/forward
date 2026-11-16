@@ -89,7 +89,8 @@ fn broker_errors_map_per_verb() {
         panic!("expected NotProvisioned");
     };
     assert_eq!((cap.as_str(), key.as_str()), ("browser", "BROWSER"));
-    // Every scope-shaped refusal collapses to one actionable message.
+    // Every scope-shaped refusal collapses to one message, whose action — run
+    // from the session's own shell or a terminal — answers each of them.
     for code in ["NO_SCOPE", "UNKNOWN_TOKEN", "FOREIGN_CALLER", "AGENT_TTY"] {
         assert!(
             matches!(map_code(code, authorize), BrokerError::NoScope),
