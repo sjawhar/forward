@@ -1,18 +1,18 @@
-use std::ffi::OsStr;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
 use super::SESSION;
-use super::omp_walk::{is_omp, lookup, table};
-use crate::anchored::{AnchoredPeer, anchor_for_with};
-use crate::omp::{is_omp_executable, is_omp_name, nearest_omp_from_with, omp_anchor_for_with};
+use super::omp_walk::{lookup, table};
+use crate::anchored::{AnchoredPeer, anchor_for_with, read_process};
+use crate::omp::{nearest_omp_from_with, omp_anchor_for_with, stat_process};
 
 const GRANT: &[&str] = &["forward", "browser", "grant"];
 const RPC: &[&str] = &["omp", "--model", "@default", "--mode", "rpc"];
 
 #[test]
-fn omp_anchor_cases_use_the_nearest_omp_executable() {
+fn omp_anchor_cases_use_the_nearest_process_named_omp() {
     let cases = [
         (
             "rpc omp directly above the command",
@@ -52,7 +52,16 @@ fn omp_anchor_cases_use_the_nearest_omp_executable() {
             AnchoredPeer::new(11, 380),
         ),
         (
-            "argv claims omp but its executable is not omp",
+            "named omp whatever its argv says",
+            table(&[
+                (40, "forward", GRANT, 30, 400),
+                (30, "omp", &["bun", "cli.js"], 1, 300),
+            ]),
+            Some(AnchoredPeer::new(30, 300)),
+            AnchoredPeer::new(30, 300),
+        ),
+        (
+            "argv claims omp but its name is not omp",
             table(&[
                 (40, "forward", GRANT, 30, 400),
                 (30, "sh", &["omp", "--resume", SESSION], 20, 300),
@@ -74,17 +83,9 @@ fn omp_anchor_cases_use_the_nearest_omp_executable() {
     ];
 
     for (name, processes, expected_omp, expected_fallback) in cases {
-        let omp = nearest_omp_from_with(
-            40,
-            &mut lookup(processes.clone()),
-            &mut is_omp(processes.clone()),
-        );
-        let omp_anchor = omp_anchor_for_with(
-            40,
-            &mut lookup(processes.clone()),
-            &mut is_omp(processes.clone()),
-        );
-        let anchor = anchor_for_with(40, &mut lookup(processes.clone()), &mut is_omp(processes));
+        let omp = nearest_omp_from_with(40, &mut lookup(processes.clone()));
+        let omp_anchor = omp_anchor_for_with(40, &mut lookup(processes.clone()));
+        let anchor = anchor_for_with(40, &mut lookup(processes));
 
         assert_eq!(
             omp_anchor,
@@ -102,12 +103,7 @@ fn omp_anchor_admits_the_omp_process_and_rejects_a_reused_pid() {
         (40, "forward", &["forward"], 30, 400),
         (30, "omp", &["omp", "--mode", "rpc"], 1, 300),
     ]);
-    let anchor = omp_anchor_for_with(
-        40,
-        &mut lookup(processes.clone()),
-        &mut is_omp(processes.clone()),
-    )
-    .expect("omp anchor");
+    let anchor = omp_anchor_for_with(40, &mut lookup(processes.clone())).expect("omp anchor");
 
     assert!(anchor.contains_with(30, &mut lookup(processes.clone())));
     let mut recycled = processes;
@@ -115,72 +111,90 @@ fn omp_anchor_admits_the_omp_process_and_rejects_a_reused_pid() {
     assert!(!anchor.contains_with(30, &mut lookup(recycled)));
 }
 
-#[test]
-fn omp_anchor_accepts_only_omp_or_the_kernels_deleted_omp_name() {
-    let cases = [
-        ("omp", true),
-        ("omp (deleted)", true),
-        ("omp (deleted)x", false),
-        ("xomp (deleted)", false),
-        ("omp (deleted) (deleted)", false),
-        ("omp-wrapper", false),
-        ("momp", false),
-        ("omp ", false),
-    ];
-
-    for (name, expected) in cases {
-        assert_eq!(is_omp_name(OsStr::new(name)), expected, "{name:?}");
-    }
-}
-
-/// Run a copy of `/bin/sh` named `name` in `dir`, then delete the copy while
-/// it runs. A test thread that forks while the copy is still open for writing
-/// makes the exec fail with ETXTBSY for a moment, so the spawn retries that.
-fn spawn_deleted_shell(dir: &Path, name: &str) -> Child {
+/// Copy `/bin/sh` to `dir/name`. The copy keeps the mode of `/bin/sh`, so it
+/// runs.
+fn copy_shell(dir: &Path, name: &str) -> PathBuf {
     let path = dir.join(name);
     std::fs::copy("/bin/sh", &path).expect("copy /bin/sh");
-    let child = (0..100)
-        .find_map(
-            |_| match Command::new(&path).args(["-c", "sleep 30; :"]).spawn() {
+    path
+}
+
+/// Run `program -c 'read -r line'` with argv[0] `arg0`. The shell waits on its
+/// stdin pipe and starts no child, so killing it leaves nothing running. A
+/// test thread that forks while a copy is still open for writing makes the
+/// exec fail with ETXTBSY for a moment, so the spawn retries that.
+fn spawn_shell(program: &Path, arg0: &str) -> Child {
+    (0..100)
+        .find_map(|_| {
+            let spawned = Command::new(program)
+                .arg0(arg0)
+                .args(["-c", "read -r line"])
+                .stdin(Stdio::piped())
+                .spawn();
+            match spawned {
                 Ok(child) => Some(child),
                 Err(error) if error.raw_os_error() == Some(nix::libc::ETXTBSY) => {
                     std::thread::sleep(Duration::from_millis(10));
                     None
                 }
-                Err(error) => panic!("spawn {}: {error}", path.display()),
-            },
-        )
-        .expect("the copied shell started");
-    std::fs::remove_file(&path).expect("delete the running copy");
-    child
+                Err(error) => panic!("spawn {}: {error}", program.display()),
+            }
+        })
+        .expect("the shell started")
 }
 
-fn exe_link(child: &Child) -> PathBuf {
-    std::fs::read_link(format!("/proc/{}/exe", child.id())).expect("read the exe link")
+/// Whether `child` is omp, as the walk's `stat` read and the full read each
+/// see it.
+fn omp_reads(child: &Child) -> (Option<bool>, Option<bool>) {
+    (
+        stat_process(child.id()).map(|process| process.omp),
+        read_process(child.id()).map(|process| process.omp),
+    )
+}
+
+fn stop(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 // Spawns processes and reads /proc, which miri's isolation cannot execute.
 #[test]
 #[cfg_attr(miri, ignore)]
-fn omp_anchor_accepts_a_deleted_omp_binary() {
+fn a_copy_of_a_binary_named_omp_is_omp_before_and_after_its_file_is_deleted() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut omp = spawn_deleted_shell(dir.path(), "omp");
-    let mut other = spawn_deleted_shell(dir.path(), "xomp");
+    let path = copy_shell(dir.path(), "omp");
+    // argv[0] is `sh`, so only the file name can make this process omp.
+    let mut omp = spawn_shell(&path, "sh");
+    let before = omp_reads(&omp);
+    let deleted = std::fs::remove_file(&path);
+    let after = omp_reads(&omp);
+    stop(&mut omp);
 
-    let omp_link = exe_link(&omp);
-    let other_link = exe_link(&other);
-    let omp_accepted = is_omp_executable(omp.id());
-    let other_accepted = is_omp_executable(other.id());
-    for child in [&mut omp, &mut other] {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-
-    assert_eq!(omp_link.file_name(), Some(OsStr::new("omp (deleted)")));
-    assert_eq!(other_link.file_name(), Some(OsStr::new("xomp (deleted)")));
-    assert!(
-        omp_accepted,
-        "a running omp whose binary was deleted is omp"
+    deleted.expect("delete the running copy");
+    assert_eq!(before, (Some(true), Some(true)), "a process named omp");
+    assert_eq!(
+        after,
+        (Some(true), Some(true)),
+        "an omp whose binary was deleted keeps its name"
     );
-    assert!(!other_accepted, "a deleted xomp binary is not omp");
+}
+
+// Spawns processes and reads /proc, which miri's isolation cannot execute.
+#[test]
+#[cfg_attr(miri, ignore)]
+fn argv_zero_omp_and_a_copy_named_xomp_are_not_omp() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut renamed = spawn_shell(Path::new("/bin/sh"), "omp");
+    let mut other = spawn_shell(&copy_shell(dir.path(), "xomp"), "omp");
+    let renamed_reads = omp_reads(&renamed);
+    let other_reads = omp_reads(&other);
+    stop(&mut renamed);
+    stop(&mut other);
+
+    assert_eq!(
+        renamed_reads,
+        (Some(false), Some(false)),
+        "/bin/sh started as argv[0] omp"
+    );
+    assert_eq!(other_reads, (Some(false), Some(false)), "a copy named xomp");
 }

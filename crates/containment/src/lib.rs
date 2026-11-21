@@ -12,8 +12,9 @@
 //!   connection, which cannot be pidfd-pinned at all. It pairs the pid with the
 //!   kernel start time so a recycled pid fails the comparison instead of
 //!   inheriting authority.
-//! - [`omp::OmpProcess`] identifies the nearest enclosing `omp` executable,
-//!   selected by `/proc/<pid>/exe` and paired with that process's start time.
+//! - [`omp::OmpProcess`] identifies the nearest enclosing process named `omp`,
+//!   selected by the name field of its `/proc/<pid>/stat` and paired with the
+//!   start time of that same read.
 //!
 //! A single identity type would make that difference invisible to every
 //! downstream caller, so a future change could route a secrets decision through
@@ -95,16 +96,26 @@ pub(crate) fn status_field(contents: &str, key: &str) -> Option<i32> {
 
 /// The positional fields of a `/proc/<pid>/stat` line, starting at field 3.
 ///
-/// Field 2 is the comm, parenthesised, and a process controls its contents —
-/// including `)` and whitespace. The fields therefore begin after the *last*
-/// `)`, which is unforgeable no matter what the comm holds. Index into the
-/// result: state 0, ppid 1, starttime 19. [`parse_stat`] reads all three.
+/// Field 2 is the name (the kernel's comm), parenthesised, and a process
+/// controls its contents — including `)` and whitespace. The fields therefore
+/// begin after the *last* `)`, which is unforgeable no matter what the name
+/// holds. Index into the result: state 0, ppid 1, starttime 19.
+/// [`parse_stat`] reads all three.
 pub(crate) fn stat_fields(stat: &str) -> Option<&str> {
     let begin = stat.rfind(')')?.checked_add(2)?;
     stat.get(begin..)
 }
 
-/// The fields of `/proc/<pid>/stat` that containment reads.
+/// The name field of a `/proc/<pid>/stat` line: the text between its first
+/// `(` and its last `)`. The pid before it holds no `(`, and the fields after
+/// it hold no `)`, so the name keeps every `(` and `)` its process put in it.
+/// `None` when no `(` comes before the last `)`.
+fn stat_name(stat: &str) -> Option<&str> {
+    let begin = stat.find('(')?.checked_add(1)?;
+    stat.get(begin..stat.rfind(')')?)
+}
+
+/// The fields of `/proc/<pid>/stat` that containment reads, all from one read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Stat {
     /// Process state, such as `S`, or `Z` for a zombie.
@@ -113,16 +124,24 @@ pub(crate) struct Stat {
     pub(crate) parent: u32,
     /// Kernel start time, which distinguishes a recycled pid.
     pub(crate) start: u64,
+    /// Whether the process's name is omp's, by [`omp::is_omp_name`]. The
+    /// verdict rather than the name, so this stays `Copy` and a walk reads it
+    /// without an allocation per hop.
+    pub(crate) omp: bool,
 }
 
-/// Read `/proc/<pid>/stat`; `None` when it cannot be read or parsed.
+/// Read `/proc/<pid>/stat`; `None` when it cannot be read or parsed. A name
+/// that is not UTF-8 makes the read fail, so the walks stop there.
 pub(crate) fn read_stat(pid: u32) -> Option<Stat> {
     parse_stat(&std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?)
 }
 
-/// Parse a `/proc/<pid>/stat` line after its comm, as [`stat_fields`] finds
-/// it: state is field 3, ppid field 4 and starttime field 22.
+/// Parse a `/proc/<pid>/stat` line: the name as [`stat_name`] finds it, which
+/// decides `omp`, and, after the name as [`stat_fields`] finds them, state
+/// (field 3), ppid (field 4) and starttime (field 22). `None` for a line with
+/// no `(` before its last `)`, or one cut before starttime.
 pub(crate) fn parse_stat(line: &str) -> Option<Stat> {
+    let omp = omp::is_omp_name(stat_name(line)?);
     let mut fields = stat_fields(line)?.split_whitespace();
     let state = fields.next()?.chars().next()?;
     let parent = fields.next()?.parse().ok()?;
@@ -132,6 +151,7 @@ pub(crate) fn parse_stat(line: &str) -> Option<Stat> {
         state,
         parent,
         start,
+        omp,
     })
 }
 

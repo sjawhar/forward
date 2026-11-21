@@ -7,7 +7,7 @@
 //! time is what closes that: a recycled pid has a later start time and fails the
 //! comparison instead of inheriting authority.
 
-use crate::omp::{is_omp_executable, omp_anchor_for_with};
+use crate::omp::omp_anchor_for_with;
 use crate::{MAX_ANCESTRY_HOPS, Step, walk};
 
 /// One process as attribution needs it.
@@ -21,6 +21,11 @@ pub struct Process {
     pub parent: u32,
     /// Kernel start time, which distinguishes a recycled pid.
     pub start: u64,
+    /// Whether the process is named `omp`: the name field of its
+    /// `/proc/<pid>/stat` is exactly `omp`, from the same `stat` read as
+    /// `parent` and `start`. A process can set its own name, so like argv
+    /// this is evidence, not proof.
+    pub omp: bool,
 }
 
 /// A process instance authorized to use a grant: pid plus kernel start time.
@@ -78,28 +83,27 @@ impl AnchoredPeer {
 
 /// Derive the anchor a grant should record for `pid`.
 ///
-/// A grant belongs to its nearest enclosing process whose executable is named
-/// `omp`, because a nested omp session is the narrowest real subtree that can
-/// use it. Selection reads `/proc/<pid>/exe`, never argv. Without an omp
-/// ancestor, the immediate parent remains the fallback anchor.
+/// A grant belongs to its nearest enclosing process named `omp`, the name in
+/// its `/proc/<pid>/stat`, because a nested omp session is the narrowest real
+/// subtree that can use it. Selection reads that name, never argv. Without an
+/// omp ancestor, the immediate parent remains the fallback anchor.
 #[must_use]
 pub fn anchor_for(pid: u32) -> Option<AnchoredPeer> {
-    anchor_for_with(pid, &mut read_process, &mut is_omp_executable)
+    anchor_for_with(pid, &mut read_process)
 }
 
-/// Test seam: derive against caller-supplied lookups.
+/// Test seam: derive against a caller-supplied lookup.
 #[doc(hidden)]
 #[must_use]
 pub fn anchor_for_with(
     pid: u32,
     lookup: &mut dyn FnMut(u32) -> Option<Process>,
-    is_omp: &mut dyn FnMut(u32) -> bool,
 ) -> Option<AnchoredPeer> {
-    omp_anchor_for_with(pid, lookup, is_omp).or_else(|| parent_anchor_with(pid, lookup))
+    omp_anchor_for_with(pid, lookup).or_else(|| parent_anchor_with(pid, lookup))
 }
 
 /// Anchor `pid` to its immediate parent: the anchor a grant falls back to when
-/// no omp executable encloses the command.
+/// no process named `omp` encloses the command.
 ///
 /// `None` when that parent is init or `pid` itself, which is a command whose
 /// calling process has already gone, or when `/proc` cannot be read for `pid`
@@ -124,25 +128,25 @@ fn parent_anchor_with(
 /// The omp session id `pid` belongs to, for logs and status output.
 ///
 /// Display only, and it says so at every call site: the value is derived from
-/// forgeable argv. Authorization uses [`AnchoredPeer::contains`].
+/// forgeable argv, and given only when the process that argv belongs to is
+/// named `omp`. Authorization uses [`AnchoredPeer::contains`].
 #[must_use]
 pub fn session_label(pid: u32) -> Option<String> {
-    session_label_with(pid, &mut read_process, &mut is_omp_executable)
+    session_label_with(pid, &mut read_process)
 }
 
-/// Test seam: resolve a label against caller-supplied lookups.
+/// Test seam: resolve a label against a caller-supplied lookup.
 #[doc(hidden)]
 #[must_use]
 pub fn session_label_with(
     pid: u32,
     lookup: &mut dyn FnMut(u32) -> Option<Process>,
-    is_omp: &mut dyn FnMut(u32) -> bool,
 ) -> Option<String> {
     let mut current = pid;
     for _ in 0..MAX_ANCESTRY_HOPS {
         let process = lookup(current)?;
         if let Some(session) = session_of(&process) {
-            return is_omp(current).then_some(session);
+            return process.omp.then_some(session);
         }
         if process.parent <= 1 || process.parent == current {
             return None;
@@ -201,5 +205,6 @@ pub fn read_process(pid: u32) -> Option<Process> {
         argv,
         parent: stat.parent,
         start: stat.start,
+        omp: stat.omp,
     })
 }

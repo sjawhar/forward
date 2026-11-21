@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 
 use crate::anchored::{AnchoredPeer, Process};
-use crate::omp::{OmpProcess, nearest_omp_from_with, omp_anchor_for_with};
+use crate::omp::{OmpProcess, is_omp_name, nearest_omp_from_with, omp_anchor_for_with};
 
 #[derive(Clone)]
 pub(super) struct Entry {
-    executable: &'static str,
+    name: &'static str,
     argv: &'static [&'static str],
     parent: u32,
     pub(super) start: u64,
@@ -16,11 +16,11 @@ pub(super) type Table = HashMap<u32, Entry>;
 pub(super) fn table(entries: &[(u32, &'static str, &'static [&'static str], u32, u64)]) -> Table {
     entries
         .iter()
-        .map(|&(pid, executable, argv, parent, start)| {
+        .map(|&(pid, name, argv, parent, start)| {
             (
                 pid,
                 Entry {
-                    executable,
+                    name,
                     argv,
                     parent,
                     start,
@@ -35,15 +35,12 @@ fn process(entry: &Entry) -> Process {
         argv: entry.argv.iter().map(|part| (*part).to_owned()).collect(),
         parent: entry.parent,
         start: entry.start,
+        omp: is_omp_name(entry.name),
     }
 }
 
 pub(super) fn lookup(table: Table) -> impl FnMut(u32) -> Option<Process> {
     move |pid| table.get(&pid).map(process)
-}
-
-pub(super) fn is_omp(table: Table) -> impl FnMut(u32) -> bool {
-    move |pid| matches!(table.get(&pid), Some(entry) if entry.executable == "omp")
 }
 
 fn chain(omp_hop: u32) -> Table {
@@ -54,7 +51,7 @@ fn chain(omp_hop: u32) -> Table {
         processes.insert(
             pid,
             Entry {
-                executable: if hop == omp_hop { "omp" } else { "sh" },
+                name: if hop == omp_hop { "omp" } else { "sh" },
                 argv: if hop == omp_hop { &["omp"] } else { &["sh"] },
                 parent,
                 start: u64::from(pid),
@@ -94,13 +91,8 @@ fn omp_anchor_walk_boundaries_and_termination() {
     ];
 
     for (name, processes, expected) in cases {
-        let pinned = nearest_omp_from_with(
-            100,
-            &mut lookup(processes.clone()),
-            &mut is_omp(processes.clone()),
-        );
-        let anchor =
-            omp_anchor_for_with(100, &mut lookup(processes.clone()), &mut is_omp(processes));
+        let pinned = nearest_omp_from_with(100, &mut lookup(processes.clone()));
+        let anchor = omp_anchor_for_with(100, &mut lookup(processes));
 
         assert_eq!(anchor, expected, "{name}");
         assert_eq!(
@@ -112,28 +104,38 @@ fn omp_anchor_walk_boundaries_and_termination() {
 }
 
 #[test]
-fn omp_anchor_rejects_a_start_change_while_reading_the_executable() {
-    let mut candidate_reads = 0;
-    let mut lookup = move |pid| match pid {
-        40 => Some(Process {
-            argv: vec!["forward".to_owned()],
-            parent: 30,
-            start: 400,
-        }),
-        30 => {
-            candidate_reads += 1;
-            Some(Process {
-                argv: vec!["omp".to_owned()],
-                parent: 1,
-                start: if candidate_reads == 1 { 300 } else { 301 },
-            })
-        }
-        _ => None,
+fn omp_walk_reads_each_process_once_and_keeps_the_start_of_that_read() {
+    // Any second read of a pid sees another start time, as a pid recycled
+    // between two reads would; the walk decides on the name and records the
+    // start of the one read it made.
+    let mut reads: Vec<u32> = Vec::new();
+    let mut lookup = |pid: u32| {
+        let again = reads.contains(&pid);
+        reads.push(pid);
+        let (name, parent, start): (&str, u32, u64) = match pid {
+            40 => ("forward", 30, 400),
+            30 => ("omp", 1, 300),
+            _ => return None,
+        };
+        Some(Process {
+            argv: Vec::new(),
+            parent,
+            start: if again {
+                start.saturating_add(1)
+            } else {
+                start
+            },
+            omp: is_omp_name(name),
+        })
     };
 
+    let anchor = omp_anchor_for_with(40, &mut lookup);
+
+    assert_eq!(anchor, Some(AnchoredPeer::new(30, 300)));
     assert_eq!(
-        omp_anchor_for_with(40, &mut lookup, &mut |pid| pid == 30),
-        None
+        reads,
+        [40, 30],
+        "the caller, then its omp parent, each once"
     );
 }
 
@@ -164,7 +166,10 @@ fn omp_anchor_stat_lookup_reports_what_the_full_read_does() {
     let stat = crate::omp::stat_process(pid).expect("stat lookup");
     let full = crate::anchored::read_process(pid).expect("full read");
 
-    assert_eq!((stat.parent, stat.start), (full.parent, full.start));
+    assert_eq!(
+        (stat.parent, stat.start, stat.omp),
+        (full.parent, full.start, full.omp)
+    );
     assert!(stat.argv.is_empty(), "the walk never reads argv");
     assert!(!full.argv.is_empty(), "the full read still carries argv");
 }
