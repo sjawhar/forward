@@ -1,3 +1,4 @@
+use std::io::Read;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -119,17 +120,22 @@ fn copy_shell(dir: &Path, name: &str) -> PathBuf {
     path
 }
 
-/// Run `program -c 'read -r line'` with argv[0] `arg0`. The shell waits on its
-/// stdin pipe and starts no child, so killing it leaves nothing running. A
-/// test thread that forks while a copy is still open for writing makes the
-/// exec fail with ETXTBSY for a moment, so the spawn retries that.
+/// Run `program -c 'echo; read -r line'` with argv[0] `arg0`, and return once
+/// the shell wrote its first byte. A spawn can return before the kernel gives
+/// the new process its name, and the shell writes only after its exec has
+/// finished, so a test that reads the name after that byte reads the new one.
+/// The shell then waits on its stdin pipe and starts no child, so killing it
+/// leaves nothing running. A test thread that forks while a copy is still open
+/// for writing makes the exec fail with ETXTBSY for a moment, so the spawn
+/// retries that.
 fn spawn_shell(program: &Path, arg0: &str) -> Child {
-    (0..100)
+    let mut child = (0..100)
         .find_map(|_| {
             let spawned = Command::new(program)
                 .arg0(arg0)
-                .args(["-c", "read -r line"])
+                .args(["-c", "echo; read -r line"])
                 .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
                 .spawn();
             match spawned {
                 Ok(child) => Some(child),
@@ -140,7 +146,14 @@ fn spawn_shell(program: &Path, arg0: &str) -> Child {
                 Err(error) => panic!("spawn {}: {error}", program.display()),
             }
         })
-        .expect("the shell started")
+        .expect("the shell started");
+    child
+        .stdout
+        .as_mut()
+        .expect("the shell's stdout")
+        .read_exact(&mut [0; 1])
+        .expect("the shell wrote after its exec");
+    child
 }
 
 /// Whether `child` is omp, as the walk's `stat` read and the full read each

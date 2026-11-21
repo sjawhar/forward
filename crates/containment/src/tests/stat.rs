@@ -21,8 +21,9 @@ fn parse_stat_reads_state_parent_start_time_and_the_name_omp() {
 
 #[test]
 fn only_the_name_omp_exactly_is_omp() {
-    // `omp daemon brok` is the kernel's 15-byte cut of a longer file name, and
-    // the kernel never names a running omp `omp (deleted)`, even one whose
+    // omp's worker daemon broker runs the file `omp` and sets its own name with
+    // prctl(PR_SET_NAME); the kernel keeps 15 bytes of it, `omp daemon brok`.
+    // And the kernel never names a running omp `omp (deleted)`, even one whose
     // binary was deleted.
     for name in [
         "omp daemon brok",
@@ -66,17 +67,14 @@ fn a_comm_with_a_paren_and_spaces_cannot_move_the_stat_fields() {
 fn a_name_holding_a_paren_and_fields_is_not_omp_and_cannot_move_the_fields() {
     // Each name holds `) S 1 2 (`; the second one reads as `omp`, parent 1, if
     // the name ended at its first `)`. The name runs to the last `)`, and the
-    // fields after it give parent 99 and starttime 777.
+    // fields after it give parent 99 and starttime 123456.
     for name in ["x) S 1 2 (y", "omp) S 1 2 (y"] {
-        let line =
-            format!("4242 ({name}) S 99 4242 4242 0 -1 0 0 0 0 0 0 0 0 0 20 0 1 0 777 1000 10");
-
         assert_eq!(
-            parse_stat(&line),
+            parse_stat(&line(name)),
             Some(Stat {
                 state: 'S',
                 parent: 99,
-                start: 777,
+                start: 123_456,
                 omp: false,
             }),
             "{name:?}"
