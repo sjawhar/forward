@@ -68,13 +68,14 @@ proc_start() {
 
 nearest_omp_ancestor() {
   local pid next record name hop
+  local -a fields
   pid="$(proc_parent "$1")" || return 1
   for ((hop = 0; hop < 12; hop++)); do
     [[ "$pid" =~ ^[0-9]+$ ]] && ((pid > 1)) || return 1
     # A process is omp when the name in its stat, the text between the first
     # ( and the last ), is exactly omp: the rule of forward's own walk and of
-    # the broker's. Without a readable stat there is neither a name nor a
-    # parent pid to carry on to.
+    # the broker's. The name and the parent pid come from one read of the
+    # stat; without a readable stat there is neither to carry on to.
     record="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
     [[ "$record" == *'('*')'* ]] || return 1
     name="${record#*\(}"
@@ -83,8 +84,9 @@ nearest_omp_ancestor() {
       printf '%s\n' "$pid"
       return 0
     fi
-    next="$(proc_parent "$pid")" || return 1
-    [[ "$next" != "$pid" ]] || return 1
+    read -r -a fields <<< "${record##*) }"
+    next="${fields[1]:-}"
+    [[ "$next" =~ ^[0-9]+$ && "$next" != "$pid" ]] || return 1
     pid="$next"
   done
   return 1
