@@ -32,8 +32,18 @@ secrets_bin="$(readlink -f "$secrets_bin")"
   exit 1
 }
 
-wrappers="$(mktemp -d)"
+runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+[[ -d "$runtime" ]] || {
+  printf 'SKIP: no runtime directory %s\n' "$runtime"
+  exit 77
+}
+# The scratch broker runs with PrivateTmp, which gives it its own /tmp, so the
+# wrappers it runs live under the runtime directory.
+wrappers="$(mktemp -d "$runtime/e2e-pane-grant-slow.XXXXXX")"
 trap 'rm -r -- "$wrappers"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 cat > "$wrappers/sops" <<EOF
 #!/bin/sh
 sleep 2
