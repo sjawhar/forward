@@ -1,4 +1,8 @@
-//! Find the nearest enclosing `omp` process by executable name.
+//! Find the nearest enclosing process named `omp`.
+//!
+//! A process's name is the name field of its `/proc/<pid>/stat`, which the
+//! same read gives with its parent and start time, so the walk decides on the
+//! name and records the start time of one read. `is_omp_name` states the rule.
 
 use crate::anchored::{AnchoredPeer, Process};
 use crate::{MAX_ANCESTRY_HOPS, Step, read_stat, walk};
@@ -34,7 +38,7 @@ impl OmpProcess {
     }
 }
 
-/// Derive an anchor from the nearest enclosing `omp` executable.
+/// Derive an anchor from the nearest enclosing process named `omp`.
 #[must_use]
 pub fn omp_anchor_for(pid: u32) -> Option<AnchoredPeer> {
     nearest_omp_for(pid).map(|omp| AnchoredPeer::new(omp.pid, omp.start))
@@ -42,20 +46,19 @@ pub fn omp_anchor_for(pid: u32) -> Option<AnchoredPeer> {
 
 /// Find the nearest omp ancestor of `pid` on the live `/proc`.
 pub(crate) fn nearest_omp_for(pid: u32) -> Option<OmpProcess> {
-    nearest_omp_from_with(pid, &mut stat_process, &mut is_omp_executable)
+    nearest_omp_from_with(pid, &mut stat_process)
 }
 
 /// The table-driven core of the omp anchor: derive it from caller-supplied
 /// process data. [`anchor_for`](crate::anchored::anchor_for) runs it on the
-/// live `/proc`; the injectable lookups are what let miri and tests drive it.
+/// live `/proc`; the injectable lookup is what lets miri and tests drive it.
 #[doc(hidden)]
 #[must_use]
 pub fn omp_anchor_for_with(
     pid: u32,
     lookup: &mut dyn FnMut(u32) -> Option<Process>,
-    is_omp: &mut dyn FnMut(u32) -> bool,
 ) -> Option<AnchoredPeer> {
-    nearest_omp_with(pid, lookup, is_omp).map(|(pid, start)| AnchoredPeer::new(pid, start))
+    nearest_omp_with(pid, lookup).map(|(pid, start)| AnchoredPeer::new(pid, start))
 }
 
 /// Find the nearest omp ancestor of `pid` against caller-supplied process data.
@@ -67,15 +70,17 @@ pub fn omp_anchor_for_with(
 pub fn nearest_omp_from_with(
     pid: u32,
     lookup: &mut dyn FnMut(u32) -> Option<Process>,
-    is_omp: &mut dyn FnMut(u32) -> bool,
 ) -> Option<OmpProcess> {
-    nearest_omp_with(pid, lookup, is_omp).map(|(pid, start)| OmpProcess { pid, start })
+    nearest_omp_with(pid, lookup).map(|(pid, start)| OmpProcess { pid, start })
 }
 
+/// Walk up from `pid`'s parent to the nearest process named `omp`, deciding on
+/// the `omp` and recording the `start` of one `lookup` per process, so a pid
+/// recycled between two reads cannot pair one process's name with another's
+/// start time.
 fn nearest_omp_with(
     pid: u32,
     lookup: &mut dyn FnMut(u32) -> Option<Process>,
-    is_omp: &mut dyn FnMut(u32) -> bool,
 ) -> Option<(u32, u64)> {
     let parent = lookup(pid)?.parent;
     if parent <= 1 || parent == pid {
@@ -87,15 +92,7 @@ fn nearest_omp_with(
         let Some(process) = lookup(current) else {
             return Step::Stop;
         };
-        if is_omp(current) {
-            // The candidate's executable is read between these two stat reads.
-            // Reject a pid recycled during that interval.
-            let Some(after_executable) = lookup(current) else {
-                return Step::Stop;
-            };
-            if process.start != after_executable.start {
-                return Step::Stop;
-            }
+        if process.omp {
             found = Some((current, process.start));
             return Step::Match;
         }
@@ -107,32 +104,26 @@ fn nearest_omp_with(
     found
 }
 
-/// Whether `pid`'s executable is named `omp`. Reads `/proc/<pid>/exe`, which
-/// the process cannot forge, never its argv. An omp whose binary was deleted
-/// while it runs, such as a pruned mise version, still counts: the kernel then
-/// reports the link as `<dir>/omp (deleted)`. The anchor walk, the pinned
-/// peer's walk and `session_label` all decide through this one function.
-pub(crate) fn is_omp_executable(pid: u32) -> bool {
-    std::fs::read_link(format!("/proc/{pid}/exe"))
-        .ok()
-        .and_then(|executable| executable.file_name().map(is_omp_name))
-        .unwrap_or(false)
-}
-
-/// Whether an executable file name, as `/proc/<pid>/exe` reports it, is omp's:
-/// exactly `omp`, or `omp (deleted)` with the kernel's exact suffix for a
-/// deleted binary.
-pub(crate) fn is_omp_name(name: &std::ffi::OsStr) -> bool {
-    name == "omp" || name == "omp (deleted)"
+/// Whether a process name, the name field of `/proc/<pid>/stat`, is omp's:
+/// exactly `omp`. The kernel sets the name at exec from the last part of the
+/// executed file's path, cut to 15 bytes, and a process can change its own
+/// name with `prctl(PR_SET_NAME)`; argv never counts. So `omp (deleted)` and
+/// `omp daemon brok` are not omp, and an omp whose binary was deleted while it
+/// runs, such as a pruned mise version, keeps its name and still counts. The
+/// anchor walk, the pinned peer's walk and `session_label` all decide through
+/// this one function.
+pub(crate) fn is_omp_name(name: &str) -> bool {
+    name == "omp"
 }
 
 fn read_process_state(pid: u32) -> Option<(u64, char)> {
     read_stat(pid).map(|stat| (stat.start, stat.state))
 }
 
-/// Parent and start time for `pid`, with an empty argv.
+/// Parent, start time and the omp name test for `pid`, from one `stat` read,
+/// with an empty argv.
 ///
-/// The omp walk decides on `/proc/<pid>/exe` alone, and the broker runs it for
+/// The omp walk decides on the name in `stat` alone, and the broker runs it for
 /// every ancestor of a caller while it holds its state lock, so it reads each
 /// ancestor's `stat` only and never its command line.
 pub(crate) fn stat_process(pid: u32) -> Option<Process> {
@@ -140,5 +131,6 @@ pub(crate) fn stat_process(pid: u32) -> Option<Process> {
         argv: Vec::new(),
         parent: stat.parent,
         start: stat.start,
+        omp: stat.omp,
     })
 }

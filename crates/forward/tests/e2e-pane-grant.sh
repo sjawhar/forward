@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
-# This end-to-end proof needs a pane below omp and systemd-run --user, so it is
-# intentionally not wired into CI. It shows a pane grant through scratch
-# secretsd and forward processes, and does not show a YubiKey or Chrome.
+# This end-to-end proof needs a pane below omp and a systemd user manager, so it
+# is intentionally not wired into CI. It shows a pane grant through scratch
+# secretsd and forward processes, with the scratch secretsd run as a transient
+# user unit under the sandbox settings of systemd/secretsd.service. It does not
+# show a YubiKey or Chrome. Exit 77 means skipped.
 set -euo pipefail
 
 readonly skip_status=77
@@ -11,6 +13,9 @@ scratch=''
 failed=false
 live_sockets_verified=false
 scratch_processes_verified=false
+test_units_verified=false
+started_units=()
+still_loaded_units=()
 declare -A process_pid=()
 declare -A process_start=()
 
@@ -29,7 +34,7 @@ skip() {
   exit "$skip_status"
 }
 
-# shellcheck disable=SC2329
+# shellcheck disable=SC2317,SC2329
 on_error() {
   local status="$1" line="$2"
   if [[ "$failed" != true ]]; then
@@ -62,20 +67,26 @@ proc_start() {
 }
 
 nearest_omp_ancestor() {
-  local pid next exe hop
+  local pid next record name hop
+  local -a fields
   pid="$(proc_parent "$1")" || return 1
   for ((hop = 0; hop < 12; hop++)); do
     [[ "$pid" =~ ^[0-9]+$ ]] && ((pid > 1)) || return 1
-    # An ancestor whose exe link this process may not read is not omp, and the
-    # walk carries on to its parent, as forward's own walk does. Unreadable
-    # stat is different: without a parent pid there is nowhere to carry on to.
-    exe="$(readlink "/proc/$pid/exe" 2>/dev/null)" || exe=''
-    if [[ "${exe##*/}" == omp || "${exe##*/}" == 'omp (deleted)' ]]; then
+    # A process is omp when the name in its stat, the text between the first
+    # ( and the last ), is exactly omp: the rule of forward's own walk and of
+    # the broker's. The name and the parent pid come from one read of the
+    # stat; without a readable stat there is neither to carry on to.
+    record="$(cat "/proc/$pid/stat" 2>/dev/null)" || return 1
+    [[ "$record" == *'('*')'* ]] || return 1
+    name="${record#*\(}"
+    name="${name%\)*}"
+    if [[ "$name" == omp ]]; then
       printf '%s\n' "$pid"
       return 0
     fi
-    next="$(proc_parent "$pid")" || return 1
-    [[ "$next" != "$pid" ]] || return 1
+    read -r -a fields <<< "${record##*) }"
+    next="${fields[1]:-}"
+    [[ "$next" =~ ^[0-9]+$ && "$next" != "$pid" ]] || return 1
     pid="$next"
   done
   return 1
@@ -128,15 +139,60 @@ stop_tracked_process() {
   return 1
 }
 
-# shellcheck disable=SC2329
+# Prints the uid_map of a process with its whitespace collapsed. The broker
+# makes itself not dumpable, so its ns/user link is unreadable from here, but
+# its uid_map stays readable.
+uid_map_of() {
+  local map
+  local -a fields
+  map="$(cat "/proc/$1/uid_map" 2>/dev/null)" || return 1
+  read -r -d '' -a fields <<< "$map" || true
+  (( ${#fields[@]} >= 3 )) || return 1
+  printf '%s\n' "${fields[*]}"
+}
+
+# Prints each given unit that systemctl still lists; an error counts as listed.
+units_still_loaded() {
+  local unit listed
+  for unit in "$@"; do
+    if ! listed="$(systemctl --user list-units --all --no-legend "$unit" 2>&1)" || [[ -n "$listed" ]]; then
+      printf '%s\n' "$unit"
+    fi
+  done
+}
+
+# Polls for up to 5 s until systemctl lists none of the given units, and leaves
+# the units it still lists in still_loaded_units.
+wait_for_units_unloaded() {
+  local attempt
+  for ((attempt = 0; attempt < 100; attempt++)); do
+    mapfile -t still_loaded_units < <(units_still_loaded "$@")
+    (( ${#still_loaded_units[@]} == 0 )) && return 0
+    sleep 0.05
+  done
+  return 1
+}
+
+# shellcheck disable=SC2317,SC2329
 cleanup() {
-  local status=$?
+  local status=$? unit
   trap - ERR EXIT
+  trap '' INT TERM HUP
   stop_tracked_process stub || true
   stop_tracked_process grant || true
   stop_tracked_process relay || true
   stop_tracked_process forward || true
-  stop_tracked_process broker || true
+  if (( ${#started_units[@]} > 0 )); then
+    for unit in "${started_units[@]}"; do
+      systemctl --user stop "$unit" >/dev/null 2>&1 || true
+    done
+    if ! wait_for_units_unloaded "${started_units[@]}"; then
+      printf 'FAIL: a test unit stays loaded: %s\n' "${still_loaded_units[*]}" >&2
+      status=1
+    elif [[ "$test_units_verified" != true ]]; then
+      pass "no test unit stays loaded: ${started_units[*]}"
+    fi
+  fi
   if [[ -n "$scratch" && -d "$scratch" && -f "$scratch/live-sockets.before" ]]; then
     if ! capture_live_socket_inodes "$scratch/live-sockets.after"; then
       printf 'FAIL: could not record live socket inodes during cleanup\n' >&2
@@ -152,6 +208,15 @@ cleanup() {
       status=1
     elif [[ "$scratch_processes_verified" != true ]]; then
       pass 'no scratch process remains running'
+    fi
+  fi
+  if ((status != 0)); then
+    if (( ${#started_units[@]} > 0 )); then
+      printf 'test units this run started: %s\n' "${started_units[*]}" >&2 || true
+    fi
+    if [[ -n "$scratch" && -f "$scratch/broker.log" ]]; then
+      printf 'scratch broker log:\n' >&2 || true
+      cat -- "$scratch/broker.log" >&2 || true
     fi
   fi
   if [[ -n "$scratch" && -d "$scratch" ]]; then
@@ -294,7 +359,9 @@ find_relay_for_endpoint() {
 }
 
 run_as_manager() {
-  systemd-run --user --pipe --wait --quiet \
+  local unit="$1"
+  shift
+  systemd-run --user --pipe --wait --quiet --collect --unit "$unit" -p RuntimeMaxSec=120 \
     --setenv=PATH="$scratch_path" \
     --setenv=HOME="$scratch/home" \
     --setenv=XDG_RUNTIME_DIR="$scratch/runtime" \
@@ -343,9 +410,18 @@ fi
 if ! command -v systemd-run >/dev/null 2>&1; then
   skip 'systemd-run is unavailable'
 fi
+if ! command -v systemctl >/dev/null 2>&1; then
+  skip 'systemctl is unavailable'
+fi
+manager_state="$(systemctl --user is-system-running 2>/dev/null)" || true
+if [[ "$manager_state" != running && "$manager_state" != degraded ]]; then
+  skip 'no systemd user manager answers'
+fi
 sops_bin="$(resolve_tool sops)" || fail 'sops binary path could not be resolved'
 age_keygen_bin="$(resolve_tool age-keygen)" || fail 'age-keygen binary path could not be resolved'
 python_bin="$(resolve_tool python3)" || fail 'python3 binary path could not be resolved'
+env_bin="$(command -v env)" || fail 'env binary path could not be resolved'
+[[ "$env_bin" == /* ]] || fail 'env binary path is not absolute'
 scratch_path="${sops_bin%/*}:${age_keygen_bin%/*}:${python_bin%/*}:$PATH"
 
 
@@ -365,9 +441,32 @@ secrets_bin="$(readlink -f "$secrets_bin")" || fail 'secrets binary path could n
 [[ -x "$secrets_bin" ]] || fail 'the secrets binary must be executable'
 
 live_runtime="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
-scratch="$(mktemp -d)"
+if [[ ! -d "$live_runtime" ]]; then
+  skip "no runtime directory $live_runtime"
+fi
+
+here="$(cd -- "$(dirname -- "$0")" && pwd)" || fail 'the directory of this script could not be resolved'
+unit_file="$here/../../../systemd/secretsd.service"
+[[ -f "$unit_file" ]] || fail 'systemd/secretsd.service is missing'
+sandbox_settings=()
+while IFS= read -r line || [[ -n "$line" ]]; do
+  if [[ "$line" =~ ^(NoNewPrivileges|Private[[:alpha:]]+|Protect[[:alpha:]]+|Restrict[[:alpha:]]+)=.+$ ]]; then
+    sandbox_settings+=("$line")
+  fi
+done < "$unit_file"
+(( ${#sandbox_settings[@]} > 0 )) || fail 'systemd/secretsd.service holds no sandbox setting'
+
+broker_unit="e2e-pane-grant-$$-broker.service"
+http_unit="e2e-pane-grant-$$-http.service"
+grant_unit="e2e-pane-grant-$$-grant.service"
+# PrivateTmp gives the scratch broker its own /tmp, so everything it reads lives
+# under the runtime directory, beside the live sockets it must leave alone.
+scratch="$(mktemp -d "$live_runtime/e2e-pane-grant.XXXXXX")"
 trap cleanup EXIT
 trap 'on_error $? $LINENO' ERR
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
 umask 077
 
 capture_live_socket_inodes "$scratch/live-sockets.before"
@@ -421,7 +520,20 @@ secrets_config="$scratch/secretsd.toml"
 printf '[source.scratch]\npath = "%s"\n' "$scratch/source" > "$secrets_config"
 broker_socket="$scratch/runtime/secretsd.sock"
 broker_log="$scratch/broker.log"
-env -i \
+# The scratch broker runs as a transient user unit with every sandbox setting
+# of the shipped unit, read from it on each run. env -i keeps the user
+# manager's environment out and execs the broker, so MainPID is the broker.
+unit_properties=()
+for setting in "${sandbox_settings[@]}"; do
+  unit_properties+=(-p "$setting")
+done
+started_units+=("$broker_unit")
+if ! systemd-run --user --quiet --collect --unit "$broker_unit" \
+  "${unit_properties[@]}" \
+  -p "StandardOutput=append:$broker_log" \
+  -p "StandardError=append:$broker_log" \
+  -p RuntimeMaxSec=600 \
+  "$env_bin" -i \
   PATH="$scratch_path" \
   HOME="$scratch/home" \
   XDG_RUNTIME_DIR="$scratch/runtime" \
@@ -430,9 +542,34 @@ env -i \
   SECRETSD_CONFIG="$secrets_config" \
   SOPS_AGE_KEY_FILE="$age_key" \
   SECRETSD_MEMLOCK=optional \
-  "$secrets_bin" serve > "$broker_log" 2>&1 &
-track_process broker "$!"
+  "$secrets_bin" serve 2> "$scratch/systemd-run-broker.stderr"; then
+  cat "$scratch/systemd-run-broker.stderr" >&2
+  fail "could not start transient unit $broker_unit"
+fi
+broker_pid=0
+for attempt in {1..200}; do
+  broker_pid="$(systemctl --user show -p MainPID --value "$broker_unit")" || broker_pid=0
+  [[ "$broker_pid" =~ ^[1-9][0-9]*$ ]] && break
+  sleep 0.05
+done
+[[ "$broker_pid" =~ ^[1-9][0-9]*$ ]] || fail "transient unit $broker_unit reported no main pid"
+track_process broker "$broker_pid"
+unit_settings=()
+for setting in "${sandbox_settings[@]}"; do
+  key="${setting%%=*}"
+  value="$(systemctl --user show -p "$key" --value "$broker_unit")" || fail "could not read $key of transient unit $broker_unit"
+  [[ "$value" == "${setting#*=}" ]] || fail "transient unit $broker_unit has $key=$value, unlike $setting in systemd/secretsd.service"
+  unit_settings+=("$key=$value")
+done
+pass "scratch broker runs as transient unit $broker_unit with the settings of systemd/secretsd.service: ${unit_settings[*]}"
+
 wait_for_socket broker "$broker_socket" || fail 'scratch broker did not create its socket'
+# Read once the broker serves, so the manager has set up its namespace.
+broker_uid_map="$(uid_map_of "$broker_pid")" || fail 'could not read the uid_map of the scratch broker'
+script_uid_map="$(uid_map_of "$$")" || fail "could not read this script's uid_map"
+tracked_process_is_alive broker || fail 'scratch broker exited before its uid_map was compared'
+[[ "$broker_uid_map" != "$script_uid_map" ]] || fail "scratch broker shares this script's user namespace"
+pass 'scratch broker runs in its own user namespace'
 broker_hello || fail 'scratch broker did not answer HELLO'
 pass 'scratch broker answered HELLO on its scratch socket'
 
@@ -596,7 +733,8 @@ else
 fi
 pass 'pane child received the scratch laptop version body'
 
-if systemd_body="$(run_as_manager "$python_bin" - "$endpoint_port" 2> "$scratch/systemd-http.stderr" <<'PY'
+started_units+=("$http_unit")
+if systemd_body="$(run_as_manager "$http_unit" "$python_bin" - "$endpoint_port" 2> "$scratch/systemd-http.stderr" <<'PY'
 import socket
 import sys
 
@@ -613,8 +751,9 @@ pass 'systemd-run child was refused by the relay'
 
 systemd_grant_stdout="$scratch/systemd-grant.stdout"
 systemd_run_stderr="$scratch/systemd-run.stderr"
+started_units+=("$grant_unit")
 # shellcheck disable=SC2016
-if run_as_manager sh -c 'exec </dev/null; exec "$FORWARD_BIN" browser grant --ttl 2m --config "$FORWARD_CONFIG" 2>"$FORWARD_STDERR"' \
+if run_as_manager "$grant_unit" sh -c 'exec </dev/null; exec "$FORWARD_BIN" browser grant --ttl 2m --config "$FORWARD_CONFIG" 2>"$FORWARD_STDERR"' \
   > "$systemd_grant_stdout" 2> "$systemd_run_stderr"; then
   systemd_grant_status=0
 else
@@ -651,7 +790,13 @@ else
   fail 'pane grant relay endpoint still answers after shutdown'
 fi
 stop_tracked_process forward || fail 'scratch forward serve did not stop'
-stop_tracked_process broker || fail 'scratch broker did not stop'
+systemctl --user stop "$broker_unit" || fail 'scratch broker did not stop'
+if tracked_process_is_alive broker; then
+  fail 'scratch broker did not stop'
+fi
+wait_for_units_unloaded "${started_units[@]}" || fail "a test unit stays loaded: ${still_loaded_units[*]}"
+test_units_verified=true
+pass "no test unit stays loaded: ${started_units[*]}"
 if pgrep -f -- "$scratch" >/dev/null 2>&1; then
   fail 'a scratch process remained after shutdown'
 fi

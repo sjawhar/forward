@@ -25,14 +25,14 @@ inside an agent box (issue #51, measured 2026-09-25):
 - **The address was not the caller's.** `forward serve` runs in the host's
   network namespace, so its `127.0.0.1:<port>` is not the loopback a box can
   reach. The command printed an endpoint with no listener behind it.
-- **The check could not have passed anyway.** Attribution needs
+- **The check could not have passed anyway.** Attribution then needed
   `/proc/<pid>/exe` (to confirm an argv-selected `omp` ancestor) and
   `/proc/<pid>/fd` plus `/proc/net/tcp` (to resolve a loopback connection to
-  its owner). From the host, a box process's `stat` and `cmdline` are
-  readable, but `exe` is denied, `fd` is `Permission denied`, and the box's
-  connection is absent from the host's TCP table. So the anchor silently fell
+  its owner). From the host, a box process's `stat` and `cmdline` were
+  readable, but `exe` was denied, `fd` was `Permission denied`, and the box's
+  connection was absent from the host's TCP table. So the anchor silently fell
   back to the CLI's parent shell, and no box client could ever have been
-  attributed to it. Inside the box, all of those reads work.
+  attributed to it. Inside the box, all of those reads worked.
 
 So the parts that need the caller's `/proc` and the caller's loopback moved
 there, and the parts the caller must never hold stayed in `forward serve`: the
@@ -41,12 +41,11 @@ A file descriptor crosses a network namespace; an address does not.
 
 ### The two halves and the channel between them
 
-The CLI derives the anchor itself — its own ancestry is intact and its
-`/proc/<pid>/exe` entries are readable — and refuses before the ceremony if it
-cannot. After the ceremony it binds `127.0.0.1:0`, sends
-`GRANT <ttl> <receipt> <port>` on the request socket, and on `OK` keeps that
-connection open as the grant's **control channel**. It hands the listener and
-the control channel to a detached child (`forward browser relay`, a hidden
+The CLI derives the anchor itself — its own ancestry is intact — and refuses
+before the ceremony if it cannot. After the ceremony it binds `127.0.0.1:0`,
+sends `GRANT <ttl> <receipt> <port>` on the request socket, and on `OK` keeps
+that connection open as the grant's **control channel**. It hands the listener
+and the control channel to a detached child (`forward browser relay`, a hidden
 subcommand) as inherited descriptors, prints the URL, and exits.
 
 The relay child accepts CDP clients, applies the ownership check where `/proc`
@@ -62,11 +61,14 @@ in `forward serve`, and `forward serve` closing it ends the endpoint.
 
 ### Containment
 
-Each grant anchors on the nearest ancestor whose executable is named `omp`.
-The walk begins at the grant CLI's parent and visits at most 12 processes. It
-reads `/proc/<pid>/exe`, so an ancestor is selected whatever its arguments say.
-An omp whose binary was deleted while it runs still counts: the kernel then
-names the executable `omp (deleted)`, and that exact name is accepted too.
+Each grant anchors on the nearest ancestor named `omp`: the name field of its
+`/proc/<pid>/stat`, the text between the first `(` and the last `)`, must be
+exactly `omp`. The walk begins at the grant CLI's parent and visits at most 12
+processes. When a process starts a program, the kernel sets the name from the
+last part of the path given for the program file, cut to 15 bytes, so an
+ancestor is selected whatever its arguments say. A process named
+`omp (deleted)`, or any other name, is not omp. An omp whose binary was deleted
+while it runs still counts, because the kernel does not change its name.
 `omp --resume` supplies only the session label for reporting. If the walk finds
 no omp process, the CLI's immediate parent remains the anchor.
 
@@ -81,9 +83,13 @@ authorization value.
 There are two anchors, derived separately and used for different things. The
 relay enforces the one the CLI derived in the caller's namespace. `forward
 serve` records the one it derives from the request connection's `SO_PEERCRED`
-pid, and uses it only for log lines and for answering `STATUS` — so `STATUS`
-from inside a box answers for the subtree the *host* can see, which is the
-shell that ran the grant and its descendants.
+pid, and uses it only for log lines and for answering `STATUS`. For a caller
+inside an agent box, it finds the box's omp by name, because the host can read
+a box process's `stat`, so `STATUS` from inside a box answers for the box's
+omp and the processes below it. Before the name rule, `forward serve` read
+each ancestor's program file link instead, which the host cannot read for a
+box process, so it fell back to the shell that ran the grant, and `STATUS`
+from inside a box answered for that shell and its descendants.
 
 An expiry reaper removes the grant and closes its control channel, which
 retires the endpoint even when no client ever connected. A connection already

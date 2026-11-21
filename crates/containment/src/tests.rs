@@ -2,22 +2,24 @@ use std::collections::HashMap;
 
 use crate::anchored::{AnchoredPeer, Process, anchor_for_with, process_start, session_label_with};
 
-fn process(argv: &[&str], parent: u32, start: u64) -> Process {
+fn process(argv: &[&str], parent: u32, start: u64, omp: bool) -> Process {
     Process {
         argv: argv.iter().map(|part| (*part).to_owned()).collect(),
         parent,
         start,
+        omp,
     }
 }
 
 const SESSION: &str = "01a0223b-94d1-7000-bd0e-5038df7750b0";
 
-/// pid 40 is a worker under `omp --resume` (pid 30) under a shell (pid 20).
+/// pid 40 is a worker under `omp --resume` (pid 30, named `omp`) under a shell
+/// (pid 20).
 fn tree() -> HashMap<u32, Process> {
     HashMap::from([
-        (40, process(&["worker"], 30, 4_000)),
-        (30, process(&["omp", "--resume", SESSION], 20, 3_000)),
-        (20, process(&["bash"], 1, 2_000)),
+        (40, process(&["worker"], 30, 4_000, false)),
+        (30, process(&["omp", "--resume", SESSION], 20, 3_000, true)),
+        (20, process(&["bash"], 1, 2_000, false)),
     ])
 }
 
@@ -40,7 +42,10 @@ fn ancestry_requires_the_same_process_instance_not_just_the_pid() {
 fn ancestry_stops_at_the_hop_cap_and_survives_a_cycle() {
     // 10 -> 11 -> 10 is a cycle; the visited set must end the walk rather than
     // spin to the cap.
-    let cyclic = HashMap::from([(10, process(&["a"], 11, 1)), (11, process(&["b"], 10, 2))]);
+    let cyclic = HashMap::from([
+        (10, process(&["a"], 11, 1, false)),
+        (11, process(&["b"], 10, 2, false)),
+    ]);
     let anchor = AnchoredPeer::new(99, 1);
 
     assert!(!anchor.contains_with(10, &mut lookup(cyclic)));
@@ -55,20 +60,21 @@ fn an_unreadable_process_refuses_rather_than_continuing() {
 }
 
 #[test]
-fn the_anchor_is_the_enclosing_session_when_its_executable_is_omp() {
-    let anchor =
-        anchor_for_with(40, &mut lookup(tree()), &mut |pid| pid == 30).expect("anchor resolves");
+fn the_anchor_is_the_enclosing_session_when_its_name_is_omp() {
+    let anchor = anchor_for_with(40, &mut lookup(tree())).expect("anchor resolves");
 
     assert_eq!(anchor, AnchoredPeer::new(30, 3_000));
 }
 
 #[test]
 fn a_forged_session_argv_cannot_widen_the_anchor() {
-    // pid 30 presents `omp --resume <uuid>` but its executable is not omp.
-    // Before the executable check was fused into anchor derivation, this
+    // pid 30 presents `omp --resume <uuid>` but its name is not omp.
+    // Before the omp check was fused into anchor derivation, this
     // returned pid 30 and anchored the grant to a subtree the forger controls.
     // The narrower fallback -- the immediate parent -- is the correct answer.
-    let anchor = anchor_for_with(40, &mut lookup(tree()), &mut |_| false).expect("fallback");
+    let mut forged = tree();
+    forged.get_mut(&30).expect("pid 30").omp = false;
+    let anchor = anchor_for_with(40, &mut lookup(forged.clone())).expect("fallback");
 
     assert_eq!(
         anchor,
@@ -76,30 +82,27 @@ fn a_forged_session_argv_cannot_widen_the_anchor() {
         "the immediate parent of the caller is the fallback anchor"
     );
     // And the label, which is display-only, refuses it outright.
-    assert_eq!(
-        session_label_with(40, &mut lookup(tree()), &mut |_| false),
-        None
-    );
+    assert_eq!(session_label_with(40, &mut lookup(forged)), None);
 }
 
 #[test]
 fn the_anchor_falls_back_to_the_immediate_parent_without_a_session() {
     let plain = HashMap::from([
-        (40, process(&["worker"], 30, 4_000)),
-        (30, process(&["bash"], 20, 3_000)),
-        (20, process(&["sshd"], 1, 2_000)),
+        (40, process(&["worker"], 30, 4_000, false)),
+        (30, process(&["bash"], 20, 3_000, false)),
+        (20, process(&["sshd"], 1, 2_000, false)),
     ]);
 
-    let anchor = anchor_for_with(40, &mut lookup(plain), &mut |_| false).expect("fallback");
+    let anchor = anchor_for_with(40, &mut lookup(plain)).expect("fallback");
 
     assert_eq!(anchor, AnchoredPeer::new(30, 3_000));
 }
 
 #[test]
 fn a_caller_whose_parent_is_init_has_no_anchor() {
-    let orphan = HashMap::from([(40, process(&["worker"], 1, 4_000))]);
+    let orphan = HashMap::from([(40, process(&["worker"], 1, 4_000, false))]);
 
-    assert!(anchor_for_with(40, &mut lookup(orphan), &mut |_| false).is_none());
+    assert!(anchor_for_with(40, &mut lookup(orphan)).is_none());
 }
 
 #[test]
@@ -116,10 +119,10 @@ fn the_session_label_matches_only_omp_resume_with_a_session_id() {
     ];
 
     for (argv, expected) in cases {
-        let table = HashMap::from([(40, process(argv, 1, 1))]);
-        // The single process has an omp executable; argv still decides only
-        // whether its display label is a resumed session.
-        let resolved = session_label_with(40, &mut lookup(table), &mut |pid| pid == 40);
+        let table = HashMap::from([(40, process(argv, 1, 1, true))]);
+        // The single process is named omp; argv still decides only whether
+        // its display label is a resumed session.
+        let resolved = session_label_with(40, &mut lookup(table));
         assert_eq!(resolved.is_some(), expected, "argv {argv:?}");
     }
 }
@@ -138,7 +141,8 @@ fn deep_chain(depth: u32) -> HashMap<u32, Process> {
         } else {
             &["worker"]
         };
-        table.insert(pid, process(argv, pid.saturating_sub(1), u64::from(pid)));
+        let entry = process(argv, pid.saturating_sub(1), u64::from(pid), pid == 2);
+        table.insert(pid, entry);
     }
     table
 }
@@ -156,13 +160,10 @@ fn over_deep_ancestry_is_not_authorized() {
 
 #[test]
 fn over_deep_ancestry_does_not_reach_a_session() {
-    // Only pid 2 has an omp executable; the other entries are workers.
+    // Only pid 2 is named omp; the other entries are workers.
+    assert_eq!(session_label_with(30, &mut lookup(deep_chain(30))), None);
     assert_eq!(
-        session_label_with(30, &mut lookup(deep_chain(30)), &mut |pid| pid == 2),
-        None
-    );
-    assert_eq!(
-        session_label_with(8, &mut lookup(deep_chain(30)), &mut |pid| pid == 2).as_deref(),
+        session_label_with(8, &mut lookup(deep_chain(30))).as_deref(),
         Some(SESSION)
     );
 }
@@ -206,18 +207,17 @@ fn process_start_reads_the_live_process_table() {
 }
 
 #[test]
-fn the_anchor_selects_the_nearest_omp_executable_not_the_outermost() {
-    // Only pids 10 and 11 have omp executables; the sh process is not an omp
-    // even though it sits between the command and the nearest one.
+fn the_anchor_selects_the_nearest_process_named_omp_not_the_outermost() {
+    // Only pids 10 and 11 are named omp; the sh process is not an omp even
+    // though it sits between the command and the nearest one.
     let nested = HashMap::from([
-        (13, process(&["forward", "browser", "grant"], 12, 10)),
-        (12, process(&["sh", "-c", "forward"], 11, 20)),
-        (11, process(&["omp", "--resume", SESSION], 10, 30)),
-        (10, process(&["omp", "--resume", SESSION], 1, 40)),
+        (13, process(&["forward", "browser", "grant"], 12, 10, false)),
+        (12, process(&["sh", "-c", "forward"], 11, 20, false)),
+        (11, process(&["omp", "--resume", SESSION], 10, 30, true)),
+        (10, process(&["omp", "--resume", SESSION], 1, 40, true)),
     ]);
 
-    let anchor = anchor_for_with(13, &mut lookup(nested), &mut |pid| matches!(pid, 10 | 11))
-        .expect("anchor");
+    let anchor = anchor_for_with(13, &mut lookup(nested)).expect("anchor");
 
     assert_eq!(anchor, AnchoredPeer::new(11, 30));
 }
@@ -225,11 +225,11 @@ fn the_anchor_selects_the_nearest_omp_executable_not_the_outermost() {
 #[test]
 fn the_anchor_falls_back_to_the_callers_immediate_parent() {
     let no_session = HashMap::from([
-        (12, process(&["forward", "browser", "grant"], 11, 10)),
-        (11, process(&["sh", "-c", "forward"], 1, 20)),
+        (12, process(&["forward", "browser", "grant"], 11, 10, false)),
+        (11, process(&["sh", "-c", "forward"], 1, 20, false)),
     ]);
 
-    let anchor = anchor_for_with(12, &mut lookup(no_session), &mut |_| false).expect("fallback");
+    let anchor = anchor_for_with(12, &mut lookup(no_session)).expect("fallback");
 
     assert_eq!(anchor, AnchoredPeer::new(11, 20));
 }

@@ -67,10 +67,8 @@ fn grant(ttl: &str, config: Option<PathBuf>) -> anyhow::Result<()> {
         forward::secretsd::session_token().unwrap_or_else(|error| crate::exit_with_error(error));
     let tty = forward::secretsd::caller_tty();
     let pid = std::process::id();
-    // The anchor is derived here, in the command itself, because here is the
-    // only place it can be: this process's ancestry is intact and its
-    // `/proc/<pid>/exe` entries are readable, neither of which holds for a
-    // `forward serve` on the other side of an agent box's user namespace.
+    // The anchor is derived here, in the command itself, because here the
+    // ancestry it walks is this process's own and is intact.
     let omp_anchor = omp_anchor_for(pid);
     if let Some(refusal) = grant_scope_refusal(token.is_some(), tty.is_some(), omp_anchor.is_some())
     {
@@ -78,10 +76,11 @@ fn grant(ttl: &str, config: Option<PathBuf>) -> anyhow::Result<()> {
         std::process::exit(1);
     }
 
-    // The nearest omp executable is both this relay's anchor and the broker's
-    // tokenless capability scope. A token or tty preserves the immediate-parent
-    // fallback for an interactive command with no omp ancestor, and taking that
-    // parent directly keeps the ancestry walk above to a single pass.
+    // The nearest process named `omp` above this command is both this relay's
+    // anchor and the broker's tokenless capability scope. A token or tty
+    // preserves the immediate-parent fallback for an interactive command with
+    // no omp ancestor, and taking that parent directly keeps the ancestry walk
+    // above to a single pass.
     let Some(anchor) = omp_anchor.or_else(|| parent_anchor_for(pid)) else {
         // Not `describe_refusal("ANCHOR")`: that sentence blames `forward serve`,
         // and here it is this command that could not find its session.

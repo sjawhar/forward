@@ -128,7 +128,7 @@ impl PinnedPeer {
         matches!(self.liveness(), Liveness::Running(_))
     }
 
-    /// The nearest omp executable above this running pinned peer.
+    /// The nearest process named `omp` above this running pinned peer.
     #[must_use]
     pub fn nearest_omp(&self) -> Option<crate::omp::OmpProcess> {
         let pid = u32::try_from(self.pid()?).ok()?;
