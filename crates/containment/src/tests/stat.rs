@@ -24,7 +24,8 @@ fn only_the_name_omp_exactly_is_omp() {
     // omp's worker daemon broker runs the file `omp` and sets its own name with
     // prctl(PR_SET_NAME); the kernel keeps 15 bytes of it, `omp daemon brok`.
     // And the kernel never names a running omp `omp (deleted)`, even one whose
-    // binary was deleted.
+    // binary was deleted. The name starts after the first `(`, so `x (omp` is
+    // not omp, though the text after its last `(` is.
     for name in [
         "omp daemon brok",
         "omp (deleted)",
@@ -32,6 +33,7 @@ fn only_the_name_omp_exactly_is_omp() {
         "omp ",
         "omp)",
         "",
+        "x (omp",
     ] {
         assert_eq!(
             parse_stat(&line(name)),
