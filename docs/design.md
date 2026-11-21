@@ -51,11 +51,16 @@ secrets keep working unattended with zero interaction, exactly as today.
 - **Tokenless path abuse**: an agent that strips its own environment can reach
   the interactive `(tty, boot-id)` flow. A process below an omp process can
   also ask for an `AUTHORIZE` capability scope. The omp test reads only the
-  executable's file name, so any same-UID process that runs a binary named
-  `omp`, or one named `omp` that was since deleted, gets an omp capability
-  scope for the processes below it, not only a process below a real omp. Each
-  capability authorization, these included, runs a fresh decrypt and needs its
-  own touch. The audit record includes `scope_kind` and `scope_omp_pid`.
+  process name in `/proc/<pid>/stat`, which must be exactly `omp`. When a
+  process starts a program, the kernel sets the name from the last part of the
+  path given for the program file, cut to 15 bytes, and a process of the same
+  user can set its own name with `prctl(PR_SET_NAME)`. A script run directly,
+  or a symlink, named `omp` passes the test, as does a copy of a binary named
+  `omp`. Each such process gets an omp capability scope for the processes
+  below it. The omp test is no boundary against a program of the same user:
+  the omp anchor only makes a grant's process tree smaller. Each capability
+  authorization, these included, runs a fresh decrypt and needs its own touch.
+  The audit record includes `scope_kind` and `scope_omp_pid`.
   Best-effort hardening: the plugin registers PTYs it allocates and the broker
   rejects tokenless requests from them; ttys the plugin cannot see (for
   example, agent-created tmux panes) remain an accepted same-UID residual.
@@ -237,14 +242,16 @@ with — enforcement is cryptographic.
 
 A secret grant is stored under a `(scope, key)` pair in broker memory. A scope
 is a token-verified session, `(tty, boot-id)`, or, for `AUTHORIZE` only, an omp
-process identified by its pid and start time.
+process identified by its pid and start time. The tokenless `AUTHORIZE` scope
+selects its omp process by name and ancestry: the nearest ancestor of the
+caller whose name in `/proc/<pid>/stat` is exactly `omp`.
 
 - Requests carry the session token, read by the shim from the file named in
   `SECRETSD_SESSION_TOKEN_FILE`, and authorization is a constant-time token
-  comparison **plus** a process-ancestry check. A claimed session ID or process
-  name is never an input, but ancestry is: the token names a session without
-  proving the caller belongs to it, because every same-uid process can read the
-  token file. `REGISTER` pins the registering caller from the kernel
+  comparison **plus** a process-ancestry check. A claimed session ID is never
+  an input, but ancestry is: the token names a session without proving the
+  caller belongs to it, because every same-uid process can read the token
+  file. `REGISTER` pins the registering caller from the kernel
   (`SO_PEERPIDFD`), and a later request carrying that token is refused with
   `FOREIGN_CALLER` unless it descends from that pinned root. Re-registering a
   live session therefore cannot replace its root, or a caller that read the
