@@ -136,7 +136,7 @@ fn live_view_never_includes_secret_values() {
     );
     let listed: Vec<_> = table
         .live(now)
-        .map(|(key, scope, secs)| (key.as_str().to_owned(), scope.label(), secs))
+        .map(|(key, scope, secs)| (key.as_str().to_owned(), scope.label().to_string(), secs))
         .collect();
     assert_eq!(
         listed,

@@ -11,7 +11,8 @@ use crate::secret::{SecretBytes, SecretName};
 use crate::store::{FileIdentity, FileTimestamp};
 
 const TTY: &str = "/dev/pts/3";
-/// The `GRANTS` answer of v3.8.4, which every daemon before this change gives.
+/// The `GRANTS` answer of a daemon whose answer starts with `KEY\tSCOPE\tAGE`
+/// (v3.8.4 and earlier).
 const V3_8_4: &str = "KEY\tSCOPE\tAGE\nK\tsession\t5s\nT\ttty /dev/pts/3\t9s\n";
 
 /// The four tables that `GRANTS` reads, empty; requests live 90 s.
@@ -119,7 +120,7 @@ fn a_tty_grant_is_found_beside_every_other_kind() {
 }
 
 #[test]
-fn the_v3_8_4_answer_is_read_as_before() {
+fn a_key_scope_age_answer_is_still_read() {
     assert!(lists_grant(V3_8_4, &name("K"), &CallerScope::Session));
     assert!(lists_grant(V3_8_4, &name("T"), &caller_tty()));
     assert!(!lists_grant(V3_8_4, &name("K"), &caller_tty()));

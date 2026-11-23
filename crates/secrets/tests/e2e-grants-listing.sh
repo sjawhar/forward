@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Drives a built daemon through seven steps and checks what `secrets grants`
 # answers at each one: secret grants, requests that wait for a touch, receipts
-# not yet redeemed and capability grants (dispatch://HOME-291, `listing-cli`).
+# not yet redeemed and capability grants (dispatch://HOME-291).
 #
 # Usage: e2e-grants-listing.sh DAEMON CLIENT [EXTRA_CLIENT...]
 #
@@ -118,7 +118,6 @@ readonly socket="$scratch/secretsd.sock"
 readonly wait_marker="$scratch/release"
 readonly decrypt_log="$scratch/decrypt.log"
 readonly journal="$scratch/daemon.log"
-readonly first_token_file="$scratch/$first_session.token"
 readonly second_token_file="$scratch/$second_session.token"
 daemon_pid=0
 driver_pid=0
@@ -155,7 +154,6 @@ cat > "$scratch/config.toml" <<EOF
 [source.e2e]
 path = "$scratch/root"
 EOF
-printf '%s' "$first_token" > "$first_token_file"
 printf '%s' "$second_token" > "$second_token_file"
 : > "$decrypt_log"
 

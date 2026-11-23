@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use super::queue::PendingRequest;
 use super::{Queue, RequestId, RequestState};
 use crate::grants::Scope;
 use crate::secret::SecretName;
@@ -68,7 +69,7 @@ impl Queue {
         self.requests
             .iter()
             .find(|request| request.id == id)
-            .and_then(|request| request.created.checked_add(self.limits.ttl))
+            .and_then(|request| self.deadline(request))
             .is_some_and(|deadline| now <= deadline)
     }
 
@@ -90,7 +91,7 @@ impl Queue {
                 )
             })
             .filter_map(|request| {
-                let deadline = request.created.checked_add(self.limits.ttl)?;
+                let deadline = self.deadline(request)?;
                 (now <= deadline).then(|| {
                     (
                         request.id,
@@ -104,6 +105,11 @@ impl Queue {
             .collect();
         live.sort_unstable_by_key(|&(id, ..)| id);
         live
+    }
+
+    /// The instant after which a request has passed its queue deadline.
+    fn deadline(&self, request: &PendingRequest) -> Option<Instant> {
+        request.created.checked_add(self.limits.ttl)
     }
 
     /// Expire requests that waited too long.

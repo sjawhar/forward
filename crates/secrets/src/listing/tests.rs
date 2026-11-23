@@ -131,7 +131,7 @@ fn a_request_alone_lists_its_state_id_and_seconds_to_the_deadline() {
 }
 
 #[test]
-fn tty_and_omp_scopes_are_written_as_before() {
+fn tty_and_omp_scopes_are_written_as_tty_path_and_omp_pid() {
     let (mut tables, t) = (Tables::new(), Instant::now());
     let tty = "/dev/pts/3".to_owned();
     let boot_id = "boot".to_owned();

@@ -1,3 +1,5 @@
+use std::fmt;
+
 use super::SessionToken;
 
 /// What a grant belongs to.
@@ -46,11 +48,20 @@ impl Scope {
 
     /// The scope as `secrets grants` writes it: `session`, `tty <tty>` or
     /// `omp <pid>`. A session's token never appears.
-    pub(crate) fn label(&self) -> String {
-        match self {
-            Self::Session(_) => "session".to_owned(),
-            Self::Tty { tty, .. } => format!("tty {tty}"),
-            Self::Omp { pid, .. } => format!("omp {pid}"),
+    pub(crate) const fn label(&self) -> impl fmt::Display + '_ {
+        Label(self)
+    }
+}
+
+/// A scope written as `Scope::label` describes.
+struct Label<'scope>(&'scope Scope);
+
+impl fmt::Display for Label<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Scope::Session(_) => f.write_str("session"),
+            Scope::Tty { tty, .. } => write!(f, "tty {tty}"),
+            Scope::Omp { pid, .. } => write!(f, "omp {pid}"),
         }
     }
 }
