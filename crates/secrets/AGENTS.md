@@ -41,7 +41,7 @@ Both halves resolve the socket path by the same rule (`SocketPath::resolve`,
 plugin connect through `SECRETSD_SOCK` (`BrokerClient::from_environment`,
 `src/client.rs:91`; `resolveSocketPath`, `opencode/plugins/secretsd.ts`), while a
 standalone `secrets serve` listens on `SECRETSD_SOCKET` (`Config::from_env`,
-`src/lib.rs:105`). The split is deliberate — a test harness redirects the daemon's
+`src/daemon.rs`). The split is deliberate — a test harness redirects the daemon's
 listener without silently redirecting every client on the machine — so
 redirecting one half never leaves the token registered with a daemon the other
 half is not talking to. Under socket activation systemd owns the listener and
@@ -99,7 +99,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | Change how an answer names its store | `Provenance`, `src/client/status/provenance.rs`; the refusals and the human-tier source in `src/client/cli/naming.rs`; the stderr notice in `announce`, `src/client/status.rs` |
 | Change human-secret creation | `src/client/edit/new.rs`: `human`, `write_piped_human`, `read_piped_assignment`, `encrypt`, and `encrypt_bytes` |
 | Change stale-grant invalidation | `resolve_access`, `src/server/approval/access.rs`; `HumanStore::identity`, `src/store.rs:145` |
-| Change grant lifetime or revocation | `GrantTable::revoke`, `src/grants.rs:293` |
+| Change grant lifetime or revocation | `GrantTable::revoke` and `Grant::is_live`, `src/grants/table.rs` |
 
 ## Non-negotiables
 
@@ -153,14 +153,15 @@ of them is a bug even if tests pass:
 cargo +nightly fmt --all -- --check   # nightly: imports_granularity, group_imports
 cargo clippy --all-targets --all-features -- -D warnings
 cargo nextest run --all-targets --all-features --workspace
-cargo +nightly miri nextest run --all-features -E 'test(/^(secret|grants|requests|proto|client|config)::tests::/)'
+cargo +nightly miri nextest run --all-features -E 'test(/^(capability_grants|capability|config|grants|proto|receipts|requests|secret|client)::tests::/)'
 cargo machete && cargo deny check all
 bun install --frozen-lockfile && bun run test:secretsd-plugin
 (cd omp && bun install --frozen-lockfile && bun run test:secretsd-omp-extension)
 ```
 
-Miri covers the pure `secret`, `grants`, `requests`, `proto`, `client`, and `config`
-modules. It cannot cover the `unsafe` fd-3 adoption in `server.rs`: that code
+Miri covers the pure `capability_grants`, `capability`, `config`, `grants`, `proto`,
+`receipts`, `requests`, `secret` and `client` unit tests, the filter CI runs.
+It cannot cover the `unsafe` fd-3 adoption in `server.rs`: that code
 requires a real socket. Guard it through review, the `LISTEN_PID`/`LISTEN_FDS`
 validation, and the integration tests in `tests/broker.rs`.
 

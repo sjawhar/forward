@@ -40,7 +40,7 @@ a `mod.rs` would change how every existing file resolves.
 
 Nothing here may need a YubiKey. Point the daemon at a fixture instead:
 
-- `SECRETSD_SOPS_BIN=tests/fixtures/fake-sops-ok` — succeeds, emits dotenv
+- `SECRETSD_SOPS_BIN=tests/fixtures/fake-sops-ok` — succeeds, emits dotenv; `FAKE_SOPS_LOG` records each decrypted path before it waits, and `FAKE_SOPS_WAIT_MARKER` makes it wait for a test marker before it answers (the listing tests and `e2e-grants-listing.sh` hold a request in `decrypting` this way)
 - `…/fake-sops-fail` — non-zero, writes to stderr
 - `…/fake-sops-stdin-fail` — consumes stdin, returns it on stderr, and exits non-zero to test that client errors do not disclose piped values
 - `…/fake-sops-hang` — sleeps, for timeout and process-group kill
@@ -79,7 +79,8 @@ registrant and the outsider are siblings, both children of the harness.
 
 ## Miri
 
-CI runs miri over `secret|grants|requests|proto|client|config` unit tests only. Any test
-that touches a socket, `/proc`, or the filesystem must carry
+CI runs miri over `capability_grants|capability|config|grants|proto|receipts|requests|secret|client`
+unit tests (`<module>::tests::`) only. Any test that touches a socket, `/proc`, the
+filesystem or `/dev/urandom` (`ReceiptTable::mint`) must carry
 `#[cfg_attr(miri, ignore)]` — miri cannot emulate `getsockopt`, and an unmarked
 test breaks the miri job, not the test job.

@@ -533,13 +533,14 @@ second, after one empty line when the first is there, under
 touch or is decrypting (with its state and the id that `secrets deny` takes),
 per receipt not yet redeemed, and per capability grant. A tokenless request
 names its tty itself, so each control character in a `tty <tty>` scope is
-written escaped (as the audit line writes it), and no reply carries one. When
-the second table would not fit in one 4096-byte reply, secretsd drops rows
-from its end and writes a last `more` row with the count dropped, or leaves
-the table out when not even its header and that row fit. The answer is
-`no active grants` only when none of the four kinds is live; a restart of
-secretsd then ends no grant, request, receipt or capability grant. It still
-drops the session registrations, which the answer does not list. Two limits:
+written escaped and cut at 256 bytes (as the audit line writes it), and no
+reply carries one. When the second table would not fit in one 4096-byte
+reply, secretsd drops rows from its end and writes a last `more` row with the
+count dropped, or leaves the table out when not even its header and that row
+fit. The answer is `no active grants` only when none of the four kinds is
+live; a restart of secretsd then ends no grant, request, receipt or capability
+grant. It still drops the session registrations, which the answer does not
+list. Two limits:
 
 - A daemon older than this listing, one whose answer starts with
   `KEY\tSCOPE\tAGE`, lists only secret grants, with their age in place of their
