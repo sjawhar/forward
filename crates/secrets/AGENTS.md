@@ -60,7 +60,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 |---|---|
 | `src/proto.rs` | Wire protocol parse/format. Hand-rolled; no serde. |
 | `src/config.rs` | Source-root configuration, config-path resolution, and root validation. |
-| `src/hardening.rs` | `mlockall`, `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`. Fail-closed. |
+| `crates/hygiene/src/hardening.rs` | `mlockall`, `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`. Fail-closed. `src/lib.rs` re-exports it as `hardening` (`pub use hygiene::hardening`). |
 | `src/secret.rs` | `SecretBytes` (zeroize on drop), key-name validation, single-assignment dotenv parse. |
 | `src/decrypt.rs` | Spawns sops, enforces its timeout, kills its process group on cancel, and returns each attempt's stable result. |
 | `src/decrypt/attempt.rs` | The stable code, label, and retry eligibility for one decrypt attempt. |
@@ -224,19 +224,28 @@ unregisters and removes the token file for the whole tree.
 The wire protocol is the contract between client and daemon: it carries a
 version in the handshake, and a mismatch must fail loudly rather than degrade.
 Changing the fields of a request, or the frame of a reply, bumps
-`PROTOCOL_VERSION`; adding a field is such a change. A reply's frame is its
-`OK` or `ERR` header, the set of error codes an `ERR` header carries, and the
-names of the `key=value` fields an `OK` header carries. The reason text after
-an `ERR` code is prose, not frame, so rewording it needs no bump. The note on
-`refused` (`src/server/dispatch/control.rs`) rests on this: a refused claim on
-a session answers with the existing `FOREIGN_CALLER` code and a message of its
-own, and needs no bump. A strict peer rejects a new frame, so the version is
-what turns that into a clear "update both" instead of a puzzling parse failure.
-That the two halves ship in one release is not a reason to skip the bump: the
-plugin is loaded when `opencode serve` starts, so it lags a daemon that has
-already restarted, and mixed peers therefore occur during a normal upgrade. A
-change to the text a reply's payload carries needs no bump when every existing
-reader still parses it. The one such case is the `GRANTS` answer, below.
+`PROTOCOL_VERSION`; adding a field is such a change. A reply's frame is
+everything a reader matches, and changing any of it bumps `PROTOCOL_VERSION`:
+the `OK` or `ERR` header, the error codes an `ERR` header carries, the name of
+each `key=value` field, each value a reader compares exactly, and the limit of
+an `ERR` reason to printable ASCII (`parse_header` in
+`crates/proto/src/response.rs` refuses any header byte other than printable
+ASCII and tab). The values a reader compares exactly include `status=granted`
+(`opencode/plugins/secretsd.ts` matches `OK\tstatus=granted`),
+`status=authorized` and `status=redeemed`
+(`crates/forward/src/secretsd/reply.rs`), and the handshake's `version=`
+(`crates/proto/src/client/stream.rs`). The wording of an `ERR` reason is
+prose, not frame, so rewording it within printable ASCII needs no bump. The
+note on `refused` (`src/server/dispatch/control.rs`) rests on this: a refused
+claim on a session answers with the existing `FOREIGN_CALLER` code and a
+message of its own, and needs no bump. A strict peer rejects a new frame, so
+the version is what turns that into a clear "update both" instead of a
+puzzling parse failure. That the two halves ship in one release is not a
+reason to skip the bump: the plugin is loaded when `opencode serve` starts, so
+it lags a daemon that has already restarted, and mixed peers therefore occur
+during a normal upgrade. The text a reply's payload carries is not frame: a
+change to it needs no bump when every existing reader still parses it. The one
+such case is the `GRANTS` answer, below.
 
 The `GRANTS` payload is text that three readers match, each on part of it:
 
