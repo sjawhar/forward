@@ -31,16 +31,17 @@ secretsd ── grants: (scope, key) → SecretBytes, memory only
 ```
 
 `<runtime>` is `$XDG_RUNTIME_DIR`, or `/run/user/<uid>` when that is unset or
-empty. Both halves of the release resolve it by the same rule — `SocketPath::resolve`
-(`src/client.rs:35`) and `resolveRuntimeDir` (`opencode/plugins/secretsd.ts`) —
-because a client that resolves a different directory than the plugin that minted
-its token is refused, not degraded.
+empty. Both halves of the release resolve it by the same rule —
+`SocketPath::resolve` (`crates/proto/src/client.rs`) and `resolveRuntimeDir`
+(`opencode/plugins/secretsd.ts`) — because a client that resolves a different
+directory than the plugin that minted its token is refused, not degraded.
 
 Both halves resolve the socket path by the same rule (`SocketPath::resolve`,
-`src/client.rs:35`) but honour **different override variables**: the client and
-plugin connect through `SECRETSD_SOCK` (`BrokerClient::from_environment`,
-`src/client.rs:91`; `resolveSocketPath`, `opencode/plugins/secretsd.ts`), while a
-standalone `secrets serve` listens on `SECRETSD_SOCKET` (`Config::from_env`,
+`crates/proto/src/client.rs`) but honour **different override variables**: the
+client and plugin connect through `SECRETSD_SOCK`
+(`BrokerClient::from_environment`, `crates/proto/src/client.rs`;
+`resolveSocketPath`, `opencode/plugins/secretsd.ts`), while a standalone
+`secrets serve` listens on `SECRETSD_SOCKET` (`Config::from_env`,
 `src/daemon.rs`). The split is deliberate — a test harness redirects the daemon's
 listener without silently redirecting every client on the machine — so
 redirecting one half never leaves the token registered with a daemon the other
@@ -75,7 +76,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | `src/server/approval/access.rs` | Parses request access data and resolves token, terminal, or capability omp scopes. |
 | `src/server/worker.rs` | The single approval worker: dequeues work and logs each decrypt attempt. |
 | `src/server/worker/attempt.rs` | Completes an attempt: verifies scope liveness, inserts grants, or retries and records the last failure. |
-| `src/peer.rs` | `SO_PEERPIDFD` peer pinning and `/proc` ancestry walk. |
+| `src/peer.rs` | `identify`: pins a peer through `PinnedPeer` (`SO_PEERPIDFD` pinning and the `/proc` ancestry walk, `crates/containment/src/pinned.rs`), re-exported as `PeerIdentity`. |
 | `src/store.rs` | Human-tier ciphertext discovery, descriptor opens, and `FileIdentity` snapshots used to invalidate stale grants. |
 | `src/client/` | The client half of the binary. See `src/client/AGENTS.md`. |
 
@@ -84,21 +85,21 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | Task | Go to |
 |---|---|
 | Change how a request is authorized | `Registry::resolve`, `src/grants/registry.rs`; `resolve_access`, `src/server/approval/access.rs` |
-| Change ancestry / peer identity | `src/peer.rs:46` (`from_stream`), `:97` (`descends_from`) |
+| Change ancestry / peer identity | `PinnedPeer::from_stream` and `PinnedPeer::descends_from`, `crates/containment/src/pinned.rs`; `identify`, `src/peer.rs` |
 | Change who may claim or release a session identifier | `claim_allowed`, `Registry::register`, `Registry::unregister`, `src/grants/registry.rs`; the refusal is `refused`, `src/server/dispatch/control.rs` |
-| Change which peers may connect at all | `assert_owner_only`, `src/server/listener.rs:59`; `uid_is_authorized`, `:38`; the rationale is `docs/design.md` "Requests from other-UID peers" |
-| Add or change a protocol op | `src/proto.rs:97` (requests), `src/proto/response.rs` |
-| Change source-root configuration | `Sources::config_path`, `src/config.rs:54`; `Sources::load`, `src/config.rs:70` |
-| Change what the audit line records | `src/server.rs:305`, context built at `:165`; sanitization in `sanitize_audit_value`, `src/audit.rs` |
+| Change which peers may connect at all | `assert_owner_only`, `src/server/listener.rs`; the peer uid gate in `handle`, `src/server.rs`, through `same_user`, `crates/containment/src/uid.rs`; the rationale is `docs/design.md` "Requests from other-UID peers" |
+| Add or change a protocol op | `Request` and `parse_request`, `src/proto/request.rs`; `src/proto/response.rs` |
+| Change source-root configuration | `Sources::config_path` and `Sources::load`, `src/config.rs` |
+| Change what the audit line records | the `request handled` line in `handle`, `src/server.rs`, and its context from `audit_context` beside it; sanitization in `sanitize_audit_value`, `src/audit.rs` |
 | Change how sops is invoked | `src/decrypt.rs`; attempt outcomes in `src/decrypt/attempt.rs`; failure classes in `src/decrypt/classify.rs` |
-| Change how the runtime directory is resolved | `resolveRuntimeDir`, `opencode/plugins/secretsd.ts`; `SocketPath::resolve` and `runtime_dir`, `src/client.rs:35` |
-| Change which socket either half connects to | `resolveSocketPath`, `opencode/plugins/secretsd.ts`; `BrokerClient::from_environment`, `src/client.rs:91` |
+| Change how the runtime directory is resolved | `resolveRuntimeDir`, `opencode/plugins/secretsd.ts`; `SocketPath::resolve` and `runtime_dir`, `crates/proto/src/client.rs` |
+| Change which socket either half connects to | `resolveSocketPath`, `opencode/plugins/secretsd.ts`; `BrokerClient::from_environment`, `crates/proto/src/client.rs` |
 | Change the session token file's lifetime | `restoreTokenFile`, `opencode/plugins/secretsd.ts`; `ensureState` beside it |
 | Change the approval lifecycle | `src/server/approval.rs`; attempt completion in `src/server/worker/attempt.rs` |
-| Change the CLI surface | `src/client/cli.rs:17` |
+| Change the CLI surface | `Cli` and `CliCommand`, `src/client/cli/parser.rs`; `run`, `src/client/cli.rs` |
 | Change how an answer names its store | `Provenance`, `src/client/status/provenance.rs`; the refusals and the human-tier source in `src/client/cli/naming.rs`; the stderr notice in `announce`, `src/client/status.rs` |
 | Change human-secret creation | `src/client/edit/new.rs`: `human`, `write_piped_human`, `read_piped_assignment`, `encrypt`, and `encrypt_bytes` |
-| Change stale-grant invalidation | `resolve_access`, `src/server/approval/access.rs`; `HumanStore::identity`, `src/store.rs:145` |
+| Change stale-grant invalidation | `resolve_access`, `src/server/approval/access.rs`; `HumanStore::identity`, `src/store.rs` |
 | Change grant lifetime or revocation | `GrantTable::revoke` and `Grant::is_live`, `src/grants/table.rs` |
 
 ## Non-negotiables
@@ -161,7 +162,7 @@ bun install --frozen-lockfile && bun run test:secretsd-plugin
 
 Miri covers the pure `capability_grants`, `capability`, `config`, `grants`, `proto`,
 `receipts`, `requests`, `secret` and `client` unit tests, the filter CI runs.
-It cannot cover the `unsafe` fd-3 adoption in `server.rs`: that code
+It cannot cover the `unsafe` fd-3 adoption in `listener` (`src/server/listener.rs`): that code
 requires a real socket. Guard it through review, the `LISTEN_PID`/`LISTEN_FDS`
 validation, and the integration tests in `tests/broker.rs`.
 
@@ -222,14 +223,19 @@ unregisters and removes the token file for the whole tree.
 
 The wire protocol is the contract between client and daemon: it carries a
 version in the handshake, and a mismatch must fail loudly rather than degrade.
-Changing the fields of a request, or the frame of a reply (its header line and
-that line's `key=value` fields), bumps `PROTOCOL_VERSION`; adding a field is
-such a change. A strict peer rejects the new shape, so the version is what
-turns that into a clear "update both" instead of a puzzling parse failure. That
-the two halves ship in one release is not a reason to skip the bump: the plugin
-is loaded when `opencode serve` starts, so it lags a daemon that has already
-restarted, and mixed peers therefore occur during a normal upgrade. A change to
-the text a reply's payload carries needs no bump only when every existing
+Changing the fields of a request, or the frame of a reply, bumps
+`PROTOCOL_VERSION`; adding a field is such a change. A reply's frame is its
+`OK` or `ERR` header, the set of error codes an `ERR` header carries, and the
+names of the `key=value` fields an `OK` header carries. The reason text after
+an `ERR` code is prose, not frame, so rewording it needs no bump. The note on
+`refused` (`src/server/dispatch/control.rs`) rests on this: a refused claim on
+a session answers with the existing `FOREIGN_CALLER` code and a message of its
+own, and needs no bump. A strict peer rejects a new frame, so the version is
+what turns that into a clear "update both" instead of a puzzling parse failure.
+That the two halves ship in one release is not a reason to skip the bump: the
+plugin is loaded when `opencode serve` starts, so it lags a daemon that has
+already restarted, and mixed peers therefore occur during a normal upgrade. A
+change to the text a reply's payload carries needs no bump when every existing
 reader still parses it. The one such case is the `GRANTS` answer, below.
 
 The `GRANTS` payload is text that three readers match, each on part of it:

@@ -28,9 +28,8 @@ fn e2e_real_sops_harness_exercises_the_built_dual_mode_binary_when_prerequisites
         .output()
         .expect("start standalone real-sops harness");
 
-    // Then it succeeds, or cleanly skips (77) on a machine without a usable sops,
-    // age-keygen, python3 or disk age key, including a sops or age-keygen that
-    // cannot run under a scratch HOME.
+    // Then it exits 0, or skips (77) when a prerequisite is missing; the
+    // harness's `skip` lines name each.
     match output.status.code() {
         Some(0 | 77) => {}
         Some(code) => panic!(

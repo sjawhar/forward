@@ -75,23 +75,6 @@ fi
 
 readonly real_sops="$(command -v sops)"
 
-# The daemon runs sops with HOME set to its scratch directory, so a binary that
-# cannot run under a scratch HOME (for example a mise shim) would fail mid-run.
-probe_under_scratch_home() {
-  local probe_home runs=true
-  probe_home="$(mktemp -d)"
-  env -i PATH="$PATH" HOME="$probe_home" "$@" >/dev/null 2>&1 || runs=false
-  rm -rf -- "$probe_home"
-  [[ "$runs" == true ]] || skip "$1 cannot run under a scratch HOME (for example a mise shim)"
-}
-# Only the first pass probes, before it makes any scratch state; the pass after
-# REGISTER inherits the same PATH.
-if [[ "$after_register" == false ]]; then
-  # A bare --version asks GitHub for the latest sops release.
-  probe_under_scratch_home "$real_sops" --disable-version-check --version
-  probe_under_scratch_home "$(command -v age-keygen)" --version
-fi
-
 readonly age_key_file="${SOPS_AGE_KEY_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/sops/age/keys.txt}"
 if [[ ! -r "$age_key_file" ]]; then
   skip "disk-resident age key is unavailable at $age_key_file"
@@ -219,6 +202,16 @@ run_client_from() {
 
 if [[ "$after_register" == false ]]; then
   report '1/14 preparing scratch files and real-sops wrapper'
+  # The daemon (step 4) runs sops with this PATH and HOME, and $scratch is still
+  # empty here. A sops that runs only with the caller's HOME (for example a
+  # mise shim) skips; one that runs with neither fails. A bare --version asks
+  # GitHub for the latest sops release.
+  if ! scratch_home_sops_output="$(env -i PATH="$harness_bin:$PATH" HOME="$scratch" SOPS_AGE_KEY_FILE="$age_key_file" "$real_sops" --disable-version-check --version 2>&1)"; then
+    if ! caller_home_sops_output="$("$real_sops" --disable-version-check --version 2>&1)"; then
+      fail "$real_sops runs with neither the scratch HOME nor the caller's HOME: $caller_home_sops_output"
+    fi
+    skip "$real_sops runs with the caller's HOME but not with the scratch HOME the daemon gets (for example a mise shim): ${scratch_home_sops_output%%$'\n'*}"
+  fi
   umask 077
   mkdir -p "$human_dir" "$private_human_dir" "$harness_bin" "$operator_dir"
   assert_no_sops_config_ancestor "$operator_dir"
