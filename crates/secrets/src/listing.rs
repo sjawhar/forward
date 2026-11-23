@@ -56,10 +56,14 @@ pub(crate) fn render(
     let header_end = answer.len();
     let mut row_ends = Vec::new();
     for (id, key, scope, state, secs) in queue.live(now) {
-        let state = if state == RequestState::Decrypting {
-            "decrypting"
-        } else {
-            "pending"
+        let state = match state {
+            RequestState::Pending => "pending",
+            RequestState::Decrypting => "decrypting",
+            // `Queue::live` yields no request in a final state.
+            RequestState::Granted
+            | RequestState::Denied
+            | RequestState::TimedOut
+            | RequestState::Failed => continue,
         };
         let _ = writeln!(
             answer,
@@ -124,4 +128,8 @@ fn more_row_len(dropped: usize) -> usize {
 }
 
 #[cfg(test)]
-mod tests;
+#[allow(
+    clippy::redundant_pub_crate,
+    reason = "the `client::status` tests build their answers from this fixture"
+)]
+pub(crate) mod tests;

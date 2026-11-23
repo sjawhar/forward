@@ -1,6 +1,7 @@
 //! Audit-value sanitization shared by the request audit line, the worker's
-//! grant event, and the store's invalid-filename warning. One implementation
-//! so the three log surfaces can never drift apart.
+//! grant event, the store's invalid-filename warning, and the tty a request
+//! names when `secrets grants` lists its scope (`Scope::label`). One
+//! implementation so these surfaces can never drift apart.
 
 pub(crate) const MAX_AUDIT_VALUE_BYTES: usize = 256;
 

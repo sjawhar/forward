@@ -22,7 +22,7 @@ a `mod.rs` would change how every existing file resolves.
 | `broker/capability.rs` | wiring for capability authorization tests |
 | `broker/capability/omp_scope.rs` | capability scopes resolved from the caller's nearest omp process |
 | `broker/capability/retry.rs` and `broker/capability/retry/{attempts,control,expiry}.rs` | retry attempts, final failures, `DENY`, `LOCK`, and expiry |
-| `broker/listing.rs` | the `GRANTS` answer of a live daemon: harness helpers, displaced and `LOCK`ed grants leave no row, no listing holds a value |
+| `broker/listing.rs` | the `GRANTS` answer of a live daemon: harness helpers, displaced and `LOCK`ed grants leave no row, no listing holds a value, and a tokenless request's tty with control bytes is listed escaped |
 | `broker/listing/{kinds,together}.rs` | one row per kind (request, receipt, capability grant, secret grant), all four in both tables, and exactly `no active grants` after `LOCK` |
 | `client.rs` | CLI surface end to end against a fake broker |
 | `client/broker_transport.rs` | frame-level transport, scope frames, no-`GET` guarantees |

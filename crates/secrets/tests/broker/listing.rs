@@ -153,5 +153,27 @@ fn grants_listing_never_contains_values() {
     drop(harness);
 }
 
+#[test]
+fn a_tokenless_request_from_a_tty_with_control_bytes_lists_it_escaped() {
+    let harness = Harness::start_with_waiting_sops(&["DEEL_API_KEY"]);
+    let socket = harness.socket().clone();
+    let frame = "REQUEST\tkey=DEEL_API_KEY\ttty=/x\0\x1b[2Ky";
+    let reply = thread::spawn(move || send_to(&socket, frame));
+    wait_for_sops_calls(&harness, 1);
+
+    let (header, payload) = harness.send("GRANTS");
+    let (answer, _) = grants(&harness);
+    release(&harness);
+    reply.join().unwrap();
+
+    assert!(header.starts_with("OK\tlen="), "{header}");
+    let control = |byte: &u8| (*byte < 0x20 && !matches!(byte, b'\t' | b'\n')) || *byte == 0x7f;
+    assert!(!payload.iter().any(control), "{payload:?}");
+    let tty = r"/x\0\u{001B}[2Ky";
+    let expected = format!("{KIND}request\tDEEL_API_KEY\ttty {tty}\tdecrypting, id 1\tNs\n");
+    assert_eq!(answer, expected);
+    drop(harness);
+}
+
 include!("listing/kinds.rs");
 include!("listing/together.rs");

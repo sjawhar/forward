@@ -28,12 +28,8 @@ fn omp_scope_grant_table_keeps_omp_for_tokens_and_revokes_a_vanished_process() {
 
     table.revoke_tokens(&[token(0xaa)]);
     assert!(table.lookup(&omp_scope, &name("OMP"), now).is_some());
-    let listed: Vec<_> = table
-        .live(now)
-        .map(|(key, scope, secs)| (key.as_str().to_owned(), scope.label().to_string(), secs))
-        .collect();
     assert_eq!(
-        listed,
+        listed(&table, now),
         [("OMP".to_owned(), "omp 4294967295".to_owned(), 43_200)]
     );
 

@@ -12,6 +12,14 @@ struct Entry {
     deadline: Instant,
 }
 
+impl Entry {
+    /// The whole seconds left before this grant's deadline, or `None` when the
+    /// deadline is not later than `now`.
+    fn remaining_secs(&self, now: Instant) -> Option<u64> {
+        (self.deadline > now).then(|| self.deadline.saturating_duration_since(now).as_secs())
+    }
+}
+
 /// Capability authority issued by receipt redemption.
 ///
 /// Capability entries deliberately do not share [`crate::grants::GrantTable`]:
@@ -39,10 +47,7 @@ impl CapabilityGrantTable {
 
     /// Return the broker-owned remaining lifetime for the just-recorded grant.
     pub(crate) fn remaining_secs(&self, index: usize, now: Instant) -> Option<u64> {
-        self.entries
-            .get(index)
-            .filter(|entry| is_live(entry.deadline, now))
-            .map(|entry| entry.deadline.saturating_duration_since(now).as_secs())
+        self.entries.get(index)?.remaining_secs(now)
     }
 
     /// Each grant whose deadline is later than `now`, in table order: its
@@ -50,18 +55,13 @@ impl CapabilityGrantTable {
     pub(crate) fn live(&self, now: Instant) -> impl Iterator<Item = (&Capability, u64)> {
         self.entries
             .iter()
-            .filter(move |entry| is_live(entry.deadline, now))
-            .map(move |entry| {
-                (
-                    &entry.cap,
-                    entry.deadline.saturating_duration_since(now).as_secs(),
-                )
-            })
+            .filter_map(move |entry| Some((&entry.cap, entry.remaining_secs(now)?)))
     }
 
     /// Remove grants whose broker-owned deadline has passed.
     pub(crate) fn sweep(&mut self, now: Instant) {
-        self.entries.retain(|entry| is_live(entry.deadline, now));
+        self.entries
+            .retain(|entry| entry.remaining_secs(now).is_some());
     }
 
     /// Forget every live capability grant as part of `LOCK`.
@@ -73,10 +73,6 @@ impl CapabilityGrantTable {
     pub(crate) const fn len(&self) -> usize {
         self.entries.len()
     }
-}
-
-fn is_live(deadline: Instant, now: Instant) -> bool {
-    deadline > now
 }
 
 #[cfg(test)]
@@ -119,8 +115,12 @@ mod tests {
     fn deadline_is_live_only_strictly_before_expiry() {
         let now = Instant::now();
         let deadline = now + Duration::from_secs(1);
+        let entry = Entry {
+            cap: browser(),
+            deadline,
+        };
 
-        assert!(is_live(deadline, now));
-        assert!(!is_live(deadline, deadline));
+        assert_eq!(entry.remaining_secs(now), Some(1));
+        assert_eq!(entry.remaining_secs(deadline), None);
     }
 }

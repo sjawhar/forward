@@ -11,6 +11,8 @@ use crate::store::{FileIdentity, FileTimestamp};
 
 #[path = "tests/frame.rs"]
 mod frame;
+#[path = "tests/scope.rs"]
+mod scope;
 
 const KIND: &str = "KIND\tNAME\tSCOPE\tSTATE\tEXPIRES\n";
 const SECRET_GRANT: &str = "SECRET GRANT\tSCOPE\tEXPIRES\n";
@@ -19,15 +21,15 @@ const VALUE: &str = "super-secret";
 const TOKEN_HEX: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 /// The four tables that `GRANTS` reads; requests live 90 s.
-struct Tables {
-    grants: GrantTable,
-    queue: Queue,
-    receipts: ReceiptTable,
-    capability_grants: CapabilityGrantTable,
+pub(crate) struct Tables {
+    pub(crate) grants: GrantTable,
+    pub(crate) queue: Queue,
+    pub(crate) receipts: ReceiptTable,
+    pub(crate) capability_grants: CapabilityGrantTable,
 }
 
 impl Tables {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             grants: GrantTable::default(),
             queue: Queue::new(QueueLimits {
@@ -40,7 +42,7 @@ impl Tables {
         }
     }
 
-    fn render(&self, now: Instant) -> String {
+    pub(crate) fn render(&self, now: Instant) -> String {
         let Self {
             grants,
             queue,
@@ -50,7 +52,7 @@ impl Tables {
         render(grants, queue, receipts, capability_grants, now)
     }
 
-    fn grant(&mut self, scope: Scope, key: &str, created: Instant, ttl: Duration) {
+    pub(crate) fn grant(&mut self, scope: Scope, key: &str, created: Instant, ttl: Duration) {
         let (changed, modified) = (FileTimestamp::new(4, 5), FileTimestamp::new(6, 7));
         let identity = FileIdentity::new(1, 2, 3, changed, modified);
         let source = "test".to_owned();
@@ -60,28 +62,28 @@ impl Tables {
             .insert(scope, name(key), value, created, origin, ttl);
     }
 
-    fn request(&mut self, scope: Scope, key: &str, created: Instant) -> RequestId {
+    pub(crate) fn request(&mut self, scope: Scope, key: &str, created: Instant) -> RequestId {
         self.queue.enqueue(scope, name(key), created, None).unwrap()
     }
 
-    fn capability(&mut self, deadline: Instant) {
+    pub(crate) fn capability(&mut self, deadline: Instant) {
         self.capability_grants.insert(browser(), deadline);
     }
 }
 
-const fn secs(secs: u64) -> Duration {
+pub(crate) const fn secs(secs: u64) -> Duration {
     Duration::from_secs(secs)
 }
 
-fn name(raw: &str) -> SecretName {
+pub(crate) fn name(raw: &str) -> SecretName {
     SecretName::parse(raw).unwrap()
 }
 
-fn session() -> Scope {
+pub(crate) fn session() -> Scope {
     Scope::Session(SessionToken::parse_hex(TOKEN_HEX).unwrap())
 }
 
-fn browser() -> Capability {
+pub(crate) fn browser() -> Capability {
     Capability::parse("browser").unwrap()
 }
 
@@ -128,25 +130,6 @@ fn a_request_alone_lists_its_state_id_and_seconds_to_the_deadline() {
     assert!(tables.queue.mark_decrypting(id, t).is_some());
     let expected = format!("{KIND}request\tK\tsession\tdecrypting, id 1\t60s\n");
     assert_eq!(tables.render(t + secs(30)), expected);
-}
-
-#[test]
-fn tty_and_omp_scopes_are_written_as_tty_path_and_omp_pid() {
-    let (mut tables, t) = (Tables::new(), Instant::now());
-    let tty = "/dev/pts/3".to_owned();
-    let boot_id = "boot".to_owned();
-    tables.grant(Scope::Tty { tty, boot_id }, "T", t, secs(100));
-    let omp = Scope::Omp {
-        pid: 4242,
-        start: 7,
-    };
-    tables.request(omp, "CAP_BROWSER", t);
-
-    let expected = format!(
-        "{SECRET_GRANT}T\ttty /dev/pts/3\t100s\n\n\
-         {KIND}request\tCAP_BROWSER\tomp 4242\tpending, id 1\t90s\n"
-    );
-    assert_eq!(tables.render(t), expected);
 }
 
 #[test]

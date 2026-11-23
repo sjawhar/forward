@@ -134,12 +134,8 @@ fn live_view_never_includes_secret_values() {
         origin("test"),
         Duration::from_hours(12),
     );
-    let listed: Vec<_> = table
-        .live(now)
-        .map(|(key, scope, secs)| (key.as_str().to_owned(), scope.label().to_string(), secs))
-        .collect();
     assert_eq!(
-        listed,
+        listed(&table, now),
         [("K".to_owned(), "session".to_owned(), 43_200)],
         "a grant's listing is its key, scope and seconds left, never its value"
     );

@@ -228,9 +228,23 @@ the two halves ship in one release is not a reason to skip the bump: the plugin
 is loaded when `opencode serve` starts, so it lags a daemon that has already
 restarted, and mixed peers therefore occur during a normal upgrade.
 
-The `GRANTS` payload is text in a shape each client reads:
-`get KEY --no-request` (`lists_grant`, `src/client/status.rs`) counts a line
-as a grant when it has exactly three tab-separated fields, the key, the scope
-and a third. A change to that text that keeps the shape, the three-field
-secret-grant rows, is not a reply-shape change; a change that breaks it is one,
-and bumps `PROTOCOL_VERSION`.
+The `GRANTS` payload is text that three readers match, each on part of it:
+
+- `lists_grant` (`src/client/status.rs`), behind `get KEY --no-request`, which
+  `omp/extensions/secretsd.ts` also runs (it reads that command's `tier`, not
+  its `grant`): counts a line as a grant when it has exactly three
+  tab-separated fields, the first the key and the second the caller's scope.
+- `check_secretsd` in sjawhar/dotfiles `scripts/agent-access`: after a first
+  line whose first field is `KEY` or `SECRET GRANT`, reads secret-grant rows
+  until an empty line or a `KIND` line; takes a first line whose first field
+  is `KIND`, or exactly `no active grants`, as no secret grant; and reports
+  any other answer as unrecognised.
+- sjawhar/dotfiles `installers/secretsd.sh`: restarts the daemon only when the
+  answer is exactly `no active grants`.
+
+A change that keeps the three-field secret-grant rows is not a reply-shape
+change for `lists_grant` and needs no `PROTOCOL_VERSION` bump; a change that
+breaks those rows is one, and bumps it. A change to the headers, to the empty
+line between the two tables or to the `no active grants` text changes what a
+sjawhar/dotfiles reader matches, and a `PROTOCOL_VERSION` bump does not
+protect those readers: such a change needs a sjawhar/dotfiles change first.

@@ -31,6 +31,13 @@ struct Entry {
     minted: Instant,
 }
 
+impl Entry {
+    /// Whether this receipt is younger than `RECEIPT_TTL` at `now`.
+    fn is_live(&self, now: Instant) -> bool {
+        now.duration_since(self.minted) < RECEIPT_TTL
+    }
+}
+
 /// Outstanding receipts. No values live here.
 #[derive(Default)]
 pub struct ReceiptTable {
@@ -113,17 +120,19 @@ impl ReceiptTable {
 
     /// Drop expired receipts.
     pub fn sweep(&mut self, now: Instant) {
-        self.entries
-            .retain(|entry| now.duration_since(entry.minted) < RECEIPT_TTL);
+        self.entries.retain(|entry| entry.is_live(now));
     }
 
     /// Each receipt not yet redeemed and younger than `RECEIPT_TTL`, in table
     /// order: its capability and its whole seconds left. Never the receipt.
     pub(crate) fn live(&self, now: Instant) -> impl Iterator<Item = (&Capability, u64)> {
-        self.entries.iter().filter_map(move |entry| {
-            let age = now.duration_since(entry.minted);
-            (age < RECEIPT_TTL).then(|| (&entry.cap, RECEIPT_TTL.saturating_sub(age).as_secs()))
-        })
+        self.entries
+            .iter()
+            .filter(move |entry| entry.is_live(now))
+            .map(move |entry| {
+                let left = RECEIPT_TTL.saturating_sub(now.duration_since(entry.minted));
+                (&entry.cap, left.as_secs())
+            })
     }
 
     /// Forget every outstanding receipt. `LOCK` calls this in the same
