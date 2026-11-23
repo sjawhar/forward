@@ -67,7 +67,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | `src/grants.rs` | Scopes, session registrations, grant table, revocation. |
 | `src/requests.rs` | Request state machine, single-flight YubiKey queue, cooldown, the minimum delay before a failed request retries, pending limits. |
 | `src/listing.rs` | The `GRANTS` answer: the secret-grant table, then requests, receipts and capability grants behind a `KIND` header, held to one frame; `no active grants` when none is live. |
-| `src/audit.rs` | Sanitizes values shared by audit-log surfaces. |
+| `src/audit.rs` | Sanitizes values shared by audit-log surfaces, and the tty scope that `secrets grants` writes through it (`Scope::label`). It must leave a real tty path unchanged, since `lists_grant` compares that field with the caller's tty. |
 | `src/server.rs` | Three connection lanes, per-connection `handle` (peer uid gate, pinning, dispatch), audit line. |
 | `src/server/listener.rs` | Creating or adopting the listening socket; proving its node is owner-only (`0600`); the peer uid gate that rests on that proof. |
 | `src/server/dispatch.rs` | Protocol-op routing and request/response decisions. |
@@ -89,7 +89,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | Change which peers may connect at all | `assert_owner_only`, `src/server/listener.rs:59`; `uid_is_authorized`, `:38`; the rationale is `docs/design.md` "Requests from other-UID peers" |
 | Add or change a protocol op | `src/proto.rs:97` (requests), `src/proto/response.rs` |
 | Change source-root configuration | `Sources::config_path`, `src/config.rs:54`; `Sources::load`, `src/config.rs:70` |
-| Change what the audit line records | `src/server.rs:305`, context built at `:165`; sanitization in `src/audit.rs:19` |
+| Change what the audit line records | `src/server.rs:305`, context built at `:165`; sanitization in `sanitize_audit_value`, `src/audit.rs` |
 | Change how sops is invoked | `src/decrypt.rs`; attempt outcomes in `src/decrypt/attempt.rs`; failure classes in `src/decrypt/classify.rs` |
 | Change how the runtime directory is resolved | `resolveRuntimeDir`, `opencode/plugins/secretsd.ts`; `SocketPath::resolve` and `runtime_dir`, `src/client.rs:35` |
 | Change which socket either half connects to | `resolveSocketPath`, `opencode/plugins/secretsd.ts`; `BrokerClient::from_environment`, `src/client.rs:91` |
@@ -221,12 +221,15 @@ unregisters and removes the token file for the whole tree.
 
 The wire protocol is the contract between client and daemon: it carries a
 version in the handshake, and a mismatch must fail loudly rather than degrade.
-Changing the shape of a request or a reply — including adding a field — bumps
-`PROTOCOL_VERSION`. A strict peer rejects the new shape, so the version is what
+Changing the fields of a request, or the frame of a reply (its header line and
+that line's `key=value` fields), bumps `PROTOCOL_VERSION`; adding a field is
+such a change. A strict peer rejects the new shape, so the version is what
 turns that into a clear "update both" instead of a puzzling parse failure. That
 the two halves ship in one release is not a reason to skip the bump: the plugin
 is loaded when `opencode serve` starts, so it lags a daemon that has already
-restarted, and mixed peers therefore occur during a normal upgrade.
+restarted, and mixed peers therefore occur during a normal upgrade. A change to
+the text a reply's payload carries needs no bump only when every existing
+reader still parses it. The one such case is the `GRANTS` second table, below.
 
 The `GRANTS` payload is text that three readers match, each on part of it:
 
@@ -242,9 +245,11 @@ The `GRANTS` payload is text that three readers match, each on part of it:
 - sjawhar/dotfiles `installers/secretsd.sh`: restarts the daemon only when the
   answer is exactly `no active grants`.
 
-A change that keeps the three-field secret-grant rows is not a reply-shape
-change for `lists_grant` and needs no `PROTOCOL_VERSION` bump; a change that
-breaks those rows is one, and bumps it. A change to the headers, to the empty
-line between the two tables or to the `no active grants` text changes what a
-sjawhar/dotfiles reader matches, and a `PROTOCOL_VERSION` bump does not
-protect those readers: such a change needs a sjawhar/dotfiles change first.
+The second table (requests, receipts and capability grants behind the `KIND`
+header) is that one case: its rows have five fields, and `lists_grant` matches
+only rows of exactly three, so it skips them. A change that breaks the
+three-field secret-grant rows changes what `lists_grant` parses, and bumps
+`PROTOCOL_VERSION`. A change to the headers, to the empty line between the two
+tables or to the `no active grants` text changes what a sjawhar/dotfiles reader
+matches, and a `PROTOCOL_VERSION` bump does not protect those readers: such a
+change needs a sjawhar/dotfiles change first.

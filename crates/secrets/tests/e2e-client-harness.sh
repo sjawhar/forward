@@ -74,6 +74,24 @@ if [[ ! -x "$daemon" || ! -x "$client" ]]; then
 fi
 
 readonly real_sops="$(command -v sops)"
+
+# The daemon runs sops with HOME set to its scratch directory, so a binary that
+# cannot run under a scratch HOME (for example a mise shim) would fail mid-run.
+probe_under_scratch_home() {
+  local probe_home runs=true
+  probe_home="$(mktemp -d)"
+  env -i PATH="$PATH" HOME="$probe_home" "$@" >/dev/null 2>&1 || runs=false
+  rm -rf -- "$probe_home"
+  [[ "$runs" == true ]] || skip "$1 cannot run under a scratch HOME (for example a mise shim)"
+}
+# Only the first pass probes, before it makes any scratch state; the pass after
+# REGISTER inherits the same PATH.
+if [[ "$after_register" == false ]]; then
+  # A bare --version asks GitHub for the latest sops release.
+  probe_under_scratch_home "$real_sops" --disable-version-check --version
+  probe_under_scratch_home "$(command -v age-keygen)" --version
+fi
+
 readonly age_key_file="${SOPS_AGE_KEY_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/sops/age/keys.txt}"
 if [[ ! -r "$age_key_file" ]]; then
   skip "disk-resident age key is unavailable at $age_key_file"

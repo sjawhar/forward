@@ -31,7 +31,7 @@ a `mod.rs` would change how every existing file resolves.
 | `client/multi_source.rs` | root precedence, human-key routing, and ambiguity coverage |
 | `client/sources.rs` | source inspection output and malformed-file reporting |
 | `hardening.rs` | `mlockall` / dumpability / `RLIMIT_CORE`, spawning the real binary |
-| `e2e_client.rs` | drives `e2e-client-harness.sh` with real sops; exit 0 or 77 |
+| `e2e_client.rs` | drives `e2e-client-harness.sh` with real sops; exit 0, or 77 when sops, age-keygen, python3 or a usable age key is missing, or when sops or age-keygen cannot run under a scratch HOME (for example a mise shim) |
 | `e2e_sysbox_peer.rs` | drives `e2e-sysbox-peer.sh`: a container peer across the uid/pid namespace boundary; exit 0 or 77 |
 | `e2e_register_displacement.rs` | drives `e2e-register-displacement.sh`: an outsider claiming a live session's identifier; exit 0 or 77 |
 | `e2e_grants_listing.rs` | drives `e2e-grants-listing.sh`: `secrets grants` at seven steps of a scratch daemon (each kind alone, both tables, `no active grants` before and after `LOCK`), and each extra client's `get KEY --no-request` at step 6; exit 0 or 77 |
