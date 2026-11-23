@@ -17,7 +17,7 @@ readonly root2_human_value='value-for-root2-human'
 readonly created_human_value='value-for-created-human'
 readonly piped_human_value='value-for-piped-human'
 readonly agent_value='value-for-agent-client'
-readonly grants_pattern=$'^KEY\tSCOPE\tAGE\nE2E_KEY\tsession\t[0-9]+s\nLOCAL_KEY\tsession\t[0-9]+s\nROOT2_KEY\tsession\t[0-9]+s$'
+readonly grants_pattern=$'^SECRET GRANT\tSCOPE\tEXPIRES\nE2E_KEY\tsession\t[0-9]+s\nLOCAL_KEY\tsession\t[0-9]+s\nROOT2_KEY\tsession\t[0-9]+s$'
 
 report() {
   printf 'e2e-client: %s\n' "$1"
