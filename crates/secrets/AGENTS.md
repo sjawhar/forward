@@ -230,7 +230,7 @@ the two halves ship in one release is not a reason to skip the bump: the plugin
 is loaded when `opencode serve` starts, so it lags a daemon that has already
 restarted, and mixed peers therefore occur during a normal upgrade. A change to
 the text a reply's payload carries needs no bump only when every existing
-reader still parses it. The one such case is the `GRANTS` second table, below.
+reader still parses it. The one such case is the `GRANTS` answer, below.
 
 The `GRANTS` payload is text that three readers match, each on part of it:
 
@@ -246,9 +246,13 @@ The `GRANTS` payload is text that three readers match, each on part of it:
 - sjawhar/dotfiles `installers/secretsd.sh`: restarts the daemon only when the
   answer is exactly `no active grants`.
 
-The second table (requests, receipts and capability grants behind the `KIND`
-header) is that one case: its rows have five fields, and `lists_grant` matches
-only rows of exactly three, so it skips them. A change that breaks the
+The `GRANTS` answer of this listing is that case. Its second table (requests,
+receipts and capability grants behind the `KIND` header) has rows of five
+fields, and `lists_grant` matches only rows of exactly three, so it skips
+them. `lists_grant` matches neither three-field header (the second field of
+each is `SCOPE`, which is no caller's scope) and ignores the third field, so
+renaming `KEY\tSCOPE\tAGE` to `SECRET GRANT\tSCOPE\tEXPIRES` and the age to the
+time to expiry needed no bump either. A change that breaks the
 three-field secret-grant rows changes what `lists_grant` parses, and bumps
 `PROTOCOL_VERSION`. A change to the headers, to the empty line between the two
 tables or to the `no active grants` text changes what a sjawhar/dotfiles reader
