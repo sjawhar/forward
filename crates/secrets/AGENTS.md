@@ -31,17 +31,18 @@ secretsd ── grants: (scope, key) → SecretBytes, memory only
 ```
 
 `<runtime>` is `$XDG_RUNTIME_DIR`, or `/run/user/<uid>` when that is unset or
-empty. Both halves of the release resolve it by the same rule — `SocketPath::resolve`
-(`src/client.rs:35`) and `resolveRuntimeDir` (`opencode/plugins/secretsd.ts`) —
-because a client that resolves a different directory than the plugin that minted
-its token is refused, not degraded.
+empty. Both halves of the release resolve it by the same rule —
+`SocketPath::resolve` (`crates/proto/src/client.rs`) and `resolveRuntimeDir`
+(`opencode/plugins/secretsd.ts`) — because a client that resolves a different
+directory than the plugin that minted its token is refused, not degraded.
 
 Both halves resolve the socket path by the same rule (`SocketPath::resolve`,
-`src/client.rs:35`) but honour **different override variables**: the client and
-plugin connect through `SECRETSD_SOCK` (`BrokerClient::from_environment`,
-`src/client.rs:91`; `resolveSocketPath`, `opencode/plugins/secretsd.ts`), while a
-standalone `secrets serve` listens on `SECRETSD_SOCKET` (`Config::from_env`,
-`src/lib.rs:105`). The split is deliberate — a test harness redirects the daemon's
+`crates/proto/src/client.rs`) but honour **different override variables**: the
+client and plugin connect through `SECRETSD_SOCK`
+(`BrokerClient::from_environment`, `crates/proto/src/client.rs`;
+`resolveSocketPath`, `opencode/plugins/secretsd.ts`), while a standalone
+`secrets serve` listens on `SECRETSD_SOCKET` (`Config::from_env`,
+`src/daemon.rs`). The split is deliberate — a test harness redirects the daemon's
 listener without silently redirecting every client on the machine — so
 redirecting one half never leaves the token registered with a daemon the other
 half is not talking to. Under socket activation systemd owns the listener and
@@ -59,14 +60,15 @@ filenames in configured `secrets.human.d/` directories are brokered.
 |---|---|
 | `src/proto.rs` | Wire protocol parse/format. Hand-rolled; no serde. |
 | `src/config.rs` | Source-root configuration, config-path resolution, and root validation. |
-| `src/hardening.rs` | `mlockall`, `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`. Fail-closed. |
+| `crates/hygiene/src/hardening.rs` | `mlockall`, `PR_SET_DUMPABLE=0`, `RLIMIT_CORE=0`. Fail-closed. `src/lib.rs` re-exports it as `hardening` (`pub use hygiene::hardening`). |
 | `src/secret.rs` | `SecretBytes` (zeroize on drop), key-name validation, single-assignment dotenv parse. |
 | `src/decrypt.rs` | Spawns sops, enforces its timeout, kills its process group on cancel, and returns each attempt's stable result. |
 | `src/decrypt/attempt.rs` | The stable code, label, and retry eligibility for one decrypt attempt. |
 | `src/decrypt/classify.rs` | Reduces sops stderr to a stable label, error code, and retry eligibility. Pure functions over bytes; the child's output never reaches a log. |
 | `src/grants.rs` | Scopes, session registrations, grant table, revocation. |
 | `src/requests.rs` | Request state machine, single-flight YubiKey queue, cooldown, the minimum delay before a failed request retries, pending limits. |
-| `src/audit.rs` | Sanitizes values shared by audit-log surfaces. |
+| `src/listing.rs` | The `GRANTS` answer: the secret-grant table, then requests, receipts and capability grants behind a `KIND` header, held to one frame; `no active grants` when none is live. |
+| `src/audit.rs` | Sanitizes values shared by audit-log surfaces, and the tty scope that `secrets grants` writes through it (`Scope::label`). It must leave a real tty path unchanged, since `lists_grant` compares that field with the caller's tty. |
 | `src/server.rs` | Three connection lanes, per-connection `handle` (peer uid gate, pinning, dispatch), audit line. |
 | `src/server/listener.rs` | Creating or adopting the listening socket; proving its node is owner-only (`0600`); the peer uid gate that rests on that proof. |
 | `src/server/dispatch.rs` | Protocol-op routing and request/response decisions. |
@@ -74,7 +76,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | `src/server/approval/access.rs` | Parses request access data and resolves token, terminal, or capability omp scopes. |
 | `src/server/worker.rs` | The single approval worker: dequeues work and logs each decrypt attempt. |
 | `src/server/worker/attempt.rs` | Completes an attempt: verifies scope liveness, inserts grants, or retries and records the last failure. |
-| `src/peer.rs` | `SO_PEERPIDFD` peer pinning and `/proc` ancestry walk. |
+| `src/peer.rs` | `identify`: pins a peer through `PinnedPeer` (`SO_PEERPIDFD` pinning and the `/proc` ancestry walk, `crates/containment/src/pinned.rs`), re-exported as `PeerIdentity`. |
 | `src/store.rs` | Human-tier ciphertext discovery, descriptor opens, and `FileIdentity` snapshots used to invalidate stale grants. |
 | `src/client/` | The client half of the binary. See `src/client/AGENTS.md`. |
 
@@ -83,22 +85,22 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | Task | Go to |
 |---|---|
 | Change how a request is authorized | `Registry::resolve`, `src/grants/registry.rs`; `resolve_access`, `src/server/approval/access.rs` |
-| Change ancestry / peer identity | `src/peer.rs:46` (`from_stream`), `:97` (`descends_from`) |
+| Change ancestry / peer identity | `PinnedPeer::from_stream` and `PinnedPeer::descends_from`, `crates/containment/src/pinned.rs`; `identify`, `src/peer.rs` |
 | Change who may claim or release a session identifier | `claim_allowed`, `Registry::register`, `Registry::unregister`, `src/grants/registry.rs`; the refusal is `refused`, `src/server/dispatch/control.rs` |
-| Change which peers may connect at all | `assert_owner_only`, `src/server/listener.rs:59`; `uid_is_authorized`, `:38`; the rationale is `docs/design.md` "Requests from other-UID peers" |
-| Add or change a protocol op | `src/proto.rs:97` (requests), `src/proto/response.rs` |
-| Change source-root configuration | `Sources::config_path`, `src/config.rs:54`; `Sources::load`, `src/config.rs:70` |
-| Change what the audit line records | `src/server.rs:305`, context built at `:165`; sanitization in `src/audit.rs:19` |
+| Change which peers may connect at all | `assert_owner_only`, `src/server/listener.rs`; the peer uid gate in `handle`, `src/server.rs`, through `same_user`, `crates/containment/src/uid.rs`; the rationale is `docs/design.md` "Requests from other-UID peers" |
+| Add or change a protocol op | `Request` and `parse_request`, `src/proto/request.rs`; `src/proto/response.rs` |
+| Change source-root configuration | `Sources::config_path` and `Sources::load`, `src/config.rs` |
+| Change what the audit line records | the `request handled` line in `handle`, `src/server.rs`, and its context from `audit_context` beside it; sanitization in `sanitize_audit_value`, `src/audit.rs` |
 | Change how sops is invoked | `src/decrypt.rs`; attempt outcomes in `src/decrypt/attempt.rs`; failure classes in `src/decrypt/classify.rs` |
-| Change how the runtime directory is resolved | `resolveRuntimeDir`, `opencode/plugins/secretsd.ts`; `SocketPath::resolve` and `runtime_dir`, `src/client.rs:35` |
-| Change which socket either half connects to | `resolveSocketPath`, `opencode/plugins/secretsd.ts`; `BrokerClient::from_environment`, `src/client.rs:91` |
+| Change how the runtime directory is resolved | `resolveRuntimeDir`, `opencode/plugins/secretsd.ts`; `SocketPath::resolve` and `runtime_dir`, `crates/proto/src/client.rs` |
+| Change which socket either half connects to | `resolveSocketPath`, `opencode/plugins/secretsd.ts`; `BrokerClient::from_environment`, `crates/proto/src/client.rs` |
 | Change the session token file's lifetime | `restoreTokenFile`, `opencode/plugins/secretsd.ts`; `ensureState` beside it |
 | Change the approval lifecycle | `src/server/approval.rs`; attempt completion in `src/server/worker/attempt.rs` |
-| Change the CLI surface | `src/client/cli.rs:17` |
+| Change the CLI surface | `Cli` and `CliCommand`, `src/client/cli/parser.rs`; `run`, `src/client/cli.rs` |
 | Change how an answer names its store | `Provenance`, `src/client/status/provenance.rs`; the refusals and the human-tier source in `src/client/cli/naming.rs`; the stderr notice in `announce`, `src/client/status.rs` |
 | Change human-secret creation | `src/client/edit/new.rs`: `human`, `write_piped_human`, `read_piped_assignment`, `encrypt`, and `encrypt_bytes` |
-| Change stale-grant invalidation | `resolve_access`, `src/server/approval/access.rs`; `HumanStore::identity`, `src/store.rs:145` |
-| Change grant lifetime or revocation | `GrantTable::revoke`, `src/grants.rs:293` |
+| Change stale-grant invalidation | `resolve_access`, `src/server/approval/access.rs`; `HumanStore::identity`, `src/store.rs` |
+| Change grant lifetime or revocation | `GrantTable::revoke` and `Grant::is_live`, `src/grants/table.rs` |
 
 ## Non-negotiables
 
@@ -152,14 +154,15 @@ of them is a bug even if tests pass:
 cargo +nightly fmt --all -- --check   # nightly: imports_granularity, group_imports
 cargo clippy --all-targets --all-features -- -D warnings
 cargo nextest run --all-targets --all-features --workspace
-cargo +nightly miri nextest run --all-features -E 'test(/^(secret|grants|requests|proto|client|config)::tests::/)'
+cargo +nightly miri nextest run --all-features -E 'test(/^(capability_grants|capability|config|grants|proto|receipts|requests|secret|client)::tests::/)'
 cargo machete && cargo deny check all
 bun install --frozen-lockfile && bun run test:secretsd-plugin
 (cd omp && bun install --frozen-lockfile && bun run test:secretsd-omp-extension)
 ```
 
-Miri covers the pure `secret`, `grants`, `requests`, `proto`, `client`, and `config`
-modules. It cannot cover the `unsafe` fd-3 adoption in `server.rs`: that code
+Miri covers the pure `capability_grants`, `capability`, `config`, `grants`, `proto`,
+`receipts`, `requests`, `secret` and `client` unit tests, the filter CI runs.
+It cannot cover the `unsafe` fd-3 adoption in `listener` (`src/server/listener.rs`): that code
 requires a real socket. Guard it through review, the `LISTEN_PID`/`LISTEN_FDS`
 validation, and the integration tests in `tests/broker.rs`.
 
@@ -220,9 +223,53 @@ unregisters and removes the token file for the whole tree.
 
 The wire protocol is the contract between client and daemon: it carries a
 version in the handshake, and a mismatch must fail loudly rather than degrade.
-Changing the shape of a request or a reply — including adding a field — bumps
-`PROTOCOL_VERSION`. A strict peer rejects the new shape, so the version is what
-turns that into a clear "update both" instead of a puzzling parse failure. That
-the two halves ship in one release is not a reason to skip the bump: the plugin
-is loaded when `opencode serve` starts, so it lags a daemon that has already
-restarted, and mixed peers therefore occur during a normal upgrade.
+Changing the fields of a request, or the frame of a reply, bumps
+`PROTOCOL_VERSION`; adding a field is such a change. A reply's frame is
+everything a reader matches, and changing any of it bumps `PROTOCOL_VERSION`:
+the `OK` or `ERR` header, the error codes an `ERR` header carries, the name of
+each `key=value` field, each value a reader compares exactly, and the limit of
+an `ERR` reason to printable ASCII (`parse_header` in
+`crates/proto/src/response.rs` refuses any header byte other than printable
+ASCII and tab). The values a reader compares exactly include `status=granted`
+(`opencode/plugins/secretsd.ts` matches `OK\tstatus=granted`),
+`status=authorized` and `status=redeemed`
+(`crates/forward/src/secretsd/reply.rs`), and the handshake's `version=`
+(`crates/proto/src/client/stream.rs`). The wording of an `ERR` reason is
+prose, not frame, so rewording it within printable ASCII needs no bump. The
+note on `refused` (`src/server/dispatch/control.rs`) rests on this: a refused
+claim on a session answers with the existing `FOREIGN_CALLER` code and a
+message of its own, and needs no bump. A strict peer rejects a new frame, so
+the version is what turns that into a clear "update both" instead of a
+puzzling parse failure. That the two halves ship in one release is not a
+reason to skip the bump: the plugin is loaded when `opencode serve` starts, so
+it lags a daemon that has already restarted, and mixed peers therefore occur
+during a normal upgrade. The text a reply's payload carries is not frame: a
+change to it needs no bump when every existing reader still parses it. The one
+such case is the `GRANTS` answer, below.
+
+The `GRANTS` payload is text that three readers match, each on part of it:
+
+- `lists_grant` (`src/client/status.rs`), behind `get KEY --no-request`, which
+  `omp/extensions/secretsd.ts` also runs (it reads that command's `tier`, not
+  its `grant`): counts a line as a grant when it has exactly three
+  tab-separated fields, the first the key and the second the caller's scope.
+- `check_secretsd` in sjawhar/dotfiles `scripts/agent-access`: after a first
+  line whose first field is `KEY` or `SECRET GRANT`, reads secret-grant rows
+  until an empty line or a `KIND` line; takes a first line whose first field
+  is `KIND`, or exactly `no active grants`, as no secret grant; and reports
+  any other answer as unrecognised.
+- sjawhar/dotfiles `installers/secretsd.sh`: restarts the daemon only when the
+  answer is exactly `no active grants`.
+
+The `GRANTS` answer of this listing is that case. Its second table (requests,
+receipts and capability grants behind the `KIND` header) has rows of five
+fields, and `lists_grant` matches only rows of exactly three, so it skips
+them. `lists_grant` matches neither three-field header (the second field of
+each is `SCOPE`, which is no caller's scope) and ignores the third field, so
+renaming `KEY\tSCOPE\tAGE` to `SECRET GRANT\tSCOPE\tEXPIRES` and the age to the
+time to expiry needed no bump either. A change that breaks the
+three-field secret-grant rows changes what `lists_grant` parses, and bumps
+`PROTOCOL_VERSION`. A change to the headers, to the empty line between the two
+tables or to the `no active grants` text changes what a sjawhar/dotfiles reader
+matches, and a `PROTOCOL_VERSION` bump does not protect those readers: such a
+change needs a sjawhar/dotfiles change first.

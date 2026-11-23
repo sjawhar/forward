@@ -22,6 +22,8 @@ a `mod.rs` would change how every existing file resolves.
 | `broker/capability.rs` | wiring for capability authorization tests |
 | `broker/capability/omp_scope.rs` | capability scopes resolved from the caller's nearest omp process |
 | `broker/capability/retry.rs` and `broker/capability/retry/{attempts,control,expiry}.rs` | retry attempts, final failures, `DENY`, `LOCK`, and expiry |
+| `broker/listing.rs` | the `GRANTS` answer of a live daemon: harness helpers, displaced and `LOCK`ed grants leave no row, no listing holds a value, and a tokenless request's tty with control bytes is listed escaped |
+| `broker/listing/{kinds,together}.rs` | one row per kind (request, receipt, capability grant, secret grant), all four in both tables, and exactly `no active grants` after `LOCK` |
 | `client.rs` | CLI surface end to end against a fake broker |
 | `client/broker_transport.rs` | frame-level transport, scope frames, no-`GET` guarantees |
 | `client/edit.rs` | edit command flags, source selection, and local human-file paths |
@@ -29,15 +31,16 @@ a `mod.rs` would change how every existing file resolves.
 | `client/multi_source.rs` | root precedence, human-key routing, and ambiguity coverage |
 | `client/sources.rs` | source inspection output and malformed-file reporting |
 | `hardening.rs` | `mlockall` / dumpability / `RLIMIT_CORE`, spawning the real binary |
-| `e2e_client.rs` | drives `e2e-client-harness.sh` with real sops; exit 0 or 77 |
+| `e2e_client.rs` | drives `e2e-client-harness.sh` with real sops; exit 0, or skips (77) when a prerequisite is missing; the harness's `skip` lines name each |
 | `e2e_sysbox_peer.rs` | drives `e2e-sysbox-peer.sh`: a container peer across the uid/pid namespace boundary; exit 0 or 77 |
 | `e2e_register_displacement.rs` | drives `e2e-register-displacement.sh`: an outsider claiming a live session's identifier; exit 0 or 77 |
+| `e2e_grants_listing.rs` | drives `e2e-grants-listing.sh`: `secrets grants` at seven steps of a scratch daemon (each kind alone, both tables, `no active grants` before and after `LOCK`), and each extra client's `get KEY --no-request` at step 6; exit 0 or 77 |
 
 ## No real hardware
 
 Nothing here may need a YubiKey. Point the daemon at a fixture instead:
 
-- `SECRETSD_SOPS_BIN=tests/fixtures/fake-sops-ok` — succeeds, emits dotenv
+- `SECRETSD_SOPS_BIN=tests/fixtures/fake-sops-ok` — succeeds, emits dotenv; `FAKE_SOPS_LOG` records each decrypted path before it waits, and `FAKE_SOPS_WAIT_MARKER` makes it wait for a test marker before it answers (the listing tests and `e2e-grants-listing.sh` hold a request in `decrypting` this way)
 - `…/fake-sops-fail` — non-zero, writes to stderr
 - `…/fake-sops-stdin-fail` — consumes stdin, returns it on stderr, and exits non-zero to test that client errors do not disclose piped values
 - `…/fake-sops-hang` — sleeps, for timeout and process-group kill
@@ -76,7 +79,8 @@ registrant and the outsider are siblings, both children of the harness.
 
 ## Miri
 
-CI runs miri over `secret|grants|requests|proto|client|config` unit tests only. Any test
-that touches a socket, `/proc`, or the filesystem must carry
+CI runs miri over `capability_grants|capability|config|grants|proto|receipts|requests|secret|client`
+unit tests (`<module>::tests::`) only. Any test that touches a socket, `/proc`, the
+filesystem or `/dev/urandom` (`ReceiptTable::mint`) must carry
 `#[cfg_attr(miri, ignore)]` — miri cannot emulate `getsockopt`, and an unmarked
 test breaks the miri job, not the test job.

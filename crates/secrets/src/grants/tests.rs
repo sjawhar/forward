@@ -29,6 +29,15 @@ fn origin(source: &str) -> GrantOrigin {
     }
 }
 
+/// Each grant live at `now` as `secrets grants` writes it: key, scope and
+/// whole seconds left.
+fn listed(table: &GrantTable, now: Instant) -> Vec<(String, String, u64)> {
+    table
+        .live(now)
+        .map(|(key, scope, secs)| (key.as_str().to_owned(), scope.label().to_string(), secs))
+        .collect()
+}
+
 fn registered() -> Registry {
     let mut registry = Registry::default();
     registry

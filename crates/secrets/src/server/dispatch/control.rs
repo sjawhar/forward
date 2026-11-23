@@ -3,6 +3,7 @@ use std::time::Instant;
 use super::{Decision, Outcome};
 use crate::audit::sanitize_audit_value;
 use crate::grants::{Refusal, ScopeKind, SessionToken};
+use crate::listing;
 use crate::proto::ErrCode;
 use crate::requests::RequestId;
 use crate::server::{Shared, lock_state};
@@ -116,7 +117,14 @@ pub(super) fn grants(shared: &Shared) -> Decision {
     let (mutex, _) = &**shared;
     let state = lock_state(mutex);
     Decision::new(Outcome::Payload(
-        state.grants.render(Instant::now()).into_bytes(),
+        listing::render(
+            &state.grants,
+            &state.queue,
+            &state.receipts,
+            &state.capability_grants,
+            Instant::now(),
+        )
+        .into_bytes(),
     ))
 }
 

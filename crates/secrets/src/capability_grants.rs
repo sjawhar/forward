@@ -5,8 +5,19 @@
 
 use std::time::Instant;
 
+use crate::capability::Capability;
+
 struct Entry {
+    cap: Capability,
     deadline: Instant,
+}
+
+impl Entry {
+    /// The whole seconds left before this grant's deadline, or `None` when the
+    /// deadline is not later than `now`.
+    fn remaining_secs(&self, now: Instant) -> Option<u64> {
+        (self.deadline > now).then(|| self.deadline.saturating_duration_since(now).as_secs())
+    }
 }
 
 /// Capability authority issued by receipt redemption.
@@ -29,22 +40,28 @@ impl std::fmt::Debug for CapabilityGrantTable {
 
 impl CapabilityGrantTable {
     /// Record a redeemed capability until the broker's authoritative deadline.
-    pub(crate) fn insert(&mut self, deadline: Instant) -> usize {
-        self.entries.push(Entry { deadline });
+    pub(crate) fn insert(&mut self, cap: Capability, deadline: Instant) -> usize {
+        self.entries.push(Entry { cap, deadline });
         self.entries.len().saturating_sub(1)
     }
 
     /// Return the broker-owned remaining lifetime for the just-recorded grant.
     pub(crate) fn remaining_secs(&self, index: usize, now: Instant) -> Option<u64> {
+        self.entries.get(index)?.remaining_secs(now)
+    }
+
+    /// Each grant whose deadline is later than `now`, in table order: its
+    /// capability and its whole seconds left.
+    pub(crate) fn live(&self, now: Instant) -> impl Iterator<Item = (&Capability, u64)> {
         self.entries
-            .get(index)
-            .filter(|entry| is_live(entry.deadline, now))
-            .map(|entry| entry.deadline.saturating_duration_since(now).as_secs())
+            .iter()
+            .filter_map(move |entry| Some((&entry.cap, entry.remaining_secs(now)?)))
     }
 
     /// Remove grants whose broker-owned deadline has passed.
     pub(crate) fn sweep(&mut self, now: Instant) {
-        self.entries.retain(|entry| is_live(entry.deadline, now));
+        self.entries
+            .retain(|entry| entry.remaining_secs(now).is_some());
     }
 
     /// Forget every live capability grant as part of `LOCK`.
@@ -58,15 +75,15 @@ impl CapabilityGrantTable {
     }
 }
 
-fn is_live(deadline: Instant, now: Instant) -> bool {
-    deadline > now
-}
-
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use super::*;
+
+    fn browser() -> Capability {
+        Capability::parse("browser").unwrap()
+    }
 
     #[test]
     #[cfg_attr(miri, ignore)]
@@ -74,8 +91,8 @@ mod tests {
         let now = Instant::now();
         let mut grants = CapabilityGrantTable::default();
 
-        grants.insert(now + Duration::from_secs(1));
-        let second = grants.insert(now + Duration::from_secs(2));
+        grants.insert(browser(), now + Duration::from_secs(1));
+        let second = grants.insert(browser(), now + Duration::from_secs(2));
         assert_eq!(grants.remaining_secs(second, now), Some(2));
         grants.sweep(now + Duration::from_secs(1));
 
@@ -87,7 +104,7 @@ mod tests {
     fn clear_forgets_live_capability_grants() {
         let now = Instant::now();
         let mut grants = CapabilityGrantTable::default();
-        grants.insert(now + Duration::from_secs(1));
+        grants.insert(browser(), now + Duration::from_secs(1));
 
         grants.clear();
 
@@ -98,8 +115,12 @@ mod tests {
     fn deadline_is_live_only_strictly_before_expiry() {
         let now = Instant::now();
         let deadline = now + Duration::from_secs(1);
+        let entry = Entry {
+            cap: browser(),
+            deadline,
+        };
 
-        assert!(is_live(deadline, now));
-        assert!(!is_live(deadline, deadline));
+        assert_eq!(entry.remaining_secs(now), Some(1));
+        assert_eq!(entry.remaining_secs(deadline), None);
     }
 }

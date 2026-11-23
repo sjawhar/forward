@@ -17,7 +17,7 @@ readonly root2_human_value='value-for-root2-human'
 readonly created_human_value='value-for-created-human'
 readonly piped_human_value='value-for-piped-human'
 readonly agent_value='value-for-agent-client'
-readonly grants_pattern=$'^KEY\tSCOPE\tAGE\nE2E_KEY\tsession\t[0-9]+s\nLOCAL_KEY\tsession\t[0-9]+s\nROOT2_KEY\tsession\t[0-9]+s$'
+readonly grants_pattern=$'^SECRET GRANT\tSCOPE\tEXPIRES\nE2E_KEY\tsession\t[0-9]+s\nLOCAL_KEY\tsession\t[0-9]+s\nROOT2_KEY\tsession\t[0-9]+s$'
 
 report() {
   printf 'e2e-client: %s\n' "$1"
@@ -102,6 +102,7 @@ readonly private_human_dir="$private_dir/secrets.human.d"
 readonly socket="$scratch/secretsd.sock"
 readonly token_file="$scratch/session.token"
 readonly harness_bin="$scratch/bin"
+readonly daemon_sops_env=(PATH="$harness_bin:$PATH" HOME="$scratch" SOPS_AGE_KEY_FILE="$age_key_file")
 readonly operator_dir="${scratch}.operator"
 readonly sops_log="$scratch/real-sops-invocations.log"
 readonly daemon_log="$scratch/daemon.log"
@@ -201,6 +202,17 @@ run_client_from() {
 
 if [[ "$after_register" == false ]]; then
   report '1/14 preparing scratch files and real-sops wrapper'
+  # The daemon (step 4) runs sops with daemon_sops_env, and $scratch is still
+  # empty here. The second probe differs from the first only in HOME: a sops
+  # that runs only with the caller's HOME (for example a mise shim) skips; one
+  # that runs with neither fails. A bare --version asks GitHub for the latest
+  # sops release.
+  if ! scratch_home_sops_output="$(env -i "${daemon_sops_env[@]}" "$real_sops" --disable-version-check --version 2>&1)"; then
+    if ! caller_home_sops_output="$(env -i "${daemon_sops_env[@]}" HOME="$HOME" "$real_sops" --disable-version-check --version 2>&1)"; then
+      fail "$real_sops runs with neither the scratch HOME nor the caller's HOME: $caller_home_sops_output"
+    fi
+    skip "$real_sops runs with the caller's HOME but not with the scratch HOME the daemon gets (for example a mise shim): $scratch_home_sops_output"
+  fi
   umask 077
   mkdir -p "$human_dir" "$private_human_dir" "$harness_bin" "$operator_dir"
   assert_no_sops_config_ancestor "$operator_dir"
@@ -260,14 +272,12 @@ EOF
   # the same root through SECRETSD_CONFIG.
   # Optional memlock is local-harness-only; production keeps the strict default.
   env -i \
-    PATH="$harness_bin:$PATH" \
-    HOME="$scratch" \
+    "${daemon_sops_env[@]}" \
     SECRETSD_MEMLOCK=optional \
     RUST_LOG=info \
     SECRETSD_SOCKET="$socket" \
     SECRETSD_CONFIG="$daemon_config" \
     SECRETSD_SOPS_BIN="$harness_bin/sops" \
-    SOPS_AGE_KEY_FILE="$age_key_file" \
     REAL_SOPS_BIN="$real_sops" \
     REAL_SOPS_LOG="$sops_log" \
     "$daemon" "$daemon_subcommand" > "$daemon_log" 2>&1 &

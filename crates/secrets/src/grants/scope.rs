@@ -1,4 +1,7 @@
+use std::fmt;
+
 use super::SessionToken;
+use crate::audit::sanitize_audit_value;
 
 /// What a grant belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,6 +44,27 @@ impl Scope {
             Self::Session(_) => ScopeKind::VerifiedSession,
             Self::Tty { .. } => ScopeKind::TokenlessTty,
             Self::Omp { .. } => ScopeKind::OmpProcess,
+        }
+    }
+
+    /// The scope as `secrets grants` writes it: `session`, `tty <tty>` or
+    /// `omp <pid>`. A session's token never appears. The tty comes from the
+    /// request, so it is written through `sanitize_audit_value`: each control
+    /// character escaped, and at most 256 bytes.
+    pub(crate) const fn label(&self) -> impl fmt::Display + '_ {
+        Label(self)
+    }
+}
+
+/// A scope written as `Scope::label` describes.
+struct Label<'scope>(&'scope Scope);
+
+impl fmt::Display for Label<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Scope::Session(_) => f.write_str("session"),
+            Scope::Tty { tty, .. } => write!(f, "tty {}", sanitize_audit_value(tty)),
+            Scope::Omp { pid, .. } => write!(f, "omp {pid}"),
         }
     }
 }

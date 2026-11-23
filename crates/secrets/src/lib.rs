@@ -22,6 +22,7 @@ pub mod grants;
 // needs the same core-dump suppression. Re-exported so the many
 // `crate::hardening::` call sites keep working.
 pub use hygiene::hardening;
+mod listing;
 pub mod peer;
 pub mod proto;
 /// Single-use capability authorization receipts.

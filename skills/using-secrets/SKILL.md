@@ -172,8 +172,10 @@ after a scrub: tell the key's owner.
 | `secrets get KEY --no-request` | status only; never prompts |
 | `secrets KEY [KEY2 ...] -- cmd` | runs `cmd` with the keys in its environment, after one stderr line naming each key's store |
 | `secrets list` | every key name with its tier and source; decrypts agent-tier files locally, never contacts the daemon or prompts; a key in both tiers is marked `ALSO agent tier` |
-| `secrets grants` | which human-tier keys are currently unlocked |
+| `secrets grants` | what a daemon restart would end: secret grants (which human-tier keys are unlocked, for which scope), requests that wait for a touch (with the id `secrets deny` takes), receipts not yet redeemed, and capability grants, each with its seconds to expiry; `no active grants` only when none of the four is live |
 | `secrets_request(KEY)` tool call | requests approval only; never returns the value |
+
+Two limits of `secrets grants`. A daemon older than this listing, one whose answer starts with `KEY\tSCOPE\tAGE`, lists only secret grants, so its `no active grants` does not show that a restart ends no request, receipt or capability grant. A `capability` row shows secretsd's own deadline for that grant; the browser grant that `forward browser grant` made can end before it.
 
 ## Which store answered
 

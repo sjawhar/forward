@@ -123,7 +123,7 @@ fn lock_revokes_everything() {
 }
 
 #[test]
-fn render_never_includes_secret_values() {
+fn live_view_never_includes_secret_values() {
     let mut table = GrantTable::default();
     let now = Instant::now();
     table.insert(
@@ -134,11 +134,10 @@ fn render_never_includes_secret_values() {
         origin("test"),
         Duration::from_hours(12),
     );
-    let rendered = table.render(now);
-    assert!(rendered.contains('K'));
-    assert!(
-        !rendered.contains("super-secret"),
-        "grant listing leaked a value"
+    assert_eq!(
+        listed(&table, now),
+        [("K".to_owned(), "session".to_owned(), 43_200)],
+        "a grant's listing is its key, scope and seconds left, never its value"
     );
 }
 #[test]

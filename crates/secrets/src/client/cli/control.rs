@@ -10,7 +10,11 @@ use std::path::PathBuf;
 use super::super::error::CliError;
 use super::super::{BrokerClient, BrokerResponse, ClientError};
 
-/// Print the broker's active grants and pending requests.
+/// Print the daemon's list of what a restart of secretsd would end: secret
+/// grants, requests that wait for a touch (each with its state and the id
+/// that `secrets deny` takes), receipts not yet redeemed, and capability
+/// grants, each with its time to expiry in whole seconds. The answer is
+/// `no active grants` only when none of the four is live.
 pub(super) fn grants() -> Result<(), CliError> {
     let BrokerResponse::Bytes(bytes) = broker_call("GRANTS")? else {
         return Err(CliError::from_client(
@@ -24,7 +28,7 @@ pub(super) fn grants() -> Result<(), CliError> {
         .map_err(CliError::Stdout)
 }
 
-/// Reject one pending request by id.
+/// Reject a waiting request by the id that `secrets grants` shows.
 pub(super) fn deny(raw_id: &OsString) -> Result<(), CliError> {
     let id = raw_id
         .to_str()
@@ -34,7 +38,9 @@ pub(super) fn deny(raw_id: &OsString) -> Result<(), CliError> {
     expect_ok(&format!("DENY\tid={id}"))
 }
 
-/// Wipe every grant and cached plaintext in the broker.
+/// End every grant of every session, tty and omp process, every receipt and
+/// every capability grant, and reject each request that has started a
+/// decrypt. A request that has not started a decrypt stays in the queue.
 pub(super) fn lock() -> Result<(), CliError> {
     expect_ok("LOCK")
 }

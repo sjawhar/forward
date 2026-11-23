@@ -18,6 +18,13 @@ pub(super) struct Grant {
     ttl: Duration,
 }
 
+impl Grant {
+    /// Whether this grant has not outlived its own recorded `ttl` at `now`.
+    fn is_live(&self, now: Instant) -> bool {
+        now.duration_since(self.created) < self.ttl
+    }
+}
+
 /// Live grants. Dropping a grant zeroizes its value.
 #[derive(Debug, Default)]
 pub struct GrantTable {
@@ -41,11 +48,7 @@ impl GrantTable {
     ) -> Option<(&SecretBytes, &str, &FileIdentity)> {
         self.grants
             .iter()
-            .find(|grant| {
-                grant.scope == *scope
-                    && grant.key == *key
-                    && now.duration_since(grant.created) < grant.ttl
-            })
+            .find(|grant| grant.scope == *scope && grant.key == *key && grant.is_live(now))
             .map(|grant| {
                 (
                     &grant.value,
@@ -114,8 +117,7 @@ impl GrantTable {
     /// how many were removed.
     pub fn revoke_expired(&mut self, now: Instant) -> usize {
         let before = self.grants.len();
-        self.grants
-            .retain(|grant| now.duration_since(grant.created) < grant.ttl);
+        self.grants.retain(|grant| grant.is_live(now));
         before.saturating_sub(self.grants.len())
     }
 
@@ -138,26 +140,22 @@ impl GrantTable {
         self.grants.is_empty()
     }
 
-    /// Human-readable listing. Never includes secret values.
-    pub fn render(&self, now: Instant) -> String {
-        if self.grants.is_empty() {
-            return "no active grants\n".to_owned();
-        }
-        let mut out = String::from("KEY\tSCOPE\tAGE\n");
-        for grant in &self.grants {
-            let scope = match &grant.scope {
-                Scope::Session(_) => "session".to_owned(),
-                Scope::Tty { tty, .. } => format!("tty {tty}"),
-                Scope::Omp { pid, .. } => format!("omp {pid}"),
-            };
-            let age = now.duration_since(grant.created).as_secs();
-            out.push_str(grant.key.as_str());
-            out.push('\t');
-            out.push_str(&scope);
-            out.push('\t');
-            out.push_str(&age.to_string());
-            out.push_str("s\n");
-        }
-        out
+    /// Each grant that has not outlived its own `ttl` (the rule of `lookup`),
+    /// in table order: its key, its scope and its whole seconds left. Never
+    /// its value.
+    pub(crate) fn live(&self, now: Instant) -> impl Iterator<Item = (&SecretName, &Scope, u64)> {
+        self.grants
+            .iter()
+            .filter(move |grant| grant.is_live(now))
+            .map(move |grant| {
+                (
+                    &grant.key,
+                    &grant.scope,
+                    grant
+                        .ttl
+                        .saturating_sub(now.duration_since(grant.created))
+                        .as_secs(),
+                )
+            })
     }
 }
