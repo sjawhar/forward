@@ -151,7 +151,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@stable
-      - uses: bnjbvr/cargo-machete@main
+      # cargo-machete 0.10.1 needs a newer rustc than rust-toolchain.toml pins,
+      # so it builds with stable; --locked keeps its dependencies at the
+      # versions it was released with.
+      - run: cargo +stable install cargo-machete --version 0.10.1 --locked
+      - run: cargo machete
 
   deny:
     runs-on: ubuntu-latest
