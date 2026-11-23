@@ -508,15 +508,47 @@ secrets edit-local [--source NAME]      edits an agent-tier local source file
 secrets edit-human KEY [--source NAME] [--local]
                                         edits a human-tier key file from a terminal;
                                         otherwise reads stdin and creates or rotates it
-secrets grants                          active grants + pending requests
-secrets deny [id]                       reject a pending request
-secrets lock                            wipe all plaintext, revoke all grants
+secrets grants                          lists what a restart would end: secret grants,
+                                        requests that wait for a touch, receipts not
+                                        yet redeemed, capability grants (see below)
+secrets deny ID                         rejects a waiting request by the id that
+                                        secrets grants shows
+secrets lock                            ends every grant of every session, tty and omp
+                                        process, every receipt and every capability
+                                        grant; rejects each request that has started
+                                        a decrypt, and leaves the others queued
 secrets approve [id]                    reserved for explicit-approve mode
 MCP: secrets_request(key)               grant flow trigger; no values returned
 ```
 
 Capabilities have no `secrets` subcommand; consumers such as `forward` speak
 `AUTHORIZE` and `REDEEM` directly to the broker.
+
+`secrets grants` answers with up to two tab-separated tables. The first, under
+`SECRET GRANT\tSCOPE\tEXPIRES`, has one row per live secret grant: the key, its
+scope (`session`, `tty <tty>` or `omp <pid>`) and its time to expiry in whole
+seconds, the three fields that `secrets get KEY --no-request` reads. The
+second, after one empty line when the first is there, under
+`KIND\tNAME\tSCOPE\tSTATE\tEXPIRES`, has one row per request that waits for a
+touch or is decrypting (with its state and the id that `secrets deny` takes),
+per receipt not yet redeemed, and per capability grant. When the second table
+would not fit in one 4096-byte reply, secretsd drops rows from its end and
+writes a last `more` row with the count dropped, or leaves the table out when
+not even its header and that row fit. The answer is `no active grants` only
+when none of the four kinds is live; a restart of secretsd then ends no grant,
+request, receipt or capability grant. It still drops the session
+registrations, which the answer does not list. Two limits:
+
+- A daemon older than this listing, one whose answer starts with
+  `KEY\tSCOPE\tAGE`, lists only secret grants, with their age in place of their
+  time to expiry. Its `no active grants` does not show that a restart ends no
+  request, receipt or capability grant.
+- A capability row shows secretsd's own deadline for that grant,
+  `SECRETSD_MAX_GRANT_SECS` after the redeem. Nothing tells secretsd when the
+  browser grant made by `forward browser grant` ends, and that grant can end
+  before the row does: at its own `--ttl`, or earlier when `forward serve` ends
+  it or restarts. So the row shows about the latest time the browser grant can
+  live, not the time it ends.
 
 ### Every answer names its store
 
@@ -571,8 +603,9 @@ resolved by precedence.
   blink and touch prompt.
 - Cross-session isolation: session B requesting a key granted to session A
   gets its own pending request, never A's value.
-- Revocation: end the session → `secrets grants` empty → next request
-  requires touch again. `secrets lock` same.
+- Revocation: end the session → its grants end, and `secrets grants` lists none
+  of them → the next request requires a touch again. `secrets lock` same, for
+  every session.
 - `secrets list` produces zero YubiKey interaction (strace-verifiable).
 - Store naming: `secrets get KEY` prints the file or socket that answers,
   `secrets KEY -- cmd` writes one stderr line naming each key's store and no

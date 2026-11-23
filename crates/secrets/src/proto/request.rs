@@ -69,14 +69,17 @@ pub enum Request {
         /// Capability this receipt must attest.
         cap: String,
     },
-    /// List active grants and pending requests.
+    /// List what a restart of secretsd would end: secret grants, requests that
+    /// wait for a touch, receipts not yet redeemed and capability grants. The
+    /// answer is `no active grants` only when none of the four is live.
     Grants,
     /// Reject a pending request.
     Deny {
         /// Pending request identifier.
         id: u64,
     },
-    /// Wipe all plaintext and revoke all grants.
+    /// Wipe all plaintext, end every grant, receipt and capability grant, and
+    /// reject each request that has started a decrypt.
     Lock,
     /// Hold this input-free connection open for `EPOCH <epoch>
     /// instance=<broker-instance>` authority events.

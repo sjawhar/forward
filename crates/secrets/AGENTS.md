@@ -66,6 +66,7 @@ filenames in configured `secrets.human.d/` directories are brokered.
 | `src/decrypt/classify.rs` | Reduces sops stderr to a stable label, error code, and retry eligibility. Pure functions over bytes; the child's output never reaches a log. |
 | `src/grants.rs` | Scopes, session registrations, grant table, revocation. |
 | `src/requests.rs` | Request state machine, single-flight YubiKey queue, cooldown, the minimum delay before a failed request retries, pending limits. |
+| `src/listing.rs` | The `GRANTS` answer: the secret-grant table, then requests, receipts and capability grants behind a `KIND` header, held to one frame; `no active grants` when none is live. |
 | `src/audit.rs` | Sanitizes values shared by audit-log surfaces. |
 | `src/server.rs` | Three connection lanes, per-connection `handle` (peer uid gate, pinning, dispatch), audit line. |
 | `src/server/listener.rs` | Creating or adopting the listening socket; proving its node is owner-only (`0600`); the peer uid gate that rests on that proof. |
@@ -226,3 +227,10 @@ turns that into a clear "update both" instead of a puzzling parse failure. That
 the two halves ship in one release is not a reason to skip the bump: the plugin
 is loaded when `opencode serve` starts, so it lags a daemon that has already
 restarted, and mixed peers therefore occur during a normal upgrade.
+
+The `GRANTS` payload is text in a shape each client reads:
+`get KEY --no-request` (`lists_grant`, `src/client/status.rs`) counts a line
+as a grant when it has exactly three tab-separated fields, the key, the scope
+and a third. A change to that text that keeps the shape, the three-field
+secret-grant rows, is not a reply-shape change; a change that breaks it is one,
+and bumps `PROTOCOL_VERSION`.

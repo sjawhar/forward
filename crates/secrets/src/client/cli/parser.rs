@@ -91,15 +91,25 @@ pub(super) enum CliCommand {
         #[arg(long)]
         local: bool,
     },
-    /// List the broker's live grants
+    /// List secret grants, waiting requests, unredeemed receipts and capability grants
+    ///
+    /// Lists what a restart of secretsd would end: secret grants, requests
+    /// that wait for a touch (each with its state and the id that
+    /// `secrets deny` takes), receipts not yet redeemed, and capability
+    /// grants, each with its time to expiry in whole seconds. Prints
+    /// `no active grants` only when none of the four is live.
     Grants,
-    /// Revoke a live grant by id (see `secrets grants`)
+    /// Reject a waiting request by the id that `secrets grants` shows
     Deny {
-        /// Grant id
+        /// Id of a waiting request, as `secrets grants` shows it
         #[arg(value_name = "ID")]
         id: OsString,
     },
-    /// Lock this session: revoke its live grants
+    /// End every grant, receipt and capability grant; reject requests that started a decrypt
+    ///
+    /// Ends every grant of every session, tty and omp process, every receipt
+    /// and every capability grant, and rejects each request that has started
+    /// a decrypt. A request that has not started a decrypt stays in the queue.
     Lock,
     /// Print shell completion definitions to stdout
     Completions {
