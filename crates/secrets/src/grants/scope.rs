@@ -43,4 +43,14 @@ impl Scope {
             Self::Omp { .. } => ScopeKind::OmpProcess,
         }
     }
+
+    /// The scope as `secrets grants` writes it: `session`, `tty <tty>` or
+    /// `omp <pid>`. A session's token never appears.
+    pub(crate) fn label(&self) -> String {
+        match self {
+            Self::Session(_) => "session".to_owned(),
+            Self::Tty { tty, .. } => format!("tty {tty}"),
+            Self::Omp { pid, .. } => format!("omp {pid}"),
+        }
+    }
 }

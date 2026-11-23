@@ -26,7 +26,6 @@ readonly -A grandfathered_limits=(
   [crates/secrets/src/config.rs]=288
   [crates/secrets/src/decrypt.rs]=323
   [crates/secrets/src/decrypt/tests.rs]=386
-  [crates/secrets/src/receipts.rs]=339
   [crates/secrets/src/secret.rs]=337
   [crates/secrets/src/server.rs]=918
   [crates/secrets/src/store.rs]=261

@@ -138,26 +138,19 @@ impl GrantTable {
         self.grants.is_empty()
     }
 
-    /// Human-readable listing. Never includes secret values.
-    pub fn render(&self, now: Instant) -> String {
-        if self.grants.is_empty() {
-            return "no active grants\n".to_owned();
-        }
-        let mut out = String::from("KEY\tSCOPE\tAGE\n");
-        for grant in &self.grants {
-            let scope = match &grant.scope {
-                Scope::Session(_) => "session".to_owned(),
-                Scope::Tty { tty, .. } => format!("tty {tty}"),
-                Scope::Omp { pid, .. } => format!("omp {pid}"),
-            };
-            let age = now.duration_since(grant.created).as_secs();
-            out.push_str(grant.key.as_str());
-            out.push('\t');
-            out.push_str(&scope);
-            out.push('\t');
-            out.push_str(&age.to_string());
-            out.push_str("s\n");
-        }
-        out
+    /// Each grant that has not outlived its own `ttl` (the rule of `lookup`),
+    /// in table order: its key, its scope and its whole seconds left. Never
+    /// its value.
+    pub(crate) fn live(&self, now: Instant) -> impl Iterator<Item = (&SecretName, &Scope, u64)> {
+        self.grants.iter().filter_map(move |grant| {
+            let age = now.duration_since(grant.created);
+            (age < grant.ttl).then(|| {
+                (
+                    &grant.key,
+                    &grant.scope,
+                    grant.ttl.saturating_sub(age).as_secs(),
+                )
+            })
+        })
     }
 }

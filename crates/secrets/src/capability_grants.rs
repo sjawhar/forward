@@ -5,7 +5,10 @@
 
 use std::time::Instant;
 
+use crate::capability::Capability;
+
 struct Entry {
+    cap: Capability,
     deadline: Instant,
 }
 
@@ -29,8 +32,8 @@ impl std::fmt::Debug for CapabilityGrantTable {
 
 impl CapabilityGrantTable {
     /// Record a redeemed capability until the broker's authoritative deadline.
-    pub(crate) fn insert(&mut self, deadline: Instant) -> usize {
-        self.entries.push(Entry { deadline });
+    pub(crate) fn insert(&mut self, cap: Capability, deadline: Instant) -> usize {
+        self.entries.push(Entry { cap, deadline });
         self.entries.len().saturating_sub(1)
     }
 
@@ -40,6 +43,20 @@ impl CapabilityGrantTable {
             .get(index)
             .filter(|entry| is_live(entry.deadline, now))
             .map(|entry| entry.deadline.saturating_duration_since(now).as_secs())
+    }
+
+    /// Each grant whose deadline is later than `now`, in table order: its
+    /// capability and its whole seconds left.
+    pub(crate) fn live(&self, now: Instant) -> impl Iterator<Item = (&Capability, u64)> {
+        self.entries
+            .iter()
+            .filter(move |entry| is_live(entry.deadline, now))
+            .map(move |entry| {
+                (
+                    &entry.cap,
+                    entry.deadline.saturating_duration_since(now).as_secs(),
+                )
+            })
     }
 
     /// Remove grants whose broker-owned deadline has passed.
@@ -68,14 +85,18 @@ mod tests {
 
     use super::*;
 
+    fn browser() -> Capability {
+        Capability::parse("browser").unwrap()
+    }
+
     #[test]
     #[cfg_attr(miri, ignore)]
     fn grants_expire_at_their_authoritative_deadlines() {
         let now = Instant::now();
         let mut grants = CapabilityGrantTable::default();
 
-        grants.insert(now + Duration::from_secs(1));
-        let second = grants.insert(now + Duration::from_secs(2));
+        grants.insert(browser(), now + Duration::from_secs(1));
+        let second = grants.insert(browser(), now + Duration::from_secs(2));
         assert_eq!(grants.remaining_secs(second, now), Some(2));
         grants.sweep(now + Duration::from_secs(1));
 
@@ -87,7 +108,7 @@ mod tests {
     fn clear_forgets_live_capability_grants() {
         let now = Instant::now();
         let mut grants = CapabilityGrantTable::default();
-        grants.insert(now + Duration::from_secs(1));
+        grants.insert(browser(), now + Duration::from_secs(1));
 
         grants.clear();
 

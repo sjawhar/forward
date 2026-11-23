@@ -127,13 +127,15 @@ pub(super) fn redeem(shared: &Shared, receipt_hex: &str, expected_cap: &str) -> 
     let outcome = redeemed.map_or(
         Outcome::Failed(ErrCode::Denied, "receipt is not redeemable"),
         |cap| {
-            let grant = state.capability_grants.insert(deadline);
+            // `redeem` matched the receipt's capability to `expected_cap`, so
+            // the table keeps the redeemed one and the reply names the same.
+            let grant = state.capability_grants.insert(cap, deadline);
             let Some(ttl) = state.capability_grants.remaining_secs(grant, now) else {
                 return Outcome::Failed(ErrCode::Internal, "capability grant record missing");
             };
             Outcome::Fields(format!(
                 "status=redeemed cap={} instance={} epoch={} ttl={ttl}",
-                cap.as_str(),
+                expected_cap.as_str(),
                 state.instance,
                 state.lock_epoch
             ))

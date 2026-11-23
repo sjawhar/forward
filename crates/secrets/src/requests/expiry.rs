@@ -72,6 +72,40 @@ impl Queue {
             .is_some_and(|deadline| now <= deadline)
     }
 
+    /// Requests that wait for a touch or are decrypting and have not passed
+    /// their deadline (the rule of `deadline_not_passed`), in id order: each
+    /// one's id, key, scope, state and whole seconds to its deadline. A retry
+    /// moves a request to the end of the queue, so queue order is not id order.
+    pub(crate) fn live(
+        &self,
+        now: Instant,
+    ) -> Vec<(RequestId, &SecretName, &Scope, RequestState, u64)> {
+        let mut live: Vec<_> = self
+            .requests
+            .iter()
+            .filter(|request| {
+                matches!(
+                    request.state,
+                    RequestState::Pending | RequestState::Decrypting
+                )
+            })
+            .filter_map(|request| {
+                let deadline = request.created.checked_add(self.limits.ttl)?;
+                (now <= deadline).then(|| {
+                    (
+                        request.id,
+                        &request.key,
+                        &request.scope,
+                        request.state,
+                        deadline.saturating_duration_since(now).as_secs(),
+                    )
+                })
+            })
+            .collect();
+        live.sort_unstable_by_key(|&(id, ..)| id);
+        live
+    }
+
     /// Expire requests that waited too long.
     pub fn sweep_timeouts(&mut self, now: Instant) -> Vec<RequestId> {
         let ttl = self.limits.ttl;

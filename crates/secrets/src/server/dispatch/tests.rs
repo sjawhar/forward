@@ -110,7 +110,7 @@ fn lock_between_authorization_and_mint_clears_capability_grants_and_refuses_the_
     };
     super::super::lock_state(&shared.0)
         .capability_grants
-        .insert(Instant::now() + Duration::from_secs(1));
+        .insert(cap.clone(), Instant::now() + Duration::from_secs(1));
     let epoch_before = super::super::lock_state(&shared.0).lock_epoch;
     let worker_shared = Arc::clone(&shared);
     let _worker = std::thread::spawn(move || super::super::worker(&worker_shared));
