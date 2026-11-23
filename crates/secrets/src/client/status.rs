@@ -44,7 +44,13 @@ pub(super) fn active_grant(name: &SecretName, grants: &[u8]) -> Result<bool, Cli
     } else {
         caller_tty().map_or(CallerScope::None, CallerScope::Tty)
     };
-    Ok(listing.lines().any(|line| {
+    Ok(lists_grant(listing, name, &caller_scope))
+}
+
+/// Whether a line of the `GRANTS` answer `listing` is a grant of `name` to
+/// `caller_scope`: three tab-separated fields, the key, the scope and a third.
+fn lists_grant(listing: &str, name: &SecretName, caller_scope: &CallerScope) -> bool {
+    listing.lines().any(|line| {
         let mut fields = line.split('\t');
         let (Some(key), Some(grant_scope), Some(_age), None) =
             (fields.next(), fields.next(), fields.next(), fields.next())
@@ -54,12 +60,12 @@ pub(super) fn active_grant(name: &SecretName, grants: &[u8]) -> Result<bool, Cli
         if key != name.as_str() {
             return false;
         }
-        match &caller_scope {
+        match caller_scope {
             CallerScope::Session => grant_scope == "session",
             CallerScope::Tty(tty) => grant_scope.strip_prefix("tty ") == Some(tty),
             CallerScope::None => false,
         }
-    }))
+    })
 }
 
 enum CallerScope {
@@ -67,3 +73,6 @@ enum CallerScope {
     Tty(String),
     None,
 }
+
+#[cfg(test)]
+mod tests;

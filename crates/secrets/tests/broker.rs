@@ -14,6 +14,8 @@ use secrets::proto::PROTOCOL_VERSION;
 mod capability;
 #[path = "broker/grants.rs"]
 mod grants;
+#[path = "broker/listing.rs"]
+mod listing;
 #[path = "broker/sources.rs"]
 mod sources;
 include!("broker/support.rs");
@@ -178,62 +180,6 @@ fn unregister_revokes_grants() {
 
     let (header, _) = harness.send(&format!("GET\tkey=DEEL_API_KEY\ttoken={}", token(TOKEN_A)));
     assert!(header.contains("UNKNOWN_TOKEN"), "{header}");
-    drop(harness);
-}
-
-#[test]
-fn replacing_a_session_registration_revokes_displaced_grants() {
-    let harness = Harness::start(&["DEEL_API_KEY"]);
-    harness.send(&format!(
-        "REGISTER\ttoken={}\tsession=ses_a\tpid=1",
-        token(TOKEN_A)
-    ));
-    harness.send(&format!("GET\tkey=DEEL_API_KEY\ttoken={}", token(TOKEN_A)));
-    harness.send(&format!(
-        "REGISTER\ttoken={}\tsession=ses_a\tpid=1",
-        token(TOKEN_B)
-    ));
-
-    let (header, payload) = harness.send("GRANTS");
-    assert!(header.starts_with("OK"), "{header}");
-    assert!(
-        String::from_utf8_lossy(&payload).contains("no active grants"),
-        "replaced token retained an unreachable plaintext grant"
-    );
-    drop(harness);
-}
-
-#[test]
-fn lock_wipes_all_grants() {
-    let harness = Harness::start(&["DEEL_API_KEY"]);
-    harness.send(&format!(
-        "REGISTER\ttoken={}\tsession=ses_a\tpid=1",
-        token(TOKEN_A)
-    ));
-    harness.send(&format!("GET\tkey=DEEL_API_KEY\ttoken={}", token(TOKEN_A)));
-    harness.send("LOCK");
-
-    let (header, payload) = harness.send("GRANTS");
-    assert!(header.starts_with("OK"), "{header}");
-    let text = String::from_utf8_lossy(&payload);
-    assert!(text.contains("no active grants"), "{text}");
-    drop(harness);
-}
-
-#[test]
-fn grants_listing_never_contains_values() {
-    let harness = Harness::start(&["DEEL_API_KEY"]);
-    harness.send(&format!(
-        "REGISTER\ttoken={}\tsession=ses_a\tpid=1",
-        token(TOKEN_A)
-    ));
-    harness.send(&format!("GET\tkey=DEEL_API_KEY\ttoken={}", token(TOKEN_A)));
-    let (_, payload) = harness.send("GRANTS");
-    let text = String::from_utf8_lossy(&payload);
-    assert!(
-        !text.contains("value-for-"),
-        "grant listing leaked a secret: {text}"
-    );
     drop(harness);
 }
 
