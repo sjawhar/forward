@@ -62,7 +62,7 @@ so a tool result can never carry a secret — two tests assert that.
 `using-secrets/SKILL.md` teaches agents the CLI. It exists because an agent read
 the JSON status from `secrets get KEY` as the secret itself and told the human
 their key was a 14-character placeholder. Its first section sends an agent session
-the Legion credential broker serves to `secret-run` instead of secretsd; the rest,
+the Legion credential broker serves to `agent-secrets` instead of secretsd; the rest,
 which describes secretsd, leads with that mistake.
 
 Its description triggers on the symptoms an agent is holding when it goes wrong

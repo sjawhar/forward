@@ -1,6 +1,6 @@
 ---
 name: using-secrets
-description: "Use BEFORE running any command that needs an API key, token, password, or credential, when storing, adding, or rotating one, and whenever a secret looks missing, wrong, truncated, or like a placeholder. This machine has no secrets in the environment — a Legion credential broker session gets keys from `secret-run`, any other from the `secrets` CLI, and `secrets get KEY` does NOT print the value. Triggers on: secrets get, secrets list, API key, API token, access token, credential, OPENAI_API_KEY, ANTHROPIC_API_KEY, AIRTABLE_TOKEN, SLACK_MCP_XOXP_TOKEN, GROQ_API_KEY, DEEL_API_KEY, sk-, xoxp-, export KEY=, env var for a command, 'key is a placeholder', 'key looks wrong', 'invalid api key', 401, 403, authentication failed, sops, YubiKey touch, secretsd, secrets_request, SecretsRequest, grant expired, key blinking, TIMEOUT, TOO_MANY_PENDING, store a secret, add a key, add a secret, save a token, rotate a credential, rotate a key, secrets edit-human, secrets edit, secrets edit-local, secrets sources, sops set."
+description: "Use BEFORE running any command that needs an API key, token, password, or credential, when storing, adding, or rotating one, and whenever a secret looks missing, wrong, truncated, or like a placeholder. This machine has no secrets in the environment — a Legion credential broker session gets keys from `agent-secrets`, any other from the `secrets` CLI, and `secrets get KEY` does NOT print the value. Triggers on: secrets get, secrets list, API key, API token, access token, credential, OPENAI_API_KEY, ANTHROPIC_API_KEY, AIRTABLE_TOKEN, SLACK_MCP_XOXP_TOKEN, GROQ_API_KEY, DEEL_API_KEY, sk-, xoxp-, export KEY=, env var for a command, 'key is a placeholder', 'key looks wrong', 'invalid api key', 401, 403, authentication failed, sops, YubiKey touch, secretsd, secrets_request, SecretsRequest, grant expired, key blinking, TIMEOUT, TOO_MANY_PENDING, store a secret, add a key, add a secret, save a token, rotate a credential, rotate a key, secrets edit-human, secrets edit, secrets edit-local, secrets sources, sops set."
 ---
 
 # Using `secrets` and the `secrets_request` tool
@@ -11,26 +11,37 @@ A credential a service or app uses is a resource declared in infrastructure code
 
 ## In an agent session the Legion credential broker serves
 
-When `agent-secrets identity` exits 0, this session gets its keys from the Legion credential
-broker, not from secretsd. Run a command that needs a key through `secret-run`:
+When `agent-secrets identity --source` exits 0, this process gets its keys from the Legion
+credential broker, not from secretsd. It prints the identity a request would use: a launcher's
+key, a person's sign-in, the session's helper or the machine, and none of them needs a
+registered session. Run a command that needs a key through the broker's client, `agent-secrets`:
 
 ```bash
-secret-run [--reason R] [--wait D] [--ttl D] KEY... -- cmd [args...]
+agent-secrets KEY... --reason R [--wait D] [--ttl D] -- cmd [args...]
 ```
 
-`secret-run` asks the credential broker and runs `cmd` with each granted key in its
-environment. A human-tier key then waits up to `--wait` (default 30m) for the human to approve
-it in Dispatch, not for a YubiKey touch; the waiting message says who approves it and where.
-`--ttl` ends the grant after that long, instead of when the session ends. `D` is a Go
-duration, such as `30s` or `5m`. In such a session `secret-run` never falls back to secretsd.
-In any other session or shell, it runs `secrets KEY... -- cmd` and drops `--reason`, `--wait`
-and `--ttl`.
+`agent-secrets` asks the credential broker and runs `cmd` with each granted key in its
+environment; nothing runs unless every key is granted. A human-tier key then waits up to
+`--wait` (default 30m) for the human to approve it in Dispatch, not for a YubiKey touch; the
+waiting message says who approves it and where. Always give `--reason`: the approval card
+shows it to the person who decides, and the broker denies a human-tier request without one
+(exit 77, `a reason is necessary; ask again with --reason`). Say what the command does and
+why, act first, in at most 400 characters, the longest reason the broker takes. The client
+sends this session's id itself, and the broker logs the command's first 32 arguments when it
+releases a key. The grant lasts `--ttl`, or else 15 minutes when any key is human tier and
+12 hours otherwise, or until this session ends when every key is tagged `default-grant=session`.
+`D` is a Go duration, such as `30s` or `5m`. `agent-secrets` never falls back to secretsd.
+When `agent-secrets identity --source` exits 1, it says why: either no source has an identity,
+and it names each source and why it has none, or one source is broken, such as a key directory
+whose `key.pem` is not a PEM file, and it names that source and its error. Fix the source it
+names; until then the broker serves this process nothing, and only a key secretsd also holds
+works, through `secrets KEY... -- cmd` (below).
 
 The credential broker's key names can differ from secretsd's for the same token, so ask the
 broker for its own name: `agent-secrets secret list` shows the keys it holds.
 
 In an omp agent session, `secrets_request` refuses every human-tier key without blinking the
-YubiKey, and its answer names the `secret-run` command to use instead, or, in a session the
+YubiKey, and its answer names the `agent-secrets` command to use instead, or, in a session the
 broker does not serve, the `omp --resume` line that relaunches it as one.
 
 The rest of this skill describes secretsd, and there "the broker" and "the daemon" mean
@@ -266,7 +277,7 @@ not state: several codes cover more than one fault.
 | `neither a terminal tty nor a session token` | ask the human to run it, or run inside the agent session |
 | `outside that session's process tree` | run the request from this session. If it *is* this session, its registration is stale: restart the session, do not retry |
 | `secretsd failed while decrypting` | read `journalctl --user -u secretsd` for the daemon's *classification* (`sops_failure=…`). sops' own output is never logged, since it can quote what it decrypted |
-| `secret 'X' not found` | the key may live in the Legion credential broker alone, which a process outside a registered omp session's tree (a detached tmux, a systemd unit) cannot reach; `secret-run` there says `no secrets-broker identity`. Rerun it from the session's own shell. If that notice repeats, the session itself has no identity: check its registration, the agent-secrets helper and the machine login. Still not found: ask the human to add it; never invent a value |
+| `secret 'X' not found` | the key may live in the Legion credential broker alone: run the command through `agent-secrets X --reason R -- cmd` (first section). Where that says `no broker identity for this process`, it names each identity source it tried and why each had none, as `agent-secrets identity --source` does: fix the one this process should have (the session's registration, the agent-secrets helper, a person's `agent-secrets login`, or the machine login). Still not found: ask the human to add it; never invent a value |
 | `the broker restarted` | run the command **once** more; the plugin re-registers between commands, so expect a touch. Twice: tell the human |
 | `YUBIKEY_UNREACHABLE` | the broker retried the unreachable-key failure until the request time to live ended. Check the YubiKey connection before requesting again |
 | `TIMEOUT` | no attempt received a touch during the full request time to live. Tell the human, then request **once** more at most. If they say they touched it, read the journal before that request |

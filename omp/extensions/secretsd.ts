@@ -261,8 +261,9 @@ export type KeyStatus = { tier: string } | { error: string };
 /// human-tier requests still went to secretsd, and each one timed out
 /// (`sops_failure="yubikey-stanza-undecryptable"`, then `decision="TIMEOUT"`).
 /// The Legion credential broker sends an approval card to the human's Dispatch
-/// inbox and grants for the session, so the refusal names its `secret-run`
-/// command, or, for a session the broker does not serve, how to relaunch it.
+/// inbox and grants the key to the session that asked, so the refusal names its
+/// `agent-secrets` command, or, for a process with no broker identity
+/// (`agent-secrets identity --source` exits 1), how to relaunch the session.
 /// Tests replace both members.
 export type HumanTierGate = {
 	status(key: string): Promise<KeyStatus>;
@@ -295,8 +296,12 @@ export const defaultHumanTierGate: HumanTierGate = {
 		}
 	},
 	async brokerIdentity() {
+		// `--source` exits 0 for every identity a request can use (a launcher's
+		// key, a person's sign-in, the session's helper, the machine); bare
+		// `identity` answers only the first and third, and calls a signed-in
+		// process that the broker serves unserved.
 		try {
-			return (await run(["agent-secrets", "identity"])).code === 0;
+			return (await run(["agent-secrets", "identity", "--source"])).code === 0;
 		} catch {
 			return false;
 		}
@@ -324,11 +329,11 @@ export function brokerRoute(key: string, sessionID: string, registered: boolean)
 	}
 	if (registered) {
 		lines.push(
-			`Ask the broker; an approval card reaches Sami in Dispatch and the grant lasts the session:\n    secret-run --reason "<what for>" ${name} -- <command>`,
+			`Ask the broker; an approval card reaches Sami in Dispatch, and a human-tier grant lasts 15 minutes, as long as --ttl says, or the session for a key tagged default-grant=session:\n    agent-secrets ${name} --reason "<what for>" -- <command>`,
 		);
 	} else {
 		lines.push(
-			`This session has no broker identity: it was not launched through ~/.dotfiles/shims/omp. Relaunch it from a shell whose PATH starts with ~/.dotfiles/shims:\n    omp --resume ${sessionID}\nthen ask the broker:\n    secret-run --reason "<what for>" ${name} -- <command>`,
+			`This session has no usable broker identity: \`agent-secrets identity --source\` exits 1 and says why. If it names a broken source (a key.pem that is not a PEM file, for one), fix that source. If no source has an identity, the session was not launched through ~/.dotfiles/shims/omp, which registers it with the helper; relaunch it from a shell whose PATH starts with ~/.dotfiles/shims:\n    omp --resume ${sessionID}\nthen ask the broker:\n    agent-secrets ${name} --reason "<what for>" -- <command>`,
 		);
 	}
 	return lines.join("\n");
@@ -503,7 +508,7 @@ export default function secretsdOmpExtension(pi: ExtensionAPI) {
 		name: "secrets_request",
 		label: "Secrets Request",
 		description:
-			"Ask secretsd about a key; never returns secret values. A human-tier key is refused without blinking the YubiKey, and the answer names the Legion credential broker command (`secret-run`) to use instead. An agent-tier key needs no approval: run commands with `secrets <KEY> -- <command>`.",
+			"Ask secretsd about a key; never returns secret values. A human-tier key is refused without blinking the YubiKey, and the answer names the Legion credential broker command (`agent-secrets`) to use instead. An agent-tier key needs no approval: run commands with `secrets <KEY> -- <command>`.",
 		parameters: z.object({
 			key: z
 				.string()
