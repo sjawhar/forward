@@ -30,9 +30,12 @@ why, act first, in at most 400 characters, the longest reason the broker takes. 
 sends this session's id itself, and the broker logs the command's first 32 arguments when it
 releases a key. The grant lasts `--ttl`, or else 15 minutes when any key is human tier and
 12 hours otherwise, or until this session ends when every key is tagged `default-grant=session`.
-`D` is a Go duration, such as `30s` or `5m`. `agent-secrets` never falls back to secretsd:
-where `agent-secrets identity --source` exits 1, it names each identity source and why it has
-none, and there you run `secrets KEY... -- cmd` (below).
+`D` is a Go duration, such as `30s` or `5m`. `agent-secrets` never falls back to secretsd.
+When `agent-secrets identity --source` exits 1, it says why: either no source has an identity,
+and it names each source and why it has none, or one source is broken, such as a key directory
+whose `key.pem` is not a PEM file, and it names that source and its error. Fix the source it
+names; until then the broker serves this process nothing, and only a key secretsd also holds
+works, through `secrets KEY... -- cmd` (below).
 
 The credential broker's key names can differ from secretsd's for the same token, so ask the
 broker for its own name: `agent-secrets secret list` shows the keys it holds.

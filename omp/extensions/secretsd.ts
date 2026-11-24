@@ -333,7 +333,7 @@ export function brokerRoute(key: string, sessionID: string, registered: boolean)
 		);
 	} else {
 		lines.push(
-			`This session has no broker identity (\`agent-secrets identity --source\` says why each source has none): it was not launched through ~/.dotfiles/shims/omp. Relaunch it from a shell whose PATH starts with ~/.dotfiles/shims:\n    omp --resume ${sessionID}\nthen ask the broker:\n    agent-secrets ${name} --reason "<what for>" -- <command>`,
+			`This session has no usable broker identity: \`agent-secrets identity --source\` exits 1 and says why. If it names a broken source (a key.pem that is not a PEM file, for one), fix that source. If no source has an identity, the session was not launched through ~/.dotfiles/shims/omp, which registers it with the helper; relaunch it from a shell whose PATH starts with ~/.dotfiles/shims:\n    omp --resume ${sessionID}\nthen ask the broker:\n    agent-secrets ${name} --reason "<what for>" -- <command>`,
 		);
 	}
 	return lines.join("\n");
