@@ -22,9 +22,11 @@ secret-run [--reason R] [--wait D] [--ttl D] KEY... -- cmd [args...]
 environment. A human-tier key then waits up to `--wait` (default 30m) for the human to approve
 it in Dispatch, not for a YubiKey touch; the waiting message says who approves it and where.
 `--ttl` ends the grant after that long, instead of when the session ends. `D` is a Go
-duration, such as `30s` or `5m`. In such a session `secret-run` never falls back to secretsd.
-In any other session or shell, it runs `secrets KEY... -- cmd` and drops `--reason`, `--wait`
-and `--ttl`.
+duration, such as `30s` or `5m`. A grant of a person's login covers the action its card named,
+not its duration: request one named action with a `--ttl` just long enough for that action, and
+request a new card for any other action. In such a session `secret-run` never falls back to
+secretsd. In any other session or shell, it runs `secrets KEY... -- cmd` and drops `--reason`,
+`--wait` and `--ttl`.
 
 The credential broker's key names can differ from secretsd's for the same token, so ask the
 broker for its own name: `agent-secrets secret list` shows the keys it holds.
