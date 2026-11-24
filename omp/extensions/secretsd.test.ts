@@ -692,7 +692,7 @@ test("a key whose tier cannot be read is not requested, and the answer still nam
 	expect(text(result)).toContain('agent-secrets NOPE --reason "<what for>" -- <command>');
 });
 
-test("the default gate reads `secrets get --no-request` and `agent-secrets identity` from PATH", async () => {
+test("the default gate reads `secrets get --no-request` and `agent-secrets identity --source` from PATH", async () => {
 	const bin = root();
 	const write = (name: string, body: string) => {
 		const path = join(bin, name);
@@ -711,7 +711,7 @@ test("the default gate reads `secrets get --no-request` and `agent-secrets ident
 			"esac",
 		].join("\n"),
 	);
-	write("agent-secrets", '[ "$1" = identity ] && exit "${IDENTITY_EXIT:-0}"; exit 2');
+	write("agent-secrets", '[ "$1 $2 $#" = "identity --source 2" ] && exit "${IDENTITY_EXIT:-0}"; exit 2');
 	const originalPath = process.env.PATH;
 	process.env.PATH = `${bin}:/usr/bin:/bin`;
 	try {

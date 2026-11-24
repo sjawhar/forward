@@ -11,9 +11,10 @@ A credential a service or app uses is a resource declared in infrastructure code
 
 ## In an agent session the Legion credential broker serves
 
-When `agent-secrets identity` exits 0, this session gets its keys from the Legion credential
-broker, not from secretsd. Run a command that needs a key through the broker's client,
-`agent-secrets`:
+When `agent-secrets identity --source` exits 0, this process gets its keys from the Legion
+credential broker, not from secretsd. It prints the identity a request would use: a launcher's
+key, a person's sign-in, the session's helper or the machine, and none of them needs a
+registered session. Run a command that needs a key through the broker's client, `agent-secrets`:
 
 ```bash
 agent-secrets KEY... --reason R [--wait D] [--ttl D] -- cmd [args...]
@@ -28,8 +29,10 @@ shows it to the person who decides, and the broker denies a human-tier request w
 why, act first, in at most 400 characters, the longest reason the broker takes. The client
 sends this session's id itself, and the broker logs the command's first 32 arguments when it
 releases a key. The grant lasts `--ttl`, or else 15 minutes when any key is human tier and
-12 hours otherwise. `D` is a Go duration, such as `30s` or `5m`. `agent-secrets` never falls
-back to secretsd: in any other session or shell, run `secrets KEY... -- cmd` (below).
+12 hours otherwise, or until this session ends when every key is tagged `default-grant=session`.
+`D` is a Go duration, such as `30s` or `5m`. `agent-secrets` never falls back to secretsd:
+where `agent-secrets identity --source` exits 1, it names each identity source and why it has
+none, and there you run `secrets KEY... -- cmd` (below).
 
 The credential broker's key names can differ from secretsd's for the same token, so ask the
 broker for its own name: `agent-secrets secret list` shows the keys it holds.
