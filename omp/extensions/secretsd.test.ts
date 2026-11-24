@@ -611,7 +611,7 @@ test("a human-tier key is refused with the broker command and never reaches the 
 	expect(requests).toEqual([]);
 	expect(result.isError).toBe(true);
 	expect(result.details).toEqual({ key: "DEEL_API_KEY", outcome: "broker-only" });
-	expect(text(result)).toContain('secret-run --reason "<what for>" DEEL_API_KEY -- <command>');
+	expect(text(result)).toContain('agent-secrets DEEL_API_KEY --reason "<what for>" -- <command>');
 	expect(text(result)).toContain("dispatch://INFRA-223/ask/d2bfc2df-9399-42a9-90b8-35b9f5a46d66");
 	expect(text(result)).not.toContain("omp --resume");
 });
@@ -623,13 +623,13 @@ test("a session the broker does not serve is told the exact relaunch line", asyn
 
 	expect(requests).toEqual([]);
 	expect(text(result)).toContain("omp --resume root-session\n");
-	expect(text(result)).toContain('secret-run --reason "<what for>" DEEL_API_KEY -- <command>');
+	expect(text(result)).toContain('agent-secrets DEEL_API_KEY --reason "<what for>" -- <command>');
 });
 
 test("a secretsd name the broker holds under another name is sent to the broker's name", () => {
 	const guidance = brokerOnlyGuidance("GITHUB_ADMIN_PAT_THEOREM", "root-session", true);
 
-	expect(guidance).toContain('secret-run --reason "<what for>" GITHUB_ADMIN_PAT -- <command>');
+	expect(guidance).toContain('agent-secrets GITHUB_ADMIN_PAT --reason "<what for>" -- <command>');
 	expect(guidance).toContain("The broker holds this same token under the name GITHUB_ADMIN_PAT");
 	expect(guidance).not.toContain("not confirmed");
 });
@@ -689,7 +689,7 @@ test("a key whose tier cannot be read is not requested, and the answer still nam
 	expect(requests).toEqual([]);
 	expect(result.isError).toBe(true);
 	expect(text(result)).toContain("secret 'NOPE' not found");
-	expect(text(result)).toContain('secret-run --reason "<what for>" NOPE -- <command>');
+	expect(text(result)).toContain('agent-secrets NOPE --reason "<what for>" -- <command>');
 });
 
 test("the default gate reads `secrets get --no-request` and `agent-secrets identity` from PATH", async () => {
